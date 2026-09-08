@@ -1,12 +1,15 @@
 # MOC / close-algo TCA
 
-H1 review of every close algo traded. **Tables and charts, no deck** — the
-narrative comes out of the numbers, not the other way round.
+Close-algo review covering orders **to 4 September 2026**. **Tables and charts,
+no deck** — the narrative comes out of the numbers, not the other way round.
 
-**The whole period ran on the previous trading platform.** This client has not
-migrated yet, so H1 is a single regime end to end — no cutover inside the
-window, nothing to split, no date filter needed. `DATE_FROM` / `DATE_TO` stay
-`None`.
+**The trading platform did not change inside the window.** This client has not
+migrated, so there is no platform cutover to split on and no date filter is
+needed — `DATE_FROM` / `DATE_TO` stay `None`.
+
+**One market did change inside the window.** India's Closing Auction Session
+went live on 3 August 2026, so India carries three regimes and is never pooled.
+See the India note under Conventions.
 
 Two consequences:
 
@@ -146,16 +149,25 @@ for getting tagging into the extract.
   a normal-theory interval would be too narrow. Under n=8 there is no CI and the
   row is flagged small-sample. **A CI crossing zero means not distinguishable
   from zero**, and the findings block says so per line.
-- **India is never pooled with the rest, and it is split by date.** It closed
-  on a VWAP of the last half hour until the Closing Auction Session went live
-  on **3 August 2026** — a 20-minute call auction, 15:15 to 15:35, referenced
-  to the 15:00–15:15 VWAP, and only for stocks in the derivatives segment. So
-  India is two products inside one calendar year. Before that date there is no
-  auction to reach, auction share means nothing, and `vs Close` is a genuine
-  tracking result rather than a degenerate one — you cannot print at a VWAP,
-  you have to work the last half hour to track it. From that date India joins
-  the auction population, flagged small-sample and derivatives-only. A period
-  ending before 3 August is unaffected.
+- **India is never pooled, and it carries three regimes.** It closed on a VWAP
+  of the last half hour until the Closing Auction Session went live on
+  **3 August 2026** — a 20-minute call auction, 15:15 to 15:35, referenced to
+  the 15:00–15:15 VWAP, and **only for stocks in the derivatives segment**.
+
+  Before that date there is no auction to reach: auction share means nothing,
+  and `vs Close` is a genuine tracking result rather than a degenerate one —
+  you cannot print at a VWAP, you have to work the last half hour to track it.
+
+  After it, the extract carries no segment flag, so an F&O name and an ordinary
+  one cannot be told apart. It cannot be inferred from `%CLOSE` either: an F&O
+  name whose order *missed* the auction looks exactly like a name that never
+  had one, and inferring would drop India's misses out of the auction
+  population — the very orders the review exists to find. So post-CAS India is
+  its own regime, pooled with neither side and asserted about nothing, and it
+  appears in `32_close_regimes`.
+
+  To close this properly: get the F&O eligibility list, drop `India` from
+  `AUCTION_SEGMENT_UNKNOWN`, and filter on the symbol.
 - Market close times are in HKT. Hong Kong, Japan and Australia are verified
   against the desk's own session windows; the rest are derived from published
   exchange hours and are **flagged UNVERIFIED wherever they affect a number**.

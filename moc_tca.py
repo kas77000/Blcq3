@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ===========================================================================
 
 CLIENT_NAME = "Client"          # kept neutral; no firm or client branding in output
-PERIOD_LABEL = "H1"
+PERIOD_LABEL = "Jan to 4 Sep 2026"
 CURRENCY = "USD"
 
 # Which Strategy values are close algos.
@@ -242,6 +242,24 @@ NO_CLOSING_AUCTION = {"India"}
 # the VWAP-close side and nothing changes.
 AUCTION_FROM = {"India": "2026-08-03"}
 
+# ...but the CAS covers the DERIVATIVES SEGMENT ONLY, and the extract carries no
+# segment flag. A non-F&O India name still closes on the half-hour VWAP after
+# that date, and nothing in the data says which name is which.
+#
+# It cannot be inferred from %CLOSE either: an F&O name whose order MISSED the
+# auction looks exactly like a name that never had one, so inferring would drop
+# India's misses out of the auction population - the very orders the review
+# exists to find. So post-CAS India is its own regime, pooled with neither side
+# and asserted about nothing.
+#
+# To close this: get the F&O eligibility list from the desk, drop "India" from
+# AUCTION_SEGMENT_UNKNOWN, and filter on the symbol.
+AUCTION_SEGMENT_UNKNOWN = {"India"}
+
+REGIME_AUCTION = "single-price auction"
+REGIME_VWAP_CLOSE = "VWAP close (no auction)"
+REGIME_UNKNOWN = "post-CAS India - segment unknown"
+
 # Australia observes daylight saving and Hong Kong does not, so the ASX session
 # moves an hour against an HKT clock twice a year. AEDT runs from the first
 # Sunday in October to the first Sunday in April.
@@ -377,18 +395,27 @@ def _parse_time(s: pd.Series) -> pd.Series:
     return mins
 
 
-def auction_available(market: pd.Series, date=None) -> pd.Series:
-    """True where a single-price closing auction existed on that date.
+def close_regime(market: pd.Series, date=None) -> pd.Series:
+    """Which closing mechanism each order actually met.
 
     Market alone is not enough: a market can gain an auction part-way through
     the period, and orders either side of that date are different products.
+    Where the new auction covers only part of the market and the data does not
+    say which part, the orders get their own regime rather than a guess.
     """
-    has = ~market.isin(NO_CLOSING_AUCTION)
-    if date is None:
-        return has
-    for name, start in AUCTION_FROM.items():
-        has = has | (market.eq(name) & (date >= pd.Timestamp(start)))
-    return has
+    reg = pd.Series(REGIME_AUCTION, index=market.index, dtype=object)
+    reg[market.isin(NO_CLOSING_AUCTION)] = REGIME_VWAP_CLOSE
+    if date is not None:
+        for name, start in AUCTION_FROM.items():
+            after = market.eq(name) & (date >= pd.Timestamp(start))
+            reg[after] = (REGIME_UNKNOWN if name in AUCTION_SEGMENT_UNKNOWN
+                          else REGIME_AUCTION)
+    return reg
+
+
+def auction_available(market: pd.Series, date=None) -> pd.Series:
+    """True only where a single-price auction is CERTAIN for that order."""
+    return close_regime(market, date).eq(REGIME_AUCTION)
 
 
 def market_from_symbol(sym: pd.Series) -> pd.Series:
@@ -478,9 +505,8 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["side_label"] = np.where(df["is_buy"], "Buy", "Sell")
 
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
-    df["has_auction"] = auction_available(df["market"], df.get("date"))
-    df["close_regime"] = np.where(df["has_auction"],
-                                  "single-price auction", "VWAP close")
+    df["close_regime"] = close_regime(df["market"], df.get("date"))
+    df["has_auction"] = df["close_regime"].eq(REGIME_AUCTION)
 
     if "cap" in df:
         df["cap"] = _title_norm(df["cap"], CAP_ORDER)
@@ -903,10 +929,11 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
         note = ""
         if mkt in NO_CLOSING_AUCTION:
             g = df[df["market"] == mkt]
-            n_auc = int(g["has_auction"].sum())
-            if n_auc and mkt in AUCTION_FROM:
-                note = (f"  <- {len(g) - n_auc:,} on a VWAP close, {n_auc:,} on "
-                        f"the auction from {AUCTION_FROM[mkt]}; never pooled")
+            n_unk = int(g["close_regime"].eq(REGIME_UNKNOWN).sum())
+            if n_unk:
+                note = (f"  <- {len(g) - n_unk:,} on a VWAP close, {n_unk:,} from "
+                        f"{AUCTION_FROM[mkt]} where only F&O names got the "
+                        f"auction; three regimes, never pooled")
             else:
                 note = "  <- NO single-price closing auction; reported separately"
         elif mkt == UNKNOWN_MARKET:
@@ -2108,6 +2135,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["30_monthly"] = t_monthly(df)
     if not noauc.empty:
         t["31_no_auction_markets"] = t_venue_mix(noauc, "market")
+        t["32_close_regimes"] = t_venue_mix(all_df, "close_regime")
     t["_close_df"] = df
     t["_auction_df"] = auc
     return t
@@ -2441,9 +2469,13 @@ def self_test() -> int:
     mkt = pd.Series(["India", "India", "Hong Kong", "India"])
     dts = pd.to_datetime([cas - pd.Timedelta(days=1), cas,
                           cas - pd.Timedelta(days=1), cas + pd.Timedelta(days=90)])
-    got = auction_available(mkt, pd.Series(dts)).tolist()
-    check("India gains an auction on the CAS date and not before",
-          got == [False, True, True, True], got)
+    got = close_regime(mkt, pd.Series(dts)).tolist()
+    check("India post-CAS is its own regime, not the auction population",
+          got == [REGIME_VWAP_CLOSE, REGIME_UNKNOWN,
+                  REGIME_AUCTION, REGIME_UNKNOWN], got)
+    check("nothing uncertain is counted as an auction",
+          auction_available(mkt, pd.Series(dts)).tolist()
+          == [False, False, True, False])
     check("an auction-only order is cohorted as such",
           assign_cohort(pd.DataFrame({
               "fill_rate": [100.0], "pct_close": [100.0], "adv_pct": [0.5],
