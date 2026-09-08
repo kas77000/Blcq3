@@ -2574,8 +2574,16 @@ def t_algo_choice(df: pd.DataFrame, benchmark: str = "slip_arrival") -> pd.DataF
         for strat, sub_g in g.groupby("strategy", dropna=False, observed=True):
             n = int(sub_g[benchmark].notna().sum())
             if n >= ALGO_COMPARE_MIN_N:
+                # Against arrival AND against each order's own window. The
+                # pair is what makes the row readable: arrival carries the
+                # drift the order sat through, PVWAP does not. A big arrival
+                # gap that vanishes on PVWAP is not one algo executing better
+                # than the other - it is the orders having faced different
+                # markets, which is a routing question, not a quality one.
+                own = wmean(sub_g["slip_pvwap"], sub_g["notional"])                     if "slip_pvwap" in sub_g else np.nan
                 per[str(strat)] = (n, sub_g["notional"].sum() / 1e6,
-                                   wmean(sub_g[benchmark], sub_g["notional"]))
+                                   wmean(sub_g[benchmark], sub_g["notional"]),
+                                   own)
         if len(per) < 2:
             continue
         best = max(per, key=lambda k: per[k][2])
@@ -2586,8 +2594,17 @@ def t_algo_choice(df: pd.DataFrame, benchmark: str = "slip_arrival") -> pd.DataF
             row[f"{strat} orders"] = per[strat][0]
             row[f"{strat} notional ({CURRENCY}m)"] = per[strat][1]
             row[f"{strat} bps"] = per[strat][2]
+            row[f"{strat} vs PVWAP bps"] = per[strat][3]
         row["better here"] = best
         row["gap bps"] = gap
+        own_gap = per[best][3] - per[worst][3]
+        row["gap vs PVWAP bps"] = own_gap
+        # How much of the arrival gap survives once each order is measured
+        # against its own window. Near zero means the gap was the market
+        # moving, not the algo working.
+        row["gap that is execution %"] = (
+            100.0 * own_gap / gap if gap and np.isfinite(gap) and abs(gap) > 1e-9
+            and np.isfinite(own_gap) else np.nan)
         # What the gap was worth on the flow that did NOT take the better
         # side. Not a saving that was available - see the docstring.
         row["gap on the other side (" + CURRENCY + "k)"] = to_money_k(
@@ -2817,9 +2834,19 @@ def findings(t: dict) -> None:
         log("")
         log("  Same market, same size band - which algo did better:")
         for _, r in choice.head(6).iterrows():
+            exec_pct = r.get("gap that is execution %", np.nan)
+            exec_txt = (f"   {exec_pct:>5.0f}% of it survives on PVWAP"
+                        if pd.notna(exec_pct) else "")
             log(f"    {str(r['market']):<14}{str(r['%Adv bucket']):<8}"
                 f"{r['better here']:<7} by {r['gap bps']:>6.1f} bps"
-                f"   {CURRENCY} {r[col]:>9,.0f}k on the other side")
+                f"   {CURRENCY} {r[col]:>9,.0f}k on the other side{exec_txt}")
+        log("    The last column is the test that matters. Against arrival an")
+        log("    order carries every basis point the market moved while it")
+        log("    worked; against PVWAP it does not. A gap that survives on")
+        log("    PVWAP is the algos working differently. A gap that collapses")
+        log("    is the two sets of orders having faced different markets -")
+        log("    a routing question, not a quality one.")
+        log("")
         log("    This is NOT a controlled comparison. Orders are not assigned to")
         log("    a strategy at random, and the reason one was chosen - urgency,")
         log("    a view, an instruction not in this file - drives cost as well.")

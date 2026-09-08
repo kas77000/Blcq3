@@ -323,6 +323,16 @@ Colour on that chart is the **algo**, not the direction, so it deliberately
 avoids the blue/red diverging pair every other chart uses — otherwise a blue
 bar at −37bps would read as good news.
 
+Each row also carries the same cells measured against **PVWAP**, and
+`gap that is execution %` — how much of the arrival gap survives once every
+order is scored against its own window. That column is the test that matters.
+Against arrival an order carries every basis point the market moved while it
+worked; against PVWAP it does not. A gap that survives is the algos working
+differently. A gap that collapses is the two sets of orders having faced
+different markets — a routing question, not a quality one. Without it a clean
+sweep for one algo reads as "always use that one", which is the exact
+conclusion the data cannot support.
+
 ## Charts
 
 Palette validated against the computable checks — OKLCH lightness band, chroma
