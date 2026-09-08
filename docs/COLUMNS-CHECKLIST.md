@@ -65,6 +65,7 @@ Listed so the gaps are explicit rather than discovered late.
       capacity measure with our actual share of the auction
 - [ ] Published auction imbalance
 - [ ] Auction price level vs the last continuous price
-- [ ] Close-eligibility tagging (`doClose` / `moc_mode`)
+- [ ] Close-eligibility tagging — whatever the previous platform called the flag
+      that marked an order for the close
 
 Full reasoning for every column: **[COLUMNS-REQUIRED.md](COLUMNS-REQUIRED.md)**.

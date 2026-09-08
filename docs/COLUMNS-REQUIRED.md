@@ -99,7 +99,8 @@ which is exactly the guidance the client can act on.
 
 ## 5. What losing kdb costs, and what replaces it
 
-Gone: `doclose` (was the order tagged for the close) and the MOC-sent funnel
+Gone: close-eligibility tagging (was the order marked for the close, under
+whatever the previous platform called that flag) and the MOC-sent funnel
 (size reserved, size sent, venue rejects). So **we can no longer attribute a
 missed auction to a mechanism inside the algo.**
 

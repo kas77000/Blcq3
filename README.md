@@ -1,7 +1,18 @@
 # MOC / close-algo TCA
 
-H1 review of every close algo traded on the platform. **Tables and charts, no
-deck** — the narrative comes out of the numbers, not the other way round.
+H1 review of every close algo traded. **Tables and charts, no deck** — the
+narrative comes out of the numbers, not the other way round.
+
+**This flow ran on the previous trading platform.** Two consequences:
+
+- Nothing here describes the current platform's close path, and no field name
+  from it is assumed. Where a close-eligibility flag is mentioned, it means
+  whatever the previous system called it.
+- The findings are a **baseline**, not a to-do list for the current stack. What
+  the old platform did with the close is worth knowing mainly as the bar the new
+  one has to clear. If the cutover falls inside the period under review, the two
+  regimes must not be pooled — set `DATE_FROM` / `DATE_TO` to the side of the
+  cutover being reviewed, and read `30_monthly` for the break.
 
 One file, `moc_tca.py`. Copy it to the machine holding the order extract and run
 it there. No network, no config file, nothing to install beyond the libraries.
