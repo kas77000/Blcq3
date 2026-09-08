@@ -61,6 +61,35 @@ Two more differences worth showing when the columns exist:
 - `NextOpen - Close` - did the price move back after we were done? A move back
   means part of what we paid was temporary.
 
+## Bps for money, spreads for comparison
+
+Slippage in basis points answers "what did this cost". It does **not** compare
+across names or markets. A wide-spread mid-cap costs more bps than a large-cap
+for reasons that have nothing to do with the algo, so ranking on bps ranks the
+names, not the execution.
+
+Dividing by the spread fixes that: "how many spreads did we pay" is comparable
+between names, markets and size bands. So use both, for different jobs:
+
+| Use bps when | Use spreads when |
+|---|---|
+| Quoting a cost in money to the client | Ranking anything against anything |
+| The headline number on a slide | Comparing markets or algos |
+| Anything multiplied by notional | Asking whether a group is genuinely worse |
+
+Two rules for computing it:
+
+- **Take the ratio of the two averages, never the average of the ratios.** One
+  order in a 0.5bp-spread name produces a ratio in the hundreds, and the mean
+  then reports that order rather than the group. Report
+  `average slippage / average spread`, and put the median per-order ratio beside
+  it for what the typical order paid.
+- **A spread of zero or less is a quote error.** Clear the value; keep the order.
+
+Worth stating plainly to a client, because it changes the story: a cost of 10bps
+against a 15bp spread is two thirds of a spread, which is ordinary. In bps alone
+it reads as alarming.
+
 ## Size is a confound and must be controlled
 
 A big order costs more. That is physics, not failure. Any comparison that does

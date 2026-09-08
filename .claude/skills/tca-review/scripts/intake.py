@@ -25,30 +25,38 @@ except Exception:  # pragma: no cover - depends on environment
     HEIF = False
 
 SUFFIXES = {".heic", ".heif", ".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
-MAX_EDGE = 4000  # upscale target for the long edge
+# A phone photo is far larger than anything that helps read a table, and a 20MB
+# PNG costs minutes to write for no extra legibility. Cap both views instead:
+# the full view is for the shape of the table, the tiles carry the digits.
+FULL_EDGE = 2200
+TILE_EDGE = 2400
 TILE_MIN_EDGE = 1600  # only tile images with real detail to recover
+
+
+def fit(im: Image.Image, edge: int) -> Image.Image:
+    """Scale so the long edge is `edge`, up or down. LANCZOS both ways."""
+    scale = edge / max(im.size)
+    if 0.98 < scale < 1.02:
+        return im
+    return im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))),
+                     Image.LANCZOS)
 
 
 def convert(src: Path, out_dir: Path, tile: bool) -> list[dict]:
     with Image.open(src) as im:
-        im = ImageOps.exif_transpose(im)
-        im = im.convert("RGB")
-        w, h = im.size
-
-        scale = min(2.0, MAX_EDGE / max(w, h))
-        if scale > 1.05:
-            im = im.resize((round(w * scale), round(h * scale)), Image.LANCZOS)
+        im = ImageOps.exif_transpose(im).convert("RGB")
 
         rows = []
-        full = out_dir / f"{src.stem}.png"
-        im.save(full, "PNG", optimize=True)
+        full = fit(im, FULL_EDGE)
+        full_path = out_dir / f"{src.stem}.png"
+        full.save(full_path, "PNG", compress_level=1)
         rows.append(
             {
-                "png": full.name,
+                "png": full_path.name,
                 "source": src.name,
                 "kind": "full",
-                "width": im.width,
-                "height": im.height,
+                "width": full.width,
+                "height": full.height,
             }
         )
 
@@ -63,9 +71,9 @@ def convert(src: Path, out_dir: Path, tile: bool) -> list[dict]:
                 "br": (W // 2 - ox, H // 2 - oy, W, H),
             }
             for name, box in boxes.items():
-                tile_img = im.crop(box)
+                tile_img = fit(im.crop(box), TILE_EDGE)
                 path = out_dir / f"{src.stem}__{name}.png"
-                tile_img.save(path, "PNG", optimize=True)
+                tile_img.save(path, "PNG", compress_level=1)
                 rows.append(
                     {
                         "png": path.name,

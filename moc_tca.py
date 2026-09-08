@@ -45,9 +45,34 @@ CURRENCY = "USD"
 # AUTO_CLOSE_MIN_PCT. What it picked is printed loudly in the run log.
 #
 # Run --probe first, read the strategy table, then pin the list here.
-CLOSE_STRATEGIES: list[str] = []
+CLOSE_STRATEGIES: list[str] = ["CLOSE", "VWAP"]
 CLOSE_NAME_PATTERN = r"CLOSE|MOC|LOC|TWAPC|IIS"
 AUTO_CLOSE_MIN_PCT = 5.0
+
+# Which Strategy values enter the study at all. Everything else is excluded
+# with a count and a name in the run log, never silently.
+#
+# VWAP is in scope because 7.6% of a very large book is still 37% of every
+# dollar this client puts through a closing auction - second only to CLOSE
+# itself. Dropping it would understate the close footprint by more than a
+# third, and would hide the algo-selection question, which is usually worth
+# more than algo performance.
+#
+# Empty = keep every strategy in the file.
+STRATEGY_SCOPE: list[str] = ["VWAP", "CLOSE"]
+
+# Which strategies the MISS TAXONOMY applies to. A VWAP order was never meant
+# to reach the auction, so calling its low %CLOSE an unexplained miss would be
+# nonsense. Clearance, capacity, cohorts and the first-execution tables run on
+# this list only; every other table runs on CLOSE_STRATEGIES and is grouped by
+# strategy, so the two are never pooled.
+MOC_STRATEGIES: list[str] = ["CLOSE"]
+
+# A slippage this large is a broken record, not a fill. The CELL is cleared;
+# the order stays in the study. Nothing is ever removed for being merely
+# large - winsorising handles fat tails, and deleting the extremes would
+# delete the orders the review exists to find.
+MAX_ABS_BPS = 2000.0
 
 # Period filter. None = whatever is in the file.
 DATE_FROM = None                # e.g. "2026-01-01"
@@ -84,6 +109,12 @@ COLUMNS = {
     "slip_vwap":     ["Vwap", "VWAP ImpBps"],
     "slip_nextopen": ["NextOpen", "Next Open", "NextOpen ImpBps"],
     "slip_open":     ["Open", "Open ImpBps"],
+    # the same benchmarks divided by the spread, if the export carries them.
+    # Missing ones are derived from slip / spread_bps, so either shape works.
+    "sprd_arrival":  ["eIS/Sprd", "IS/Sprd", "eISSprd"],
+    "sprd_pvwap":    ["ePvwap/Sprd", "Pvwap/Sprd", "PvwapSprd"],
+    "sprd_close":    ["eClose/Sprd", "Close/Sprd"],
+    "sprd_vwap":     ["eVwap/Sprd", "Vwap/Sprd"],
     # capacity and behaviour
     "adv_pct":       ["%Adv", "% Adv", "PctAdv"],
     "adv":           ["Adv", "ADV"],
@@ -115,6 +146,11 @@ CSV_KWARGS = {"encoding": "utf-8-sig"}
 POSITIVE_IS_SAVING = True
 SIDE_ALREADY_ADJUSTED = True
 BUY_VALUES = {"B", "BUY", "BOT", "1", "BUYS"}
+# Anything not in BUY_VALUES is labelled Sell, so a blank or an unexpected
+# code would silently become a sell order. SELL_VALUES exists to catch that:
+# a side in neither set is excluded rather than guessed.
+SELL_VALUES = {"S", "SELL", "SLD", "SS", "SHORT", "SHORTSELL", "SHORT SELL",
+               "2", "SELLS"}
 
 # $Mln is EXECUTED notional, built as sum(cumqty * avgprice * fx_last) / 1e6.
 # fx_last is inside it, so the column is millions of USD and the multiplier
@@ -437,6 +473,25 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     # --- derived benchmarks ----------------------------------------------
     # Every slippage shares one executed price, so a difference between two of
     # them cancels it and leaves a pure, side-adjusted price move.
+    # --- spread-normalised slippage ---------------------------------------
+    # Slippage in bps answers "what did it cost". It does NOT compare across
+    # names or markets: a wide-spread Korean mid-cap costs more bps than a
+    # Japanese large-cap for reasons that have nothing to do with the algo.
+    # Dividing by the spread answers "how many spreads did we pay", which does
+    # compare. Quote bps for money, spreads for every comparison.
+    #
+    # The export's own columns win where they exist; the rest are derived, so
+    # the two shapes of file behave the same. A spread of zero or less is a
+    # quote error, not a trade, and gives no ratio.
+    if "spread_bps" in df:
+        sprd = df["spread_bps"].where(df["spread_bps"] > 0)
+        for bench in ["arrival", "pvwap", "close", "vwap", "open", "nextopen"]:
+            slip, norm = f"slip_{bench}", f"sprd_{bench}"
+            if norm in df:
+                continue                      # taken straight from the export
+            if slip in df:
+                df[norm] = df[slip] / sprd
+
     if "slip_arrival" in df and "slip_close" in df:
         # what waiting for the close cost: arrival price -> closing price
         df["wait_cost_bps"] = df["slip_arrival"] - df["slip_close"]
@@ -488,6 +543,159 @@ def _title_norm(s: pd.Series, order: list[str]) -> pd.Series:
     """
     canon = {v.lower(): v for v in order}
     return s.map(lambda v: canon.get(str(v).strip().lower(), str(v).strip()))
+
+
+# ===========================================================================
+# SCOPE AND EXCLUSIONS - nothing leaves without being counted
+# ===========================================================================
+#
+# Two different jobs, deliberately separate.
+#
+#   apply_strategy_scope   drops whole strategies. A decision about what the
+#                          review is ABOUT.
+#
+#   clean_values           removes unusable NUMBERS, and only then unusable
+#                          ORDERS. An infinity in NextOpen says nothing about
+#                          that order's auction share, its size or its
+#                          notional, so the CELL dies and the order stays.
+#                          Only an order that cannot contribute anywhere -
+#                          no notional, no quantity, no readable side - leaves.
+#
+# Dropping a whole order for one bad cell would quietly bias every other
+# table, because the orders with broken cells are not a random sample.
+
+SLIP_FIELDS = ["slip_arrival", "slip_close", "slip_pvwap", "slip_vwap",
+               "slip_open", "slip_nextopen", "first_exec_vs_close"]
+
+
+def apply_strategy_scope(df: pd.DataFrame) -> pd.DataFrame:
+    """Restrict the study to STRATEGY_SCOPE, showing what stays and what goes."""
+    if "strategy" not in df:
+        warn("no strategy column - STRATEGY_SCOPE was not applied.")
+        return df
+    if not STRATEGY_SCOPE:
+        log("  STRATEGY_SCOPE is empty - every strategy in the file is kept.")
+        return df
+
+    wanted = {s.upper() for s in STRATEGY_SCOPE}
+    keep = df["strategy"].astype(str).str.upper().isin(wanted)
+
+    log("  strategy scope: " + ", ".join(STRATEGY_SCOPE))
+    log("")
+    log(f"    {'strategy':<16}{'orders':>10}{'notional (' + CURRENCY + 'm)':>22}"
+        f"{'%CLOSE (wtd)':>15}   ")
+    rows = []
+    for name, g in df.groupby("strategy", dropna=False, observed=True):
+        pc = (wmean(g["pct_close"], g["notional"], winsor=False)
+              if "pct_close" in g else float("nan"))
+        rows.append((str(name), len(g), float(g["notional"].sum()) / 1e6, pc))
+    for name, n, val, pc in sorted(rows, key=lambda r: -r[2]):
+        verdict = "keep" if name.upper() in wanted else "drop"
+        log(f"    {name:<16}{n:>10,}{val:>22,.2f}{pc:>15.2f}   {verdict}")
+
+    present = {str(v).upper() for v in df["strategy"].dropna()}
+    absent = sorted(s for s in STRATEGY_SCOPE if s.upper() not in present)
+    if absent:
+        warn("STRATEGY_SCOPE names a strategy not in the file: "
+             + ", ".join(absent))
+
+    out = df[keep].copy()
+    if out.empty:
+        raise SystemExit(
+            "\nSTRATEGY_SCOPE removed every order. Check the names against "
+            "the strategy table in --probe.")
+    share = 100.0 * out["notional"].sum() / max(df["notional"].sum(), 1e-9)
+    log("")
+    log(f"    kept {len(out):,} of {len(df):,} orders, {share:.1f}% of value")
+    return out
+
+
+def clean_values(df: pd.DataFrame, dry_run: bool = False) -> pd.DataFrame:
+    """Clear unusable cells, then drop orders that cannot contribute anywhere."""
+    df = df.copy()
+    n_in = len(df)
+    v_in = float(df["notional"].sum()) if "notional" in df else 0.0
+
+    # --- cells: the value dies, the order lives ---------------------------
+    cells = []
+    for col in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        vals = pd.to_numeric(df[col], errors="coerce")
+        arr = vals.to_numpy(dtype="float64", na_value=np.nan) \
+            if hasattr(vals, "to_numpy") else np.asarray(vals, dtype="float64")
+        inf = pd.Series(np.isinf(arr), index=df.index)
+        big = pd.Series(False, index=df.index)
+        if col in SLIP_FIELDS:
+            big = (vals.abs() > MAX_ABS_BPS).fillna(False) & ~inf
+        bad = inf | big
+        if bad.any():
+            cells.append((col, int(inf.sum()), int(big.sum())))
+            if not dry_run:
+                df.loc[bad, col] = np.nan
+
+    # A zero or negative spread cannot normalise anything, and it is a quote
+    # error rather than a trade. Clear it; the order's own numbers still stand.
+    if "spread_bps" in df:
+        bad_spread = (pd.to_numeric(df["spread_bps"], errors="coerce") <= 0).fillna(False)
+        if bad_spread.any():
+            cells.append(("spread_bps (<= 0)", 0, int(bad_spread.sum())))
+            if not dry_run:
+                df.loc[bad_spread, "spread_bps"] = np.nan
+
+    if cells:
+        warn("unusable VALUES - the cell is cleared, the order is kept:")
+        log(f"    {'field':<26}{'infinite':>10}{'beyond +/-' + f'{MAX_ABS_BPS:,.0f}bps':>20}")
+        for name, n_inf, n_big in cells:
+            log(f"    {name:<26}{n_inf:>10,}{n_big:>20,}")
+        log("    An infinity says nothing about the rest of that order, so the")
+        log("    order stays in every table its other columns can support.")
+    else:
+        log("  no infinite or out-of-range values found.")
+
+    # --- orders: only those that cannot contribute anywhere ---------------
+    keep = pd.Series(True, index=df.index)
+    reasons = []
+
+    def drop(reason: str, mask) -> None:
+        nonlocal keep
+        mask = pd.Series(mask, index=df.index).fillna(False) & keep
+        if mask.any():
+            val = float(df.loc[mask, "notional"].sum()) if "notional" in df else 0.0
+            reasons.append((reason, int(mask.sum()), val))
+            keep = keep & ~mask
+
+    if "notional" in df:
+        drop("no notional", df["notional"].isna() | (df["notional"] <= 0))
+    if "order_shares" in df:
+        drop("no order quantity", df["order_shares"].isna() | (df["order_shares"] <= 0))
+    if "side" in df:
+        up = df["side"].astype(str).str.strip().str.upper()
+        known = up.isin({v.upper() for v in BUY_VALUES}
+                        | {v.upper() for v in SELL_VALUES})
+        drop("side not recognised", ~known)
+    if "date" in df:
+        drop("no date", df["date"].isna())
+    if "strategy" in df:
+        drop("no strategy", df["strategy"].isna() | (df["strategy"].astype(str) == ""))
+
+    log("")
+    if reasons:
+        warn("orders EXCLUDED from the study:")
+    log(f"    {'reason':<26}{'orders':>10}{'notional (' + CURRENCY + 'm)':>22}")
+    for reason, n, val in reasons:
+        log(f"    {reason:<26}{n:>10,}{val / 1e6:>22,.2f}")
+    n_out = int(keep.sum())
+    v_out = float(df.loc[keep, "notional"].sum()) if "notional" in df else 0.0
+    log(f"    {'kept':<26}{n_out:>10,}{v_out / 1e6:>22,.2f}")
+    log("")
+    log(f"    {n_in:,} orders in -> {n_out:,} kept "
+        f"({100.0 * n_out / max(n_in, 1):.2f}%), "
+        f"{100.0 * v_out / max(v_in, 1e-9):.2f}% of value retained")
+    if dry_run:
+        log("    DRY RUN - nothing was removed. Run without --probe to apply.")
+        return df
+    return df[keep].copy()
 
 
 # ===========================================================================
@@ -935,10 +1143,13 @@ def add_frontier_shortfall(df: pd.DataFrame) -> pd.DataFrame:
     """Per order: how far below the frontier for its own size it landed."""
     if "adv_bucket" not in df or "pct_close" not in df:
         return df
-    med = df.groupby(["market", "adv_bucket"], observed=True)["pct_close"] \
-            .transform("median")
-    n_cell = df.groupby(["market", "adv_bucket"], observed=True)["pct_close"] \
-               .transform("size")
+    # Within strategy as well as within market and size: a 53%-auction algo
+    # and a 7%-auction algo do not share a frontier, and pooling them would
+    # pull the reference line down until nothing looked short.
+    cell = ["strategy", "market", "adv_bucket"] if "strategy" in df \
+        else ["market", "adv_bucket"]
+    med = df.groupby(cell, observed=True)["pct_close"].transform("median")
+    n_cell = df.groupby(cell, observed=True)["pct_close"].transform("size")
     df = df.copy()
     df["frontier_pct_close"] = med.where(n_cell >= MIN_N_FOR_CI)
     df["frontier_shortfall_pp"] = df["frontier_pct_close"] - df["pct_close"]
@@ -1162,6 +1373,48 @@ def t_close_vs_session(df: pd.DataFrame, by: str) -> pd.DataFrame:
     if "close_vs_session_bps" not in df:
         return pd.DataFrame()
     return by_group(df, by, "close_vs_session_bps")
+
+
+SPREAD_BENCHMARKS = [("sprd_arrival", "slip_arrival", "vs Arrival"),
+                     ("sprd_pvwap", "slip_pvwap", "vs PVWAP"),
+                     ("sprd_close", "slip_close", "vs Close"),
+                     ("sprd_vwap", "slip_vwap", "vs VWAP")]
+
+
+def t_spread_normalised(df: pd.DataFrame, by: str) -> pd.DataFrame:
+    """Cost in bps beside cost in spreads, so groups can be compared fairly.
+
+    Two groups with the same bps number and different spreads did NOT perform
+    the same, and the bps column alone will not show it. The spread column is
+    the one to rank on; the bps column is the one to quote in money.
+    """
+    have = [(n, s, lab) for n, s, lab in SPREAD_BENCHMARKS
+            if n in df and s in df]
+    if not have or "spread_bps" not in df or by not in df:
+        return pd.DataFrame()
+    rows = []
+    for key, g in df.groupby(by, dropna=False, observed=True):
+        spread = wmean(g["spread_bps"], g["notional"])
+        row = {by: key, "orders": len(g),
+               "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
+               "spread bps (wtd)": spread}
+        for norm, slip, label in have:
+            bps = wmean(g[slip], g["notional"])
+            row[label + " bps"] = bps
+            # The ratio of the two averages, NOT the average of per-order
+            # ratios. Dividing order by order lets a name with a 0.5bp spread
+            # produce a ratio in the hundreds, and the mean then reports that
+            # one name rather than the group. The aggregate ratio reads as
+            # "the average cost was this many times the average spread".
+            row[label + " spreads"] = (bps / spread
+                                       if spread and np.isfinite(spread) and spread > 0
+                                       else np.nan)
+            # Kept beside it: what the typical single order paid. A median is
+            # unaffected by a small denominator on one order.
+            row[label + " spreads (median)"] = g[norm].median()
+        row["small sample"] = len(g) < MIN_N_FOR_CI
+        rows.append(row)
+    return pd.DataFrame(rows).round(3)
 
 
 def t_benchmark_matrix(df: pd.DataFrame) -> pd.DataFrame:
@@ -1745,23 +1998,36 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     auc = df[df["has_auction"]].copy()
     noauc = df[~df["has_auction"]].copy()
 
+    # The miss taxonomy only means something for an algo that was aiming at
+    # the auction. Everything else keeps its benchmark and venue tables and
+    # is left out of clearance, capacity and the cohorts.
+    moc_names = MOC_STRATEGIES or close_strats
+    moc = auc[auc["strategy"].isin(moc_names)].copy()
+    if set(moc_names) != set(close_strats):
+        log(f"  miss taxonomy runs on {', '.join(moc_names)} only; "
+            f"{len(auc) - len(moc):,} orders on the other strategies are in "
+            f"the benchmark tables but not the cohorts.")
+
     t["03_profile"] = strategy_profile(df)
     t["04_headline_vs_arrival"] = by_group(df, "strategy", "slip_arrival")
     t["05_headline_vs_close"] = by_group(auc, "strategy", "slip_close")
     t["06_benchmark_matrix"] = t_benchmark_matrix(df)
+    t["06a_spreads_strategy"] = t_spread_normalised(df, "strategy")
+    t["06b_spreads_market"] = t_spread_normalised(df, "market")
+    t["06c_spreads_by_adv"] = t_spread_normalised(df, "adv_bucket")
     t["07_decomposition_strategy"] = t_decomposition(df, "strategy")
     t["08_decomposition_market"] = t_decomposition(df, "market")
     t["09_venue_mix_strategy"] = t_venue_mix(df, "strategy")
     t["10_venue_mix_market"] = t_venue_mix(df, "market")
-    t["11_clearance"] = t_clearance(auc)
+    t["11_clearance"] = t_clearance(moc)
     t["12_leakage_strategy"] = t_leakage(auc, "strategy")
     t["13_leakage_market"] = t_leakage(auc, "market")
-    t["14_capacity"] = t_capacity(auc)
-    t["15_cohorts"] = t_cohorts(auc)
-    t["16_orders_to_review"] = t_unexplained(auc)
-    t["17_first_exec_by_adv"] = t_first_exec(auc, "adv_bucket")
-    t["18_first_exec_by_market"] = t_first_exec(auc, "market")
-    t["19_early_start"] = t_early_start_waste(auc)
+    t["14_capacity"] = t_capacity(moc)
+    t["15_cohorts"] = t_cohorts(moc)
+    t["16_orders_to_review"] = t_unexplained(moc)
+    t["17_first_exec_by_adv"] = t_first_exec(moc, "adv_bucket")
+    t["18_first_exec_by_market"] = t_first_exec(moc, "market")
+    t["19_early_start"] = t_early_start_waste(moc)
     t["20_reversion_strategy"] = t_reversion(df, "strategy")
     t["21_reversion_by_adv"] = t_reversion(df, "adv_bucket")
     t["22_close_vs_session_mkt"] = t_close_vs_session(df, "market")
@@ -2180,6 +2446,10 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
     if "date" in df and df["date"].notna().any():
         log(f"  dates present: {df['date'].min().date()} .. "
             f"{df['date'].max().date()}")
+
+    section("SCOPE AND EXCLUSIONS")
+    df = apply_strategy_scope(df)
+    df = clean_values(df)
 
     sanity_report(df, cols, list(raw.columns))
     close_strats = choose_close_strategies(df)
