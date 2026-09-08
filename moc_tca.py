@@ -844,7 +844,8 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
     section("SANITY REPORT")
 
     missing = [c for c in COLUMNS if c not in cols and c not in OPTIONAL]
-    log(f"  resolved {len(cols)}/{len(COLUMNS) - len(OPTIONAL)} known fields")
+    core = [c for c in cols if c not in OPTIONAL]
+    log(f"  resolved {len(core)}/{len(COLUMNS) - len(OPTIONAL)} known fields")
     if missing:
         log(f"  unresolved: {', '.join(sorted(missing))}")
 
