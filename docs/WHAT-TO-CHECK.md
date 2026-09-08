@@ -43,63 +43,36 @@ print(pd.DataFrame({"orders": g.size(), "mln": g["$Mln"].sum(),
 
 ---
 
-## Step 2 — six questions the probe cannot answer
+## Step 2 — what the columns mean
 
-These are about what the columns *mean*. Each one silently changes a headline
-number if it is assumed wrong, and none of them shows up as an error.
+### Confirmed with the data owner — no longer open
 
-### 1. What exactly does `%CLOSE` count? — **the biggest risk on the list**
+| | |
+|---|---|
+| `$Mln` | EXECUTED notional, `sum(cumqty * avgprice * fx_last) / 1e6`. **Millions of USD**, so the multiplier back to USD is 1e6. `fx_last` is inside it, so the column is already USD-converted. |
+| `%CLOSE` | The % of order quantity executed through CLOSE. The venue shares are shares of **executed** quantity — the run tests this explicitly by checking whether they sum to 100 or to `FR`, and says which. |
+| Sign | **All data is side-adjusted: `+` is good, `-` is bad.** Matches `POSITIVE_IS_SAVING = True` and `SIDE_ALREADY_ADJUSTED = True`. |
+| `aggrTgtId` | Cannot repeat. One row per order, so no dedup and no double-counted notional. |
+| `Start(HK)` / `End(HK)` | HKT for every market, so `close_gap_min` needs no per-market offset. |
 
-- Is it the **closing auction only**, or all auction volume, or everything
-  traded in a closing *period* (last N minutes) whether or not it printed in
-  the auction?
-- Is it a share of **quantity** or of **notional**? The script assumes quantity.
+Because a wrong notional scale moves every currency figure by a power of ten
+and nothing downstream would notice, the run derives the **implied USD share
+price** (executed notional / executed shares) and prints it per market, warning
+if the median leaves a plausible band. On the synthetic file it lands around
+USD 20 a share across all six markets, which is what a correct scale looks like.
 
-If `%CLOSE` is a time window rather than the auction itself, then "cleared the
-auction" is not what it measures and the whole taxonomy needs relabelling. The
-presence of a separate `%OPEN` suggests it really is the auction, but it is
-worth one sentence of confirmation.
+### Still open — one item
 
-### 2. Is `NextOpen` adjusted for corporate actions?
+**Is `NextOpen` adjusted for corporate actions?** Your read is that it should be,
+which is probably right, but it is worth confirming because it is the one thing
+that would quietly corrupt the reversion exhibit. Reversion is
+`NextOpen - Close`; an ex-dividend date between the two puts the dividend
+straight into that number as impact that never happened. On a dividend-heavy
+stretch — and H1 covers the main APAC dividend season — that is not a small
+effect, and it biases in one direction rather than averaging out.
 
-The reversion exhibit is `NextOpen - Close`. An ex-dividend date between the
-close and the next open puts the dividend straight into that number as fake
-reversion, and on a dividend-heavy stretch that is not a small effect. If the
-benchmark set is unadjusted, reversion gets reported per market with a warning,
-or dropped.
-
-### 3. Is `first_exec_vs_close` side-adjusted?
-
-The probe now checks this alongside the other bps columns, so the log will
-answer it — but confirm it independently if you can. If it is raw rather than
-side-adjusted, every sell is inverted and the "was starting early right?"
-conclusion flips sign.
-
-### 4. Is `$Mln` gross or net of commission and fees?
-
-It is the weight on every aggregate and the basis of every currency figure. Net
-of fees is fine, it just has to be stated, because the cost-of-leakage number is
-then after-fee and is not comparable to a gross figure from elsewhere.
-
-### 5. One row per order, or can `aggrTgtId` repeat?
-
-If an amend or a replacement writes a second row under the same id, both the
-order count and the notional are inflated. The probe prints duplicate ids if
-there are any; a yes/no from the data owner is a useful cross-check.
-
-### 6. Are `Start(HK)` / `End(HK)` in HKT for every market, or local time?
-
-The names say HKT. If Japan and Australia rows are actually stamped local, the
-`close_gap_min` measure is wrong by the offset for those markets. This affects
-one secondary exhibit only, so it is last.
-
-Also, for India specifically: **what does `%CLOSE` even mean there?** NSE has no
-single-price closing auction — it closes on a VWAP of the last half hour. India
-is already reported separately for exactly this reason, but knowing what the
-platform put in that column for Indian orders decides whether the number is
-usable at all.
-
----
+If it turns out unadjusted, the fix is cheap: report reversion per market with
+the caveat, or drop the exhibit. Nothing else in the pack depends on it.
 
 ## Step 3 — what else exists in the extract
 

@@ -116,7 +116,15 @@ POSITIVE_IS_SAVING = True
 SIDE_ALREADY_ADJUSTED = True
 BUY_VALUES = {"B", "BUY", "BOT", "1", "BUYS"}
 
-SCALE = {"notional": 1e6, "order_shares": 1e3}
+# $Mln is EXECUTED notional, built as sum(cumqty * avgprice * fx_last) / 1e6.
+# fx_last is inside it, so the column is millions of USD and the multiplier
+# back to USD is 1e6. Confirmed with the data owner.
+#
+# The run still derives the implied USD price per share from it and warns if
+# that lands outside a plausible band - a wrong scale here moves every currency
+# figure by a power of ten and nothing else in the pipeline would notice.
+NOTIONAL_SCALE = 1e6
+SCALE = {"notional": NOTIONAL_SCALE, "order_shares": 1e3}
 
 # Set True if PR / FR / %Adv / the venue-mix columns arrive as fractions (0-1)
 # instead of percentages. The sanity report warns if this looks wrong.
@@ -397,12 +405,17 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["arrival_time"] = _title_norm(df["arrival_time"], ARRIVAL_ORDER)
 
     # --- quantities -------------------------------------------------------
-    # $Mln is EXECUTED notional; #Shares is the ORDER quantity. They sit on
-    # different bases, so notional / shares is NOT an average price and is
-    # never computed anywhere in this script.
+    # $Mln is EXECUTED notional; #Shares is the ORDER quantity. Dividing one by
+    # the other is NOT an average price. Dividing executed notional by EXECUTED
+    # shares is - and since fx_last is already inside $Mln, it comes out in USD,
+    # which makes it the check on whether NOTIONAL_SCALE is right.
     if "order_shares" in df and "fill_rate" in df:
         df["exec_shares"] = df["order_shares"] * df["fill_rate"] / 100.0
         df["unfilled_shares"] = df["order_shares"] - df["exec_shares"]
+        if "notional" in df:
+            df["implied_px_usd"] = np.where(df["exec_shares"] > 0,
+                                            df["notional"] / df["exec_shares"],
+                                            np.nan)
 
     # --- venue mix --------------------------------------------------------
     present = [f for f in VENUE_FIELDS if f in df]
@@ -534,6 +547,24 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
         if len(present) < len(VENUE_FIELDS):
             warn("not all five venue columns are present, so the sum check is "
                  "weaker than it looks.")
+        # Decisive test of what the venue shares are a percentage OF. If they
+        # are shares of EXECUTED quantity they sum to 100; if they are shares
+        # of the ORDER quantity they sum to the fill rate instead, and every
+        # auction quantity derived from them would be overstated.
+        if "fill_rate" in df:
+            d100 = (df["venue_sum"] - 100).abs()
+            dfr = (df["venue_sum"] - df["fill_rate"]).abs()
+            near100 = int((d100 <= 1.0).sum())
+            nearfr = int((dfr <= 1.0).sum())
+            log("    denominator test: {} rows sum to 100, {} rows sum to FR "
+                "(of {})".format(near100, nearfr, int(known.sum())))
+            if nearfr > near100:
+                warn("the venue shares appear to be a % of ORDER quantity, not "
+                     "of executed quantity. Auction quantity is then "
+                     "%CLOSE/100 x order qty, not x executed qty - say so and "
+                     "the derivation is changed.")
+            else:
+                log("      -> shares of EXECUTED quantity, as assumed.")
 
     # --- percentage vs fraction ------------------------------------------
     for f in PCT_FIELDS:
@@ -568,16 +599,37 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
 
     # --- notional basis ---------------------------------------------------
     log("")
-    log("  notional basis")
-    log("    $Mln treated as EXECUTED notional: {} {:,.0f}".format(
-        CURRENCY, df["notional"].sum()))
-    log("    #Shares treated as ORDER quantity; executed = #Shares x FR/100.")
-    log("    notional / shares is NOT an average price and is never computed.")
+    log("  notional basis   <-- CHECK THIS BLOCK BEFORE QUOTING ANY MONEY FIGURE")
+    log("    $Mln is EXECUTED notional = sum(cumqty * avgprice * fx_last) / 1e6,")
+    log("    so it is millions of USD and NOTIONAL_SCALE is {:.0e}.".format(
+        NOTIONAL_SCALE))
+    log("    total executed: {} {:,.0f}  ({:,.1f}m)".format(
+        CURRENCY, df["notional"].sum(), df["notional"].sum() / 1e6))
+    log("    #Shares is ORDER quantity; executed = #Shares x FR/100.")
     if "exec_shares" in df:
         ordered = max(float(df["order_shares"].sum()), 1.0)
         log("    order qty {:,.0f} -> executed {:,.0f} shares ({:.1f}%)".format(
             df["order_shares"].sum(), df["exec_shares"].sum(),
             100 * df["exec_shares"].sum() / ordered))
+    if "implied_px_usd" in df and df["implied_px_usd"].notna().any():
+        px = df["implied_px_usd"].dropna()
+        log("")
+        log("    implied share price = executed notional / executed shares.")
+        log("    fx_last is already inside $Mln, so this is USD. If a market")
+        log("    lands a power of ten from a plausible share price, the scale,")
+        log("    the #Shares scaling or the fx basis is wrong.")
+        log("      {:<14}{:>12}{:>12}{:>12}".format("market", "p25", "median",
+                                                    "p75"))
+        for mkt, g in df.dropna(subset=["implied_px_usd"]).groupby("market"):
+            q = g["implied_px_usd"].quantile([.25, .5, .75]).values
+            log("      {:<14}{:>12,.2f}{:>12,.2f}{:>12,.2f}".format(
+                str(mkt), q[0], q[1], q[2]))
+        med = float(px.median())
+        if not (0.20 <= med <= 2000):
+            warn("median implied share price is {} {:,.2f}, outside a "
+                 "plausible band for a listed equity - NOTIONAL_SCALE, the "
+                 "#Shares scaling, or the fx basis is wrong.".format(
+                     CURRENCY, med))
 
     # --- markets ----------------------------------------------------------
     log("")

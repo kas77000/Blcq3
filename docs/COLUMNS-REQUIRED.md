@@ -5,8 +5,11 @@ H1 review, close algos. **One source: the order extract.** No kdb.
 Three facts you gave that shape everything below:
 
 - **`$Mln` is EXECUTED notional. `#Shares` is the ORDER quantity.** Different
-  bases. `$Mln / #Shares` is **not** the average price and is never computed.
-  Executed shares = `#Shares x FR/100`.
+  bases. `$Mln / #Shares` is **not** the average price. `$Mln` is
+  `sum(cumqty * avgprice * fx_last) / 1e6` — millions of USD, already
+  FX-converted. Executed shares = `#Shares x FR/100`, and executed notional over
+  executed shares IS a valid average price, in USD, which the run uses as its
+  check on the scale.
 - **`%OPEN + %CLOSE + %POST + %TAKE + %DARK = 100`.** The auction/continuous
   split is measured, not inferred.
 - **`first_exec_vs_close` is bps: the close price against the first execution
@@ -109,12 +112,23 @@ outcome directly. `%CLOSE = 0` on a close-algo order is a *fact*, not an
 inference. Only the cause is unavailable — so causes are assigned by exclusion,
 in a taxonomy built from the extract alone:
 
+A **partial** auction fill and **no** auction fill are different outcomes and
+are never pooled: a partial fill is judged against the capacity frontier for its
+own size, a zero fill has to be explained by size, by a limit, or not at all.
+Precedence runs top to bottom.
+
 | Cohort | Test | Reading |
 |---|---|---|
-| Never traded | `FR = 0` | Not an auction problem. |
-| Blocked by a limit | `%CLOSE = 0`, `FR > 0`, `marketLimit = Limit` | Mechanical: the limit did not cross the auction price. |
-| Size-driven | `%CLOSE` low, `%Adv` high | Correct behaviour. Explicitly cleared, not counted against the algo. |
-| **Unexplained** | `%CLOSE = 0`, `FR > 0`, `%Adv` low, `marketLimit = Market` | **The deliverable.** Orders that had every reason to clear the auction and did not, with no benign explanation in the data. Listed individually by `aggrTgtId`, `Date`, `Sym` for the desk to check against the logs. |
+| Never traded | `FR < 1` | Not an auction problem. |
+| Cleared the auction | `%CLOSE >= 90` | The auction did its job. |
+| Size explains it | `%Adv >= 5` | Correct behaviour — the auction could not absorb it. Explicitly cleared, never counted against the algo. |
+| Limit did not cross | no auction fill, `marketLimit = Limit` | Mechanical: the limit never crossed the auction price. |
+| **No auction fill — unexplained** | traded, `%Adv` low, no limit, still nothing | **The deliverable.** Every reason to clear the auction and did not. |
+| Partial — below the frontier | partial fill, >15pp under the frontier | Under-cleared for its own size. |
+| Partial — in line with peers | partial fill, at or above the frontier | Normal. |
+
+The last two open cohorts are listed order by order — `aggrTgtId`, `Date`, `Sym`
+— in `16_orders_to_review`, for the desk to check against the logs.
 
 That last cohort is the honest version of the finding: the analysis names the
 orders and states plainly that the cause is not in this file. If it turns out to
