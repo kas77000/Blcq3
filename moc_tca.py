@@ -690,6 +690,16 @@ def _title_norm(s: pd.Series, order: list[str]) -> pd.Series:
 SLIP_FIELDS = ["slip_arrival", "slip_close", "slip_pvwap", "slip_vwap",
                "slip_open", "slip_nextopen", "first_exec_vs_close"]
 
+# What the file held before scoping and cleaning. The scope table reports
+# against THIS, not against what survived - otherwise, once STRATEGY_SCOPE has
+# done its work, the reviewed book is 100% of itself and the slide says
+# nothing. Filled in as the run removes things.
+BOOK = {"orders": 0, "notional": 0.0, "dropped": []}
+
+
+def _remember(label: str, orders: int, notional: float) -> None:
+    BOOK["dropped"].append((label, int(orders), float(notional)))
+
 
 def apply_strategy_scope(df: pd.DataFrame) -> pd.DataFrame:
     """Restrict the study to STRATEGY_SCOPE, showing what stays and what goes."""
@@ -702,6 +712,11 @@ def apply_strategy_scope(df: pd.DataFrame) -> pd.DataFrame:
 
     wanted = {s.upper() for s in STRATEGY_SCOPE}
     keep = df["strategy"].astype(str).str.upper().isin(wanted)
+    if not BOOK["orders"]:
+        BOOK["orders"] = len(df)
+        BOOK["notional"] = float(df["notional"].sum())
+    for name, g in df[~keep].groupby("strategy", dropna=False, observed=True):
+        _remember(f"{name} (out of scope)", len(g), float(g["notional"].sum()))
 
     log("  strategy scope: " + ", ".join(STRATEGY_SCOPE))
     log("")
@@ -786,6 +801,8 @@ def clean_values(df: pd.DataFrame, dry_run: bool = False) -> pd.DataFrame:
         if mask.any():
             val = float(df.loc[mask, "notional"].sum()) if "notional" in df else 0.0
             reasons.append((reason, int(mask.sum()), val))
+            if not dry_run:
+                _remember(reason, int(mask.sum()), val)
             keep = keep & ~mask
 
     if "notional" in df:
@@ -1223,20 +1240,34 @@ def by_group(df: pd.DataFrame, by, value: str, ci: bool = True,
 # ===========================================================================
 
 def t_scope(all_df: pd.DataFrame, close_strats: list) -> pd.DataFrame:
-    """How much of the book the close algos are."""
-    is_close = all_df["strategy"].isin(close_strats)
+    """What the file held, what is reviewed, and what was left out of it.
+
+    Measured against the file as it arrived. Once STRATEGY_SCOPE has run, the
+    reviewed book is by definition 100% of itself, and a table saying so is
+    the one slide in the deck that cannot be wrong and cannot be useful.
+    """
+    total_o = BOOK["orders"] or len(all_df)
+    total_n = BOOK["notional"] or float(all_df["notional"].sum())
+
     rows = []
-    for label, mask in [("Close algos", is_close), ("Other", ~is_close)]:
-        g = all_df[mask]
+
+    def add(label, orders, notional):
         rows.append({
             "scope": label,
-            "orders": len(g),
-            "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
-            "% of orders": 100 * len(g) / max(len(all_df), 1),
-            "% of notional": 100 * g["notional"].sum() /
-                             max(all_df["notional"].sum(), 1e-9),
+            "orders": int(orders),
+            "notional (" + CURRENCY + "m)": notional / 1e6,
+            "% of orders": 100.0 * orders / max(total_o, 1),
+            "% of notional": 100.0 * notional / max(total_n, 1e-9),
         })
-    return pd.DataFrame(rows).set_index("scope").round(2)
+
+    for strat, g in all_df.groupby("strategy", dropna=False, observed=True):
+        add(f"{strat} (reviewed)", len(g), float(g["notional"].sum()))
+    for label, orders, notional in BOOK["dropped"]:
+        add(f"{label}", orders, notional)
+    add("Everything in the file", total_o, total_n)
+
+    out = pd.DataFrame(rows).set_index("scope").round(2)
+    return out
 
 
 def t_venue_mix(df: pd.DataFrame, by: str) -> pd.DataFrame:
@@ -1799,23 +1830,44 @@ def chart_scope(t: pd.DataFrame, out: Path) -> None:
     """Part-to-whole: how much of the book the close algos are."""
     if t.empty:
         return
-    fig, (ax,) = _fig((10.0, 2.6))
+    fig, (ax,) = _fig((11.0, 3.0))
     ncol = "notional (" + CURRENCY + "m)"
+    # The last row is the whole file, which is the sum of the others - drawing
+    # it would double the bar.
+    parts = t.drop(index="Everything in the file", errors="ignore")
+    parts = parts[parts[ncol] > 0]
     left = 0.0
-    total = max(t[ncol].sum(), 1e-9)
-    for i, (label, row) in enumerate(t.iterrows()):
-        w = row[ncol]
+    total = max(float(t.loc["Everything in the file", ncol])
+                if "Everything in the file" in t.index else parts[ncol].sum(),
+                1e-9)
+    for i, (label, row) in enumerate(parts.iterrows()):
+        w = float(row[ncol])
+        reviewed = "(reviewed)" in str(label)
         ax.barh([0], [w], left=[left], height=0.5,
-                color=SERIES[0] if i == 0 else NEUTRAL, zorder=3)
-        ax.text(left + w / 2, 0,
-                f"{label}\n{CURRENCY} {w:,.0f}m  ({100*w/total:.0f}%)",
-                ha="center", va="center", fontsize=9,
-                color="white" if i == 0 else INK)
+                color=SERIES[i % 3] if reviewed else NEUTRAL, zorder=3)
+        share = 100.0 * w / total
+        if share >= 4.0:
+            ax.text(left + w / 2, 0,
+                    f"{str(label).replace(' (reviewed)', '')}\n"
+                    f"{CURRENCY} {w:,.0f}m  ({share:.0f}%)",
+                    ha="center", va="center", fontsize=9,
+                    color="white" if reviewed else INK)
         left += w + total * 0.004        # 2px-equivalent surface gap
     ax.set_yticks([])
     ax.set_xlim(0, left)
+    # A thin grey sliver with no label is worse than no sliver: the reader can
+    # see something was left out and cannot tell what. Name it under the axis.
+    out_rows = [(str(i).replace(" (out of scope)", ""), float(r[ncol]))
+                for i, r in parts.iterrows() if "(reviewed)" not in str(i)]
+    if out_rows:
+        out_n = sum(v for _, v in out_rows)
+        names = ", ".join(n for n, _ in sorted(out_rows, key=lambda x: -x[1])[:5])
+        ax.text(0.0, -0.42,
+                f"grey = not reviewed: {CURRENCY} {out_n:,.0f}m "
+                f"({100 * out_n / total:.1f}%) - {names}",
+                transform=ax.transAxes, fontsize=8, color=INK_MUTED)
     _style(ax, xlabel=f"executed notional ({CURRENCY}m)",
-           title=f"Scope - close algos as a share of the book, {PERIOD_LABEL}",
+           title=f"Scope - what is reviewed, and what is not, {PERIOD_LABEL}",
            horizontal=True)
     ax.grid(False)
     for s in ax.spines.values():
