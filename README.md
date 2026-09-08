@@ -32,6 +32,35 @@ python moc_tca.py --sample                     # synthetic file, end to end
 python moc_tca.py --self-test                  # analytics only, no data file
 ```
 
+## Two windows off one extract
+
+`--from` / `--to` / `--label` override the constants, so a second window needs
+no code edit and no second copy of the script. Give each one its own `--out`:
+
+```bash
+python moc_tca.py --data orders.csv --to 2026-06-30        --out output_h1   --label "H1 2026"
+python moc_tca.py --data orders.csv        --out output_full --label "Jan to 4 Sep 2026"
+```
+
+H1 is the clean baseline: one platform, one market structure, India on a VWAP
+close throughout. The full window adds July to 4 September and crosses the
+India auction change on 3 August, which the run log says out loud.
+
+**If the question is "has anything moved", run the two windows DISJOINT**, not
+nested:
+
+```bash
+python moc_tca.py --data orders.csv --from 2026-07-01        --out output_h2 --label "Jul to 4 Sep 2026"
+```
+
+H1 against the full period compares a window with a window that contains it,
+so two thirds of the orders are on both sides and any change is diluted by its
+own baseline. H1 against Jul-Sep compares two separate populations, which is
+the comparison that can actually move.
+
+Each run stamps `run_window.txt` in its output directory, and a run that lands
+on a directory holding a different window says so before overwriting it.
+
 Requires `pandas numpy matplotlib openpyxl`. Without matplotlib the charts are
 skipped with a warning and the tables still build.
 

@@ -89,6 +89,14 @@ MOC_STRATEGIES: list[str] = ["CLOSE"]
 MAX_ABS_BPS = 2000.0
 
 # Period filter. None = whatever is in the file.
+#
+# --from / --to override these, so two windows off one extract need no code
+# edit and no second copy of the script:
+#
+#   python moc_tca.py --data orders.csv --to 2026-06-30 --out output_h1 \
+#                     --label "H1 2026"
+#   python moc_tca.py --data orders.csv --out output_full \
+#                     --label "Jan to 4 Sep 2026"
 DATE_FROM = None                # e.g. "2026-01-01"
 DATE_TO = None                  # e.g. "2026-06-30"
 
@@ -2552,11 +2560,27 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
             df = df[df["date"] >= pd.Timestamp(DATE_FROM)]
         if DATE_TO:
             df = df[df["date"] <= pd.Timestamp(DATE_TO)]
-        log(f"  period filter {DATE_FROM} .. {DATE_TO}: "
+        log(f"  period filter {DATE_FROM or 'start'} .. {DATE_TO or 'end'}: "
             f"{before:,} -> {len(df):,} orders")
+    if df.empty:
+        raise SystemExit(
+            "\nThe period filter removed every order. Check --from / --to "
+            "against the dates in the file.")
     if "date" in df and df["date"].notna().any():
-        log(f"  dates present: {df['date'].min().date()} .. "
-            f"{df['date'].max().date()}")
+        lo, hi = df["date"].min(), df["date"].max()
+        log(f"  dates present: {lo.date()} .. {hi.date()}")
+        log(f"  period label:  {PERIOD_LABEL}")
+        # A window that straddles a market-structure change is not one regime,
+        # and the label on the charts will not say so. Say it here.
+        for mkt, start in AUCTION_FROM.items():
+            when = pd.Timestamp(start)
+            if lo < when <= hi:
+                warn(f"this window STRADDLES the {mkt} auction change on "
+                     f"{start}. {mkt} carries more than one regime inside it "
+                     f"and is never pooled - see 32_close_regimes.")
+            elif hi < when:
+                log(f"  window ends before the {mkt} auction change on "
+                    f"{start}: {mkt} is one regime throughout.")
 
     section("SCOPE AND EXCLUSIONS")
     df = apply_strategy_scope(df)
@@ -2571,6 +2595,21 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
 
     section("BUILDING")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Two runs off one extract land in two directories. If this one already
+    # holds a different window, say so rather than half-overwriting it.
+    stamp_path = out_dir / "run_window.txt"
+    stamp = (f"{PERIOD_LABEL} | {DATE_FROM or 'start'} .. {DATE_TO or 'end'} | "
+             f"{df['date'].min().date()} .. {df['date'].max().date()}"
+             if "date" in df and df["date"].notna().any() else PERIOD_LABEL)
+    if stamp_path.exists():
+        was = stamp_path.read_text(encoding="utf-8").strip()
+        if was and was != stamp:
+            warn(f"{out_dir} already holds a different run:")
+            log(f"    was:  {was}")
+            log(f"    now:  {stamp}")
+            log("    Overwriting. Use a separate --out per window to keep both.")
+    stamp_path.write_text(stamp, encoding="utf-8")
     tables = build_tables(df, close_strats)
     write_excel(tables, out_dir)
     build_charts(tables, out_dir)
@@ -2602,7 +2641,21 @@ def main(argv=None) -> int:
                    help="generate a synthetic file and run end to end")
     p.add_argument("--self-test", action="store_true", dest="self_test",
                    help="exercise the analytics with no data file")
+    p.add_argument("--from", dest="date_from", metavar="YYYY-MM-DD",
+                   help="first order date to include (overrides DATE_FROM)")
+    p.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD",
+                   help="last order date to include (overrides DATE_TO)")
+    p.add_argument("--label", dest="label", metavar="TEXT",
+                   help="period label for the charts (overrides PERIOD_LABEL)")
     args = p.parse_args(argv)
+
+    global DATE_FROM, DATE_TO, PERIOD_LABEL
+    if args.date_from:
+        DATE_FROM = args.date_from
+    if args.date_to:
+        DATE_TO = args.date_to
+    if args.label:
+        PERIOD_LABEL = args.label
 
     log(f"MOC / close-algo TCA   {_dt.datetime.now():%Y-%m-%d %H:%M}")
 
