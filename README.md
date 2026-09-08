@@ -241,10 +241,17 @@ markets: a wide-spread mid-cap costs more bps than a large-cap for reasons that
 have nothing to do with the algo, so ranking on bps ranks the names. Dividing
 by the spread gives "how many spreads did we pay", which does compare.
 
-`eIS/Sprd`, `ePvwap/Sprd` and `Pvwap/Sprd` are read straight from the export
-where it carries them and derived from `slip / spread` where it does not, so
-either shape of file behaves the same. Tables `06a`–`06c` put the two side by
-side, by strategy, by market and by size band.
+The spread-normalised columns are **optional**. Whatever the export carries is
+read straight from it; everything else is computed as `slippage / spread`, so a
+file with all of them, some of them or none behaves identically. A missing one
+is never reported as a gap. The run log names which were read and which were
+computed, so the two are not confused for each other.
+
+Where a file has both a plain and an `e`-prefixed variant, the plain one wins,
+because it pairs with the same benchmark as the bps column beside it — taking
+`ePvwap/Sprd` next to a `Pvwap` slippage would put two different benchmarks in
+one row. Tables `06a`–`06c` put bps and spreads side by side, by strategy, by
+market and by size band.
 
 The ratio is taken **between the two averages**, never as the average of
 per-order ratios — one name with a 0.5bp spread would otherwise produce a ratio

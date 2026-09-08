@@ -131,12 +131,19 @@ COLUMNS = {
     "slip_vwap":     ["Vwap", "VWAP ImpBps"],
     "slip_nextopen": ["NextOpen", "Next Open", "NextOpen ImpBps"],
     "slip_open":     ["Open", "Open ImpBps"],
-    # the same benchmarks divided by the spread, if the export carries them.
-    # Missing ones are derived from slip / spread_bps, so either shape works.
-    "sprd_arrival":  ["eIS/Sprd", "IS/Sprd", "eISSprd"],
-    "sprd_pvwap":    ["ePvwap/Sprd", "Pvwap/Sprd", "PvwapSprd"],
-    "sprd_close":    ["eClose/Sprd", "Close/Sprd"],
-    "sprd_vwap":     ["eVwap/Sprd", "Vwap/Sprd"],
+    # The same benchmarks divided by the spread. Every one of these is
+    # OPTIONAL: whatever the export does not carry is derived from
+    # slip / spread_bps, so a file with none of them behaves identically.
+    #
+    # The alternatives are ordered so the normalised column pairs with the
+    # SAME benchmark as its bps column. slip_pvwap maps from Pvwap, so
+    # Pvwap/Sprd wins over ePvwap/Sprd - taking the e- variant would put a
+    # different benchmark in the spreads column than in the bps column beside
+    # it, and the two would quietly disagree.
+    "sprd_arrival":  ["IS/Sprd", "eIS/Sprd", "eISSprd"],
+    "sprd_pvwap":    ["Pvwap/Sprd", "ePvwap/Sprd", "PvwapSprd"],
+    "sprd_close":    ["Close/Sprd", "eClose/Sprd"],
+    "sprd_vwap":     ["Vwap/Sprd", "eVwap/Sprd"],
     # capacity and behaviour
     "adv_pct":       ["%Adv", "% Adv", "PctAdv"],
     "adv":           ["Adv", "ADV"],
@@ -155,6 +162,10 @@ COLUMNS = {
 
 REQUIRED = ["strategy", "date", "symbol", "side", "notional", "order_shares",
             "fill_rate", "pct_close"]
+
+# Present in some exports, computed here when absent. Never reported as a gap,
+# because a missing one costs nothing.
+OPTIONAL = ["sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap"]
 
 # The export writes a banner on row 1 and the real header on row 2 in some
 # formats. 0 = header on the first row.
@@ -785,10 +796,21 @@ def clean_values(df: pd.DataFrame, dry_run: bool = False) -> pd.DataFrame:
 def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
     section("SANITY REPORT")
 
-    missing = [c for c in COLUMNS if c not in cols]
-    log(f"  resolved {len(cols)}/{len(COLUMNS)} known fields")
+    missing = [c for c in COLUMNS if c not in cols and c not in OPTIONAL]
+    log(f"  resolved {len(cols)}/{len(COLUMNS) - len(OPTIONAL)} known fields")
     if missing:
         log(f"  unresolved: {', '.join(sorted(missing))}")
+
+    # Say which spread-normalised columns came from the file and which were
+    # computed, so the two are never confused for each other.
+    read = [c for c in OPTIONAL if c in cols]
+    calc = [c for c in OPTIONAL if c not in cols and c.replace("sprd_", "slip_") in df]
+    if read:
+        log(f"  spread-normalised, read from the file: "
+            + ", ".join(f"{c} <- {cols[c]}" for c in read))
+    if calc:
+        log(f"  spread-normalised, computed as slippage / spread: "
+            + ", ".join(calc))
     unused = [c for c in raw_cols if c not in set(cols.values())]
     if unused:
         log(f"  columns in the file with no mapping: {', '.join(map(str, unused))}")
@@ -2441,6 +2463,18 @@ def self_test() -> int:
 
     check("wait cost identity: IS - Close",
           np.allclose(df["wait_cost_bps"], df["slip_arrival"] - df["slip_close"]))
+    # The export carries some spread-normalised columns and not others, so the
+    # derived ones have to be exactly slippage / spread or the two halves of
+    # the spreads table would not be the same measure.
+    ok = all(np.allclose(df[f"sprd_{b}"].dropna(),
+                         (df[f"slip_{b}"] / df["spread_bps"].where(
+                             df["spread_bps"] > 0)).dropna())
+             for b in ["arrival", "pvwap", "close", "vwap"]
+             if f"sprd_{b}" in df)
+    check("derived spread-normalised columns are slippage / spread", ok)
+    check("a spread of zero gives no ratio, and does not raise",
+          bool(pd.isna((pd.Series([10.0]) / pd.Series([0.0]).where(
+              pd.Series([0.0]) > 0)).iloc[0])))
     check("close vs session identity: Vwap - Close",
           np.allclose(df["close_vs_session_bps"],
                       df["slip_vwap"] - df["slip_close"]))
