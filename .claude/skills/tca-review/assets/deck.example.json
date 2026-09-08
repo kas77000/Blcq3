@@ -1,0 +1,205 @@
+{
+  "client": "Acme Asset Management",
+  "period": "H1 2026",
+  "footer": "Execution review - prepared for Acme Asset Management",
+  "slides": [
+    {
+      "type": "title",
+      "title": "Execution review",
+      "subtitle": "Acme Asset Management - H1 2026",
+      "footnote": "Prepared by Execution Consulting. All figures cover January to June 2026.",
+      "notes": "Cover. 2,400 orders, $1.82bn traded."
+    },
+    {
+      "type": "bullets",
+      "title": "How to read this deck",
+      "bullets": [
+        "Plus means you beat the market.",
+        "One basis point is worth $1,000 per $10 million traded.",
+        "Each algo is judged against its own job."
+      ],
+      "notes": "Sign convention is positive_is_savings, confirmed against the source."
+    },
+    {
+      "type": "table",
+      "title": "What we looked at",
+      "table": {
+        "data": "scope.csv",
+        "columns": [
+          "strategy",
+          "orders",
+          "notional_musd",
+          "pct_notional",
+          "fill_rate_pct"
+        ],
+        "headers": [
+          "Strategy",
+          "Orders",
+          "Value ($m)",
+          "Share",
+          "Filled"
+        ],
+        "formats": [
+          null,
+          "{:,.0f}",
+          "{:,.1f}",
+          "{:.1f}%",
+          "{:.1f}%"
+        ],
+        "sort": "-notional_musd"
+      },
+      "notes": "India excluded from the close numbers and reported separately."
+    },
+    {
+      "type": "chart",
+      "title": "Every strategy finished close to the market",
+      "chart": {
+        "kind": "bar",
+        "data": "benchmarks.csv",
+        "filter": {
+          "benchmark": "pvwap"
+        },
+        "x": "strategy",
+        "y": "value_bps",
+        "diverging": true,
+        "ylabel": "",
+        "xlabel": "basis points",
+        "axis_note": "left = cost     |     right = savings"
+      },
+      "bullets": [
+        "PART lagged the most."
+      ],
+      "notes": "Notional weighted, winsorised at 1/99. n per bar in benchmarks.csv."
+    },
+    {
+      "type": "chart",
+      "title": "Waiting cost more than the trading did",
+      "chart": {
+        "kind": "waterfall",
+        "data": "waterfall.csv",
+        "x": "step",
+        "y": "value_bps",
+        "total_label": "Total against arrival",
+        "ylabel": "basis points",
+        "axis_note": "up = savings     |     down = cost"
+      },
+      "notes": "Arrival minus close is the cost of waiting; close is the algo's own work."
+    },
+    {
+      "type": "section",
+      "title": "How your close orders did"
+    },
+    {
+      "type": "chart",
+      "title": "Bigger orders reach the auction less often",
+      "chart": {
+        "kind": "scatter",
+        "data": "capacity.csv",
+        "x": "pct_adv",
+        "y": "pct_close",
+        "series": "strategy",
+        "xlabel": "order size against a normal day (%)",
+        "ylabel": "share traded in the auction (%)",
+        "line": {
+          "data": "capacity_line.csv",
+          "x": "pct_adv",
+          "y": "median_pct_close",
+          "label": "what that size normally achieves"
+        }
+      },
+      "notes": "Reference line is the median auction share within each size band."
+    },
+    {
+      "type": "chart",
+      "title": "Where the close orders ended up",
+      "chart": {
+        "kind": "stacked_bar",
+        "data": "execution.csv",
+        "filter": {
+          "metric": [
+            "pct_open",
+            "pct_close",
+            "pct_post",
+            "pct_take",
+            "pct_dark"
+          ]
+        },
+        "x": "strategy",
+        "y": "value",
+        "series": "metric",
+        "series_order": [
+          "pct_close",
+          "pct_post",
+          "pct_take",
+          "pct_dark",
+          "pct_open"
+        ],
+        "xlabel": "share of the order (%)"
+      },
+      "notes": "The five shares sum to 100 - checked by verify.py."
+    },
+    {
+      "type": "chart",
+      "title": "One in twelve close orders missed with no reason",
+      "chart": {
+        "kind": "bar",
+        "data": "cohorts.csv",
+        "x": "cohort",
+        "y": "pct_notional",
+        "diverging": false,
+        "value_fmt": "{:.1f}%",
+        "sort": "-pct_notional",
+        "xlabel": "share of close value (%)"
+      },
+      "notes": "Unexplained group listed order by order in the appendix."
+    },
+    {
+      "type": "chart",
+      "title": "PART traded slower than you asked for",
+      "chart": {
+        "kind": "grouped_bar",
+        "data": "execution.csv",
+        "filter": {
+          "strategy": "PART",
+          "metric": [
+            "participation_target",
+            "participation_actual"
+          ]
+        },
+        "x": "strategy",
+        "y": "value",
+        "series": "metric",
+        "value_fmt": "{:.1f}",
+        "ylabel": "share of market volume (%)"
+      },
+      "notes": "Target 15%, achieved 11%. Orders ran longer and carried more risk."
+    },
+    {
+      "type": "chart",
+      "title": "Costs improved through the half year",
+      "chart": {
+        "kind": "line",
+        "data": "monthly.csv",
+        "filter": {
+          "benchmark": "arrival"
+        },
+        "x": "period",
+        "y": "value_bps",
+        "series": "strategy",
+        "ylabel": "basis points against arrival",
+        "axis_note": "up = savings     |     down = cost"
+      },
+      "notes": "Roughly 90 orders per point."
+    },
+    {
+      "type": "bullets",
+      "title": "Three things we suggest",
+      "bullets": [
+        "Send the small close orders later.",
+        "Raise the PART rate, or accept that orders run long.",
+        "Add close tagging so we can explain the misses."
+      ],
+      "notes": "Ordered by value. First worth roughly $180k over a comparable half year."
+    }
+  ]
+}

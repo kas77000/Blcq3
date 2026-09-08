@@ -11,3 +11,10 @@ output_*/
 
 __pycache__/
 *.pyc
+
+# TCA reviews hold client screenshots, transcribed numbers and client-facing
+# decks. None of it belongs in the repo.
+reviews/
+*.heic
+*.HEIC
+*.pptx
