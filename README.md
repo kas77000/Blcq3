@@ -40,6 +40,8 @@ Output lands in `output/`:
 | `charts/*.png` | every exhibit standalone at 200dpi |
 | `run_log.txt` | sanity report, close-algo selection, all tables, findings |
 
+**What to check on the target machine:** [docs/WHAT-TO-CHECK.md](docs/WHAT-TO-CHECK.md)
+
 **Which columns are needed:** [docs/COLUMNS-CHECKLIST.md](docs/COLUMNS-CHECKLIST.md)
 (tick-list) and [docs/COLUMNS-REQUIRED.md](docs/COLUMNS-REQUIRED.md) (why each
 one, and what dies without it).

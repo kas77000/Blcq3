@@ -542,14 +542,20 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
             if hi <= 1.5 and not PCT_FIELDS_ARE_FRACTIONS:
                 warn("{} never exceeds {:.3f} - it may be a fraction. Set "
                      "PCT_FIELDS_ARE_FRACTIONS = True.".format(f, hi))
-            if hi > 101 and f in VENUE_FIELDS:
-                warn("{} reaches {:.1f}, above 100.".format(f, hi))
+            if hi > 101 and f in VENUE_FIELDS + ["fill_rate"]:
+                warn("{} reaches {:.1f}, above 100 - impossible for a share, "
+                     "so the column means something other than assumed."
+                     .format(f, hi))
 
     # --- side adjustment --------------------------------------------------
     if "side_label" in df:
         log("")
         log("  side adjustment check (means by side, bps)")
-        bench = [c for c in ["slip_arrival", "slip_close", "slip_pvwap"]
+        # first_exec_vs_close is a bps measure like the rest, so it has to
+        # clear the same side check: if it is NOT side-adjusted, every sell is
+        # inverted and the "was starting early right?" answer flips sign.
+        bench = [c for c in ["slip_arrival", "slip_close", "slip_pvwap",
+                             "slip_nextopen", "first_exec_vs_close"]
                  if c in df]
         if bench:
             chk = df.groupby("side_label")[bench].mean().round(3)
