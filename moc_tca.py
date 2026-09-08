@@ -2399,8 +2399,13 @@ def findings(t: dict) -> None:
         return
 
     n_tot = auc["notional"].sum()
-    log(f"  {len(auc):,} close-algo orders, {CURRENCY} {n_tot/1e6:,.0f}m "
+    strats = ", ".join(sorted(auc["strategy"].dropna().unique().astype(str)))         if "strategy" in auc else "the strategies in scope"
+    log(f"  {len(auc):,} orders on {strats}, {CURRENCY} {n_tot/1e6:,.0f}m "
         f"executed, in markets that run a closing auction.")
+    if "strategy" in auc and auc["strategy"].nunique() > 1:
+        log("    These are NOT all close algos. They are reported together only")
+        log("    because they compete for the same auction; every number below")
+        log("    that matters is broken out by strategy.")
 
     if "pct_close" in auc:
         w = wmean(auc["pct_close"], auc["notional"], winsor=False)
@@ -2453,8 +2458,17 @@ def findings(t: dict) -> None:
                 f"{CURRENCY} {r['notional (' + CURRENCY + 'm)']:,.0f}m "
                 f"({r['% of notional']:.1f}% of close-algo notional).")
             log("    They traded, they were small enough for the auction to")
-            log("    absorb, they carried no limit, and they still got nothing")
-            log("    in the auction.")
+            log("    absorb, and they still got nothing in the auction.")
+            lim_useful = False
+            if "market_limit" in auc:
+                lim_useful = auc["market_limit"].astype(str).str.strip()                                 .str.lower().nunique(dropna=True) > 1
+            if lim_useful:
+                log("    None of them carried a limit that could explain it.")
+            else:
+                log("    Whether a limit was binding CANNOT be said: every order")
+                log("    in this file carries the same market_limit value, so the")
+                log("    flag distinguishes nothing. Some of these may turn out")
+                log("    to be limits that did not cross.")
             log("    The cause is NOT in this file. They are listed one by one")
             log("    in sheet 16_orders_to_review for the desk to check against")
             log("    the logs. If this cohort is large, that is itself the")
