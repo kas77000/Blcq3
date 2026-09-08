@@ -785,6 +785,32 @@ def clean_values(df: pd.DataFrame, dry_run: bool = False) -> pd.DataFrame:
         up = df["side"].astype(str).str.strip().str.upper()
         known = up.isin({v.upper() for v in BUY_VALUES}
                         | {v.upper() for v in SELL_VALUES})
+        # A side this script does not recognise is far more likely to be a
+        # vocabulary gap here than a broken record in the file - a short-sell
+        # code, say. Dropping those silently would remove a whole category of
+        # flow and bias every number, so the values are named and, past a
+        # trivial share, the run stops rather than quietly proceeding.
+        if (~known).any():
+            unknown = up[~known].value_counts()
+            warn("side values this script does not recognise:")
+            for val, n in unknown.head(10).items():
+                log(f"    {val!r:<24}{n:>10,} orders")
+            share = 100.0 * int((~known).sum()) / max(len(df), 1)
+            if share > 0.5 and not dry_run:
+                raise SystemExit("\n".join([
+                    "",
+                    f"{share:.1f}% of orders carry a side this script does not",
+                    "know. That is a vocabulary gap, not dirty data.",
+                    "",
+                    "Add the codes listed above to BUY_VALUES or SELL_VALUES at",
+                    "the top of this script and run again. Do not let them be",
+                    "excluded: a whole category of flow would leave the review",
+                    "without anyone noticing.",
+                ]))
+            if share > 0.5:
+                log(f"    {share:.1f}% of orders - that is a vocabulary gap, "
+                    "not dirty data.")
+                log("    Add these to BUY_VALUES / SELL_VALUES before the real run.")
         drop("side not recognised", ~known)
     if "date" in df:
         drop("no date", df["date"].isna())
