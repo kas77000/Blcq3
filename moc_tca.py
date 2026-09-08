@@ -1348,8 +1348,22 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
     fr = df["fill_rate"] if "fill_rate" in df else pd.Series(100.0, index=idx)
     pc = df["pct_close"]
     adv = df["adv_pct"] if "adv_pct" in df else pd.Series(0.0, index=idx)
-    lim = (df["market_limit"].astype(str).str.lower() == "limit") \
-        if "market_limit" in df else pd.Series(False, index=idx)
+    # "Limit did not cross" is only a cause if the flag DISCRIMINATES. Where
+    # every order in the file carries the same value, the flag is the base
+    # rate, not an explanation - and using it would quietly absorb the whole
+    # unexplained cohort, which is the one thing this table exists to find.
+    lim = pd.Series(False, index=idx)
+    if "market_limit" in df:
+        vals = df["market_limit"].astype(str).str.strip().str.lower()
+        if vals.nunique(dropna=True) > 1:
+            lim = vals == "limit"
+        else:
+            only = vals.dropna().unique()
+            warn("market_limit is "
+                 + (f"always {only[0]!r}" if len(only) else "empty")
+                 + " - it cannot explain a miss, so no order is attributed")
+            log("     to its limit. Those orders fall to 'No auction fill -")
+            log("     unexplained', which is the honest place for them.")
     short = (df["frontier_shortfall_pp"] if "frontier_shortfall_pp" in df
              else pd.Series(0.0, index=idx)).fillna(0.0)
 
@@ -1698,17 +1712,31 @@ def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
     ax.set_yticklabels([f"{l}{'  (small sample)' if small and small[i] else ''}"
                         for i, l in enumerate(labels)])
     ax.invert_yaxis()
-    span = max([abs(v) for v in values if v is not None and not math.isnan(v)]
-               or [1.0])
-    pad = span * 0.22
+    # The whiskers reach past the bar ends, so the axis has to allow for them
+    # and the label has to clear them. A CI line drawn through a value label
+    # hides the minus sign, and a cost of 73bps then reads as a saving of 73.
+    reach = [abs(v) for v in values if v is not None and not math.isnan(v)]
+    if ci is not None:
+        reach += [abs(b) for lo, hi in ci for b in (lo, hi)
+                  if b is not None and not math.isnan(b)]
+    span = max(reach or [1.0])
+    pad = span * 0.30
     ax.set_xlim(-span - pad, span + pad)
     for i, v in enumerate(values):
         if v is None or math.isnan(v):
             continue
+        edge = v
+        if ci is not None and i < len(ci):
+            lo, hi = ci[i]
+            if (lo is not None and hi is not None
+                    and not math.isnan(lo) and not math.isnan(hi)):
+                edge = max(v, hi) if v >= 0 else min(v, lo)
         off = span * 0.03
-        ax.text(v + (off if v >= 0 else -off), i, _fmt_bps(v),
+        ax.text(edge + (off if v >= 0 else -off), i, _fmt_bps(v),
                 va="center", ha="left" if v >= 0 else "right",
-                color=INK, fontsize=8.5, zorder=5)
+                color=INK, fontsize=8.5, zorder=6,
+                bbox=dict(boxstyle="round,pad=0.16", facecolor=SURFACE,
+                          edgecolor="none", alpha=0.85))
 
 
 def chart_scope(t: pd.DataFrame, out: Path) -> None:
@@ -2229,10 +2257,20 @@ def t_fill_rate(df: pd.DataFrame) -> pd.DataFrame:
 def t_monthly(df: pd.DataFrame) -> pd.DataFrame:
     if "month" not in df:
         return pd.DataFrame()
+    # A month the extract only partly covers is not comparable with a full
+    # one. September 1-4 next to a full August reads as a collapse when it is
+    # four days of flow, so the month is marked and the reader is told.
+    span_end = df["date"].max() if "date" in df else None
+    span_start = df["date"].min() if "date" in df else None
     rows = []
     for key, g in df.groupby("month", dropna=False, observed=True):
+        partial = False
+        if span_end is not None and pd.notna(span_end):
+            period = pd.Period(str(key), freq="M")
+            partial = (period.end_time.date() > span_end.date()
+                       or period.start_time.date() < span_start.date())
         rows.append({
-            "month": key,
+            "month": str(key) + (" (part)" if partial else ""),
             "orders": len(g),
             "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
             "wtd %CLOSE": wmean(g["pct_close"], g["notional"], winsor=False),
