@@ -280,6 +280,24 @@ Stated on every run, so the gaps are explicit rather than discovered late:
 - Whether we traded **into or against the published imbalance**.
 - Any impact claim beyond what `NextOpen - Close` supports.
 
+## Markets
+
+`34_market_profile` puts each market's size and cost in one place, ordered by
+value traded: orders, share of orders, notional, share of notional, the
+weighted spread, auction share, slippage against arrival, PVWAP and the close
+in both bps and spreads, fill rate and median size. Two charts come off it —
+`13_market_notional` for where the value went, `14_market_slippage` for what
+it cost.
+
+Both are **ordered by share of value, never by cost**. Ordering by cost puts a
+sixty-order market at the top of the slide, and each bar carries its own share
+of the book so nobody has to guess which ones can actually move the number.
+
+`35_market_by_strategy` splits the same rows by strategy, because a market
+effect can be a mix effect: if one market is nearly all VWAP and another nearly
+all CLOSE, comparing the markets compares the strategies as much as the venues.
+Check this before attributing anything to a market.
+
 ## Charts
 
 Palette validated against the computable checks — OKLCH lightness band, chroma

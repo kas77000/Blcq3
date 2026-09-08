@@ -1822,6 +1822,64 @@ def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
     _save(fig, out, name)
 
 
+def chart_market_notional(t: pd.DataFrame, out: Path,
+                          name: str = "13_market_notional.png") -> None:
+    """How much went to each market. Magnitude, so one hue, largest first."""
+    if t.empty or "notional (" + CURRENCY + "m)" not in t:
+        return
+    col = "notional (" + CURRENCY + "m)"
+    d = t.head(14)
+    fig, (ax,) = _fig((11.0, 6.4))
+    y = np.arange(len(d))
+    vals = [float(v) for v in d[col]]
+    ax.barh(y, vals, color=SERIES[0], height=0.62, zorder=3)
+    ax.set_yticks(y)
+    ax.set_yticklabels(list(d.index))
+    ax.invert_yaxis()
+    ax.grid(axis="x", zorder=0)
+    ax.set_axisbelow(True)
+    span = max(vals or [1.0])
+    ax.set_xlim(0, span * 1.28)
+    for i, (v, (_, row)) in enumerate(zip(vals, d.iterrows())):
+        share = row.get("% of notional", float("nan"))
+        txt = f"  {v:,.0f}m" + (f"  ({share:.0f}%)" if np.isfinite(share) else "")
+        ax.text(v, i, txt, va="center", ha="left", fontsize=8.5, color=INK,
+                zorder=5)
+    _style(ax, xlabel=f"executed notional ({CURRENCY}m)",
+           title="Where the value traded, by market", horizontal=True)
+    _save(fig, out, name)
+
+
+def chart_market_slippage(t: pd.DataFrame, out: Path,
+                          name: str = "14_market_slippage.png",
+                          value: str = "vs Arrival bps") -> None:
+    """Cost by market, ordered by how much was traded there, not by cost.
+
+    Ordering by cost would put a 61-order market at the top of the slide.
+    Ordering by value keeps the reader looking at the markets that can move
+    the number, and each bar carries its own share so nobody has to guess.
+    """
+    if t.empty or value not in t:
+        return
+    d = t.head(14)
+    fig, (ax,) = _fig((11.0, 6.4))
+    labels = []
+    for mkt, row in d.iterrows():
+        share = row.get("% of notional", float("nan"))
+        labels.append(f"{mkt}   ({share:.0f}% of value)"
+                      if np.isfinite(share) else str(mkt))
+    _diverging_barh(ax, labels, [float(v) for v in d[value]],
+                    small=[bool(x) for x in d["small sample"]]
+                    if "small sample" in d else None)
+    _style(ax, xlabel=f"{value}, notional-weighted   {COST_SAVE_NOTE}",
+           title="What each market cost, biggest by value first",
+           horizontal=True)
+    ax.text(0.0, -0.14, "ordered by share of value traded, not by cost - a "
+            "small market with a big number is still a small market",
+            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
+    _save(fig, out, name)
+
+
 def chart_decomposition(t: pd.DataFrame, out: Path, name: str) -> None:
     """Two components with different owners, plus the total they sum to."""
     if t.empty:
@@ -2264,6 +2322,8 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["28_by_adv"] = by_group(auc, "adv_bucket", "slip_arrival")
     t["29_fill_rate"] = t_fill_rate(df)
     t["30_monthly"] = t_monthly(df)
+    t["34_market_profile"] = t_market_profile(df)
+    t["35_market_by_strategy"] = t_market_by_strategy(df)
     if "side_label" in df:
         t["33_by_side"] = by_group(df, "side_label", "slip_arrival",
                                    order=SIDE_ORDER)
@@ -2293,6 +2353,76 @@ def t_fill_rate(df: pd.DataFrame) -> pd.DataFrame:
                 if "unfilled_shares" in g else np.nan,
         })
     return pd.DataFrame(rows).set_index("strategy").round(2)
+
+
+def _market_row(key, g, total_notional, total_orders) -> dict:
+    """One market's size and cost, in the order a slide reads them."""
+    row = {
+        "orders": len(g),
+        "% of orders": 100.0 * len(g) / max(total_orders, 1),
+        "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
+        "% of notional": 100.0 * g["notional"].sum() / max(total_notional, 1e-9),
+        "spread bps (wtd)": wmean(g["spread_bps"], g["notional"])
+            if "spread_bps" in g else np.nan,
+        "wtd %CLOSE": wmean(g["pct_close"], g["notional"], winsor=False)
+            if "pct_close" in g else np.nan,
+    }
+    for slip, label in [("slip_arrival", "vs Arrival"),
+                        ("slip_pvwap", "vs PVWAP"),
+                        ("slip_close", "vs Close")]:
+        row[label + " bps"] = wmean(g[slip], g["notional"]) if slip in g else np.nan
+    # Spreads, as the ratio of the two averages - see t_spread_normalised.
+    sprd = row["spread bps (wtd)"]
+    for label in ["vs Arrival", "vs PVWAP"]:
+        bps = row[label + " bps"]
+        row[label + " spreads"] = (bps / sprd if sprd and np.isfinite(sprd)
+                                   and sprd > 0 and np.isfinite(bps) else np.nan)
+    row["mean FR %"] = wmean(g["fill_rate"], g["notional"], winsor=False) \
+        if "fill_rate" in g else np.nan
+    row["median %Adv"] = g["adv_pct"].median() if "adv_pct" in g else np.nan
+    row["small sample"] = len(g) < MIN_N_FOR_CI
+    return row
+
+
+def t_market_profile(df: pd.DataFrame) -> pd.DataFrame:
+    """Size and cost of every market in one place, ordered by value traded.
+
+    The market tables elsewhere each answer one question. This one is the
+    slide: how much went there, and what it cost, with the spread beside the
+    bps so a wide-spread market is not mistaken for a badly traded one.
+    """
+    if "market" not in df or df.empty:
+        return pd.DataFrame()
+    total_n, total_o = df["notional"].sum(), len(df)
+    rows = {}
+    for key, g in df.groupby("market", dropna=False, observed=True):
+        rows[str(key)] = _market_row(key, g, total_n, total_o)
+    out = pd.DataFrame(rows).T
+    out.index.name = "market"
+    return out.sort_values("% of notional", ascending=False).round(3)
+
+
+def t_market_by_strategy(df: pd.DataFrame) -> pd.DataFrame:
+    """The same split by strategy, because a market effect can be a mix effect.
+
+    If one market is nearly all VWAP and another nearly all CLOSE, comparing
+    the two markets compares the strategies as much as the venues. This is
+    the table that tells you which it was.
+    """
+    if "market" not in df or "strategy" not in df or df.empty:
+        return pd.DataFrame()
+    total_n, total_o = df["notional"].sum(), len(df)
+    rows = {}
+    for (mkt, strat), g in df.groupby(["market", "strategy"], dropna=False,
+                                      observed=True):
+        if g.empty:
+            continue
+        rows[(str(mkt), str(strat))] = _market_row(mkt, g, total_n, total_o)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows).T
+    out.index.names = ["market", "strategy"]
+    return out.sort_values("% of notional", ascending=False).round(3)
 
 
 def t_monthly(df: pd.DataFrame) -> pd.DataFrame:
@@ -2350,6 +2480,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
                     "09_venue_mix_market.png",
                     "Where the executed quantity actually went, by market")
     chart_capacity(t.get("14_capacity", pd.DataFrame()), charts)
+    chart_market_notional(t.get("34_market_profile", pd.DataFrame()), charts)
+    chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts)
     chart_cohorts(t.get("15_cohorts", pd.DataFrame()), charts)
     chart_headline(t.get("17_first_exec_by_adv", pd.DataFrame())
                    .rename(columns={"first exec vs Close bps (wtd)":
