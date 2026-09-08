@@ -1,0 +1,13 @@
+# Client order data must NEVER be committed. Blanket-ignore the formats an
+# extract arrives in, so a stray orders.csv cannot be added by accident.
+*.csv
+*.xlsx
+*.xls
+*.xlsm
+
+# Generated output - regenerate with --sample or a real run
+output/
+output_*/
+
+__pycache__/
+*.pyc
