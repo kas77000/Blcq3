@@ -553,7 +553,28 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["venue_sum"] = df[present].sum(axis=1, min_count=1)
     cont_fields = [f for f in ["pct_take", "pct_post", "pct_dark"] if f in df]
     if cont_fields:
-        df["pct_continuous"] = df[cont_fields].sum(axis=1, min_count=1)
+        cont = df[cont_fields].sum(axis=1, min_count=1)
+        # Present but never above zero means the export did not populate the
+        # continuous splits - not that nothing traded in continuous. Taking it
+        # at face value sets every continuous weight to zero, and any table
+        # weighted by continuous notional then returns nothing at all.
+        #
+        # What did not print in an auction must have traded in continuous, so
+        # that is the fallback, and it is stated rather than assumed silently.
+        top = float(np.nanmax(cont.to_numpy(dtype=float))) if len(cont) else 0.0
+        if not np.isfinite(top) or top <= 0:
+            auction = df["pct_close"].fillna(0.0) if "pct_close" in df else 0.0
+            if "pct_open" in df:
+                auction = auction + df["pct_open"].fillna(0.0)
+            df["pct_continuous"] = (100.0 - auction).clip(lower=0.0)
+            warn("pct_take/post/dark are present but never above zero, so the "
+                 "export did not populate them.")
+            log("    Continuous share is taken as 100 - %CLOSE - %OPEN: what "
+                "did not print in an auction traded in continuous.")
+            log("    The venue-mix tables cannot show WHERE in continuous, "
+                "only that it was not an auction.")
+        else:
+            df["pct_continuous"] = cont
     if "pct_close" in df and "notional" in df:
         df["close_notional"] = df["notional"] * df["pct_close"] / 100.0
         df["cont_notional"] = df["notional"] * df.get(
@@ -1041,6 +1062,20 @@ def choose_close_strategies(df: pd.DataFrame) -> list:
 # STATISTICS
 # ===========================================================================
 
+def weight_column(df: pd.DataFrame, preferred: str,
+                  fallback: str = "notional") -> str:
+    """The preferred weight, unless it carries no positive value anywhere.
+
+    A weight column of all zeros is not a weighting, it is a blank table:
+    every row fails the w > 0 test and the mean comes back as nan.
+    """
+    if preferred in df:
+        col = pd.to_numeric(df[preferred], errors="coerce")
+        if (col > 0).any():
+            return preferred
+    return fallback
+
+
 def winsorize(v: np.ndarray, limits=WINSOR) -> np.ndarray:
     """Pull the extreme tails back to the percentile value, do not drop them."""
     if limits is None:
@@ -1419,7 +1454,7 @@ def t_first_exec(df: pd.DataFrame, by: str) -> pd.DataFrame:
     """
     if "first_exec_vs_close" not in df:
         return pd.DataFrame()
-    w = "cont_notional" if "cont_notional" in df else "notional"
+    w = weight_column(df, "cont_notional")
     rows = []
     for key, g in df.groupby(by, dropna=False, observed=True):
         v = g["first_exec_vs_close"]
@@ -1443,7 +1478,7 @@ def t_early_start_waste(df: pd.DataFrame) -> pd.DataFrame:
     """Orders that started early, had no size reason to, and lost by it."""
     if "first_exec_vs_close" not in df or "adv_pct" not in df:
         return pd.DataFrame()
-    w = "cont_notional" if "cont_notional" in df else "notional"
+    w = weight_column(df, "cont_notional")
     small = df["adv_pct"] < COHORT_ADV_LOW
     rows = []
     for label, mask in [
@@ -2415,12 +2450,21 @@ def probe(path: Path) -> None:
 
     df = normalise(raw, cols)
     sanity_report(df, cols, list(raw.columns))
+
+    # What the real run would remove, without removing it. The per-column
+    # count of infinities is the part worth reading twice.
+    section("SCOPE AND EXCLUSIONS (dry run - nothing is removed)")
+    clean_values(df, dry_run=True)
+
     choose_close_strategies(df)
 
     log("")
     log("  NEXT STEP")
-    log("    Read the strategy table above, pin CLOSE_STRATEGIES at the top of")
-    log("    this script, then run without --probe.")
+    log("    Read the strategy table above and check it against")
+    log("    STRATEGY_SCOPE and CLOSE_STRATEGIES at the top of this script,")
+    log("    then run without --probe. For two windows off one extract:")
+    log("      --to 2026-06-30 --out output_h1   --label \"H1 2026\"")
+    log("      --from 2026-07-01 --out output_h2 --label \"Jul to 4 Sep 2026\"")
 
 
 # ===========================================================================
@@ -2457,6 +2501,17 @@ def self_test() -> int:
     check("venue mix sums to 100",
           bool((df["venue_sum"].sub(100).abs() < 0.05).all()),
           float(df["venue_sum"].sub(100).abs().max()))
+    blank = pd.DataFrame({"pct_close": [40.0, 100.0], "pct_open": [10.0, 0.0],
+                          "pct_take": [0.0, 0.0], "pct_post": [0.0, 0.0],
+                          "pct_dark": [0.0, 0.0], "notional": [1e6, 1e6]})
+    check("weighting falls back when a weight column is all zeros",
+          weight_column(pd.DataFrame({"cont_notional": [0.0, 0.0],
+                                      "notional": [1.0, 2.0]}),
+                        "cont_notional") == "notional")
+    check("weighting keeps the preferred column when it has value",
+          weight_column(pd.DataFrame({"cont_notional": [0.0, 5.0],
+                                      "notional": [1.0, 2.0]}),
+                        "cont_notional") == "cont_notional")
     check("pct_continuous = TAKE + POST + DARK",
           np.allclose(df["pct_continuous"],
                       df[["pct_take", "pct_post", "pct_dark"]].sum(axis=1)))
