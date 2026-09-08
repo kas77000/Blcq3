@@ -182,8 +182,15 @@ BUY_VALUES = {"B", "BUY", "BOT", "1", "BUYS"}
 # Anything not in BUY_VALUES is labelled Sell, so a blank or an unexpected
 # code would silently become a sell order. SELL_VALUES exists to catch that:
 # a side in neither set is excluded rather than guessed.
-SELL_VALUES = {"S", "SELL", "SLD", "SS", "SHORT", "SHORTSELL", "SHORT SELL",
-               "2", "SELLS"}
+SELL_VALUES = {"S", "SELL", "SLD", "SS", "SSH", "SSE", "SHORT", "SHORTSELL",
+               "SHORT SELL", "2", "SELLS"}
+
+# Short sells are still sells - same direction, same sign - so they need no
+# separate treatment in the arithmetic. They are worth SEEING separately
+# though: locate requirements and short-sale rules can change how an order
+# executes, and on this book they are 13% of the flow. So they keep their own
+# label rather than disappearing into "Sell".
+SHORT_SELL_VALUES = {"SS", "SSH", "SSE", "SHORT", "SHORTSELL", "SHORT SELL"}
 
 # $Mln is EXECUTED notional, built as sum(cumqty * avgprice * fx_last) / 1e6.
 # fx_last is inside it, so the column is millions of USD and the multiplier
@@ -294,6 +301,7 @@ CLOSE_LABELS = ["0% (no auction fill)", "0-25%", "25-50%", "50-75%",
 
 CAP_ORDER = ["Large", "Mid", "Small", "Micro", "Other"]
 MARKET_LIMIT_ORDER = ["Market", "Limit"]
+SIDE_ORDER = ["Buy", "Sell", "Short sell"]
 ARRIVAL_ORDER = ["Pre-Open", "First30Mins", "Day", "Last30Mins"]
 
 # Cohort thresholds for the miss taxonomy.
@@ -521,7 +529,10 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     if "side" in df:
         up = df["side"].str.upper()
         df["is_buy"] = up.isin({v.upper() for v in BUY_VALUES})
-        df["side_label"] = np.where(df["is_buy"], "Buy", "Sell")
+        df["is_short"] = up.isin({v.upper() for v in SHORT_SELL_VALUES})
+        df["side_label"] = np.where(
+            df["is_buy"], "Buy",
+            np.where(df["is_short"], "Short sell", "Sell"))
 
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
     df["close_regime"] = close_regime(df["market"], df.get("date"))
@@ -2253,6 +2264,9 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["28_by_adv"] = by_group(auc, "adv_bucket", "slip_arrival")
     t["29_fill_rate"] = t_fill_rate(df)
     t["30_monthly"] = t_monthly(df)
+    if "side_label" in df:
+        t["33_by_side"] = by_group(df, "side_label", "slip_arrival",
+                                   order=SIDE_ORDER)
     if not noauc.empty:
         t["31_no_auction_markets"] = t_venue_mix(noauc, "market")
         t["32_close_regimes"] = t_venue_mix(all_df, "close_regime")

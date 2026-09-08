@@ -206,6 +206,13 @@ for getting tagging into the extract.
 - The export is **already side-adjusted** — plus is good, minus is bad, on both
   sides. `SIDE_ADJUSTED = True` records that, and the by-side means are then
   printed as a result to explain rather than as a data error.
+- **Short sells keep their own label.** The house code is `SSH` and it is 13%
+  of the book. A short sell is still a sell, so the arithmetic is unchanged,
+  but locate requirements and short-sale rules can change how an order
+  executes — so buys, sells and short sells are reported as three groups
+  (`33_by_side`) rather than two. A side code the script does not know is
+  never silently dropped: it is named, and past half a percent of the book the
+  run stops and asks for it.
 
 ## Scope, and what leaves the study
 
