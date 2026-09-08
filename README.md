@@ -298,6 +298,31 @@ effect can be a mix effect: if one market is nearly all VWAP and another nearly
 all CLOSE, comparing the markets compares the strategies as much as the venues.
 Check this before attributing anything to a market.
 
+## Money, and the algo-choice question
+
+Every notional-weighted table carries a `saved (USDk)` column beside its bps:
+`bps x notional / 10`, positive still meaning savings, so a negative figure
+reads as a cost without a second convention to remember. The early-start
+tables are weighted by **continuous** notional, so their money is that portion
+of the order rather than the whole of it.
+
+`36_algo_choice` compares the two strategies on the same market and the same
+size band, and `15_algo_choice` charts it. Every cell needs at least 30 orders
+on **both** sides.
+
+**It is not a controlled comparison, and must never be presented as one.**
+Orders are not assigned to a strategy at random. A trader choosing CLOSE for
+one order and VWAP for another is acting on urgency, on a view, on an
+instruction the extract does not carry — and those reasons drive cost too.
+Holding market and size constant removes the two biggest confounds and leaves
+the rest standing. So read a row as *"orders like these, on this algo, cost
+this much"* — a question for the desk — and never as *"the other algo would
+have saved that"*. The table, the chart footnote and the run log all say so.
+
+Colour on that chart is the **algo**, not the direction, so it deliberately
+avoids the blue/red diverging pair every other chart uses — otherwise a blue
+bar at −37bps would read as good news.
+
 ## Charts
 
 Palette validated against the computable checks — OKLCH lightness band, chroma

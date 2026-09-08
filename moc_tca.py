@@ -1166,6 +1166,20 @@ def hit_rate(values) -> float:
     return float(100 * (v > 0).mean()) if len(v) else np.nan
 
 
+def to_money_k(bps, notional_musd) -> float:
+    """Basis points on a notional, in thousands of currency.
+
+    bps/1e4 x (musd x 1e6) / 1e3 == bps x musd / 10. Positive stays savings,
+    the same way round as every other number here, so a negative figure in
+    this column reads as a cost without anyone having to be told twice.
+    """
+    if bps is None or notional_musd is None:
+        return np.nan
+    if not (np.isfinite(bps) and np.isfinite(notional_musd)):
+        return np.nan
+    return float(bps) * float(notional_musd) / 10.0
+
+
 def by_group(df: pd.DataFrame, by, value: str, ci: bool = True,
              order=None) -> pd.DataFrame:
     """Weighted mean + median + hit rate + bootstrap CI, per group.
@@ -1184,6 +1198,8 @@ def by_group(df: pd.DataFrame, by, value: str, ci: bool = True,
             "orders": n,
             "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
             "wtd mean bps": wmean(g[value], g["notional"]),
+            "saved (" + CURRENCY + "k)": to_money_k(
+                wmean(g[value], g["notional"]), g["notional"].sum() / 1e6),
             "median bps (per order)": g[value].median(),
             "hit rate % (per order)": hit_rate(g[value]),
             "CI low": lo,
@@ -1516,6 +1532,8 @@ def t_first_exec(df: pd.DataFrame, by: str) -> pd.DataFrame:
             "orders": int(v.notna().sum()),
             "continuous notional (" + CURRENCY + "m)": g[w].sum() / 1e6,
             "first exec vs Close bps (wtd)": wmean(v, g[w]),
+            "saved (" + CURRENCY + "k)": to_money_k(
+                wmean(v, g[w]), g[w].sum() / 1e6),
             "median bps (per order)": v.median(),
             "% orders where early paid": hit_rate(v),
             "CI low": lo,
@@ -1877,6 +1895,56 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
     ax.text(0.0, -0.14, "ordered by share of value traded, not by cost - a "
             "small market with a big number is still a small market",
             transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
+    _save(fig, out, name)
+
+
+def chart_algo_choice(t: pd.DataFrame, out: Path,
+                      name: str = "15_algo_choice.png", top: int = 10) -> None:
+    """Two strategies on the same market and size band, side by side.
+
+    Paired bars rather than a difference, because the difference alone hides
+    whether both were costing money or one was simply less bad.
+    """
+    if t.empty:
+        return
+    bps_cols = [c for c in t.columns if c.endswith(" bps") and c != "gap bps"]
+    if len(bps_cols) < 2:
+        return
+    d = t.head(top)
+    fig, (ax,) = _fig((11.0, 6.8))
+    y = np.arange(len(d))
+    h = 0.8 / len(bps_cols)
+    for i, col in enumerate(bps_cols):
+        offs = y - 0.4 + h * (i + 0.5)
+        vals = [float(v) if pd.notna(v) else 0.0 for v in d[col]]
+        # Deliberately NOT the diverging pair. Every other chart here reads
+        # blue as a saving and red as a cost; on this one colour is the algo,
+        # so borrowing those two hues would make a blue bar at -37bps look
+        # like good news. Slots 3 and 4 are adjacent in the validated order,
+        # and every bar carries its own number as well.
+        ax.barh(offs, vals, height=h * 0.9, color=SERIES[2 + i % 2],
+                zorder=3, label=col.replace(" bps", ""))
+        for yy, v in zip(offs, vals):
+            ax.text(v, yy, "  " + _fmt_bps(v), va="center",
+                    ha="left" if v >= 0 else "right", fontsize=8, color=INK)
+    ax.axvline(0, color=BASELINE, linewidth=1.0, zorder=2)
+    ax.set_yticks(y)
+    ax.set_yticklabels([f"{r['market']}  {r['%Adv bucket']}"
+                        for _, r in d.iterrows()])
+    ax.invert_yaxis()
+    ax.legend(frameon=False, loc="lower right", fontsize=8.5)
+    _style(ax, xlabel=f"vs Arrival, notional-weighted (bps)   {COST_SAVE_NOTE}",
+           title="Same market, same order size - what each algo cost",
+           horizontal=True)
+    ax.text(0.0, -0.09, "colour is the algo on this chart, not the direction - "
+            "left of the line is still a cost",
+            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
+    ax.text(0.0, -0.13,
+            "NOT a controlled comparison: orders are not assigned to a strategy "
+            "at random, and the reason one was chosen drives cost too. Read as "
+            "'orders like these cost this', never as 'the other algo would have "
+            "saved that'.", transform=ax.transAxes, fontsize=7.5,
+            color=INK_MUTED, wrap=True)
     _save(fig, out, name)
 
 
@@ -2323,6 +2391,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["29_fill_rate"] = t_fill_rate(df)
     t["30_monthly"] = t_monthly(df)
     t["34_market_profile"] = t_market_profile(df)
+    t["36_algo_choice"] = t_algo_choice(df)
     t["35_market_by_strategy"] = t_market_by_strategy(df)
     if "side_label" in df:
         t["33_by_side"] = by_group(df, "side_label", "slip_arrival",
@@ -2425,6 +2494,61 @@ def t_market_by_strategy(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("% of notional", ascending=False).round(3)
 
 
+ALGO_COMPARE_MIN_N = 30      # per strategy, per cell, before a cell counts
+
+
+def t_algo_choice(df: pd.DataFrame, benchmark: str = "slip_arrival") -> pd.DataFrame:
+    """Two strategies on the same kind of order: same market, same size band.
+
+    THIS IS NOT A CONTROLLED COMPARISON and must never be presented as one.
+    Orders are not assigned to a strategy at random. A trader who chooses
+    CLOSE for one order and VWAP for another is acting on urgency, on a view,
+    on instructions the extract does not carry - and those reasons drive cost
+    too. Holding market and size constant removes the two biggest confounds
+    and leaves the rest standing.
+
+    So read a row as "orders like these, on this algo, cost this much" - a
+    question worth asking the desk - and never as "the other algo would have
+    saved that". Every cell needs ALGO_COMPARE_MIN_N orders on BOTH sides.
+    """
+    need = {"market", "adv_bucket", "strategy", benchmark, "notional"}
+    if not need <= set(df.columns) or df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for (mkt, bucket), g in df.groupby(["market", "adv_bucket"],
+                                       dropna=False, observed=True):
+        per = {}
+        for strat, sub_g in g.groupby("strategy", dropna=False, observed=True):
+            n = int(sub_g[benchmark].notna().sum())
+            if n >= ALGO_COMPARE_MIN_N:
+                per[str(strat)] = (n, sub_g["notional"].sum() / 1e6,
+                                   wmean(sub_g[benchmark], sub_g["notional"]))
+        if len(per) < 2:
+            continue
+        best = max(per, key=lambda k: per[k][2])
+        worst = min(per, key=lambda k: per[k][2])
+        gap = per[best][2] - per[worst][2]
+        row = {"market": mkt, "%Adv bucket": bucket}
+        for strat in sorted(per):
+            row[f"{strat} orders"] = per[strat][0]
+            row[f"{strat} notional ({CURRENCY}m)"] = per[strat][1]
+            row[f"{strat} bps"] = per[strat][2]
+        row["better here"] = best
+        row["gap bps"] = gap
+        # What the gap was worth on the flow that did NOT take the better
+        # side. Not a saving that was available - see the docstring.
+        row["gap on the other side (" + CURRENCY + "k)"] = to_money_k(
+            gap, per[worst][1])
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    sort_col = "gap on the other side (" + CURRENCY + "k)"
+    return out.sort_values(sort_col, ascending=False).round(2)
+
+
 def t_monthly(df: pd.DataFrame) -> pd.DataFrame:
     if "month" not in df:
         return pd.DataFrame()
@@ -2482,6 +2606,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_capacity(t.get("14_capacity", pd.DataFrame()), charts)
     chart_market_notional(t.get("34_market_profile", pd.DataFrame()), charts)
     chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts)
+    chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_cohorts(t.get("15_cohorts", pd.DataFrame()), charts)
     chart_headline(t.get("17_first_exec_by_adv", pd.DataFrame())
                    .rename(columns={"first exec vs Close bps (wtd)":
@@ -2614,8 +2739,11 @@ def findings(t: dict) -> None:
             "bps; positive = the early start paid)")
         for k, r in fe.iterrows():
             flag = "   <- small sample" if r.get("small sample") else ""
+            money = r.get("saved (" + CURRENCY + "k)", np.nan)
+            money_txt = (f"{CURRENCY} {money:>10,.0f}k"
+                         if pd.notna(money) else " " * 15)
             log(f"    {str(k):<10}{r['first exec vs Close bps (wtd)']:+8.2f} bps"
-                f"   {int(r['orders']):>5} orders{flag}")
+                f"  {money_txt}   {int(r['orders']):>5} orders{flag}")
         log("    Read this against order size: a negative number at LOW %Adv "
             "is money given up with no capacity reason to start early.")
 
@@ -2631,6 +2759,25 @@ def findings(t: dict) -> None:
             log(f"    {str(k):<12}{r['wtd mean bps']:+8.2f} bps{flag}")
 
     log("")
+    choice = t.get("36_algo_choice", pd.DataFrame())
+    if not choice.empty:
+        col = "gap on the other side (" + CURRENCY + "k)"
+        log("")
+        log("  Same market, same size band - which algo did better:")
+        for _, r in choice.head(6).iterrows():
+            log(f"    {str(r['market']):<14}{str(r['%Adv bucket']):<8}"
+                f"{r['better here']:<7} by {r['gap bps']:>6.1f} bps"
+                f"   {CURRENCY} {r[col]:>9,.0f}k on the other side")
+        log("    This is NOT a controlled comparison. Orders are not assigned to")
+        log("    a strategy at random, and the reason one was chosen - urgency,")
+        log("    a view, an instruction not in this file - drives cost as well.")
+        log("    Holding market and size constant removes the two biggest")
+        log("    confounds and leaves the rest standing. Read a line as 'orders")
+        log("    like these, on this algo, cost this much' and take it to the")
+        log("    desk as a question. Never as 'the other algo would have saved")
+        log("    that money'.")
+        log("")
+
     log("  WHAT THIS ANALYSIS CANNOT SHOW")
     log("    - Whether an order was TAGGED for the close. Without that flag an")
     log("      order that worked out in continuous cannot be distinguished from")
