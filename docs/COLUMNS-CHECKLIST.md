@@ -13,7 +13,7 @@ spellings in brackets are accepted automatically.
 - [ ] `Sym`  (market comes from the suffix)
 - [ ] `Side`
 - [ ] `$Mln`  — **executed** notional
-- [ ] `#Shares`  — **order** quantity
+- [ ] `#Shares`  — **order** quantity, in **thousands**
 - [ ] `FR`  — fill rate
 - [ ] `aggrTgtId`  — order id
 

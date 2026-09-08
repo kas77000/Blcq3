@@ -124,6 +124,9 @@ BUY_VALUES = {"B", "BUY", "BOT", "1", "BUYS"}
 # that lands outside a plausible band - a wrong scale here moves every currency
 # figure by a power of ten and nothing else in the pipeline would notice.
 NOTIONAL_SCALE = 1e6
+# #Shares is the ORDER quantity in THOUSANDS, so it scales by 1e3. Together
+# with the notional scale this is what makes the implied-share-price check
+# below meaningful: get either wrong and the price lands a power of ten out.
 SCALE = {"notional": NOTIONAL_SCALE, "order_shares": 1e3}
 
 # Set True if PR / FR / %Adv / the venue-mix columns arrive as fractions (0-1)
@@ -605,7 +608,9 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
         NOTIONAL_SCALE))
     log("    total executed: {} {:,.0f}  ({:,.1f}m)".format(
         CURRENCY, df["notional"].sum(), df["notional"].sum() / 1e6))
-    log("    #Shares is ORDER quantity; executed = #Shares x FR/100.")
+    log("    #Shares is ORDER quantity in THOUSANDS, so it is scaled x{:.0e}."
+        .format(SCALE["order_shares"]))
+    log("    Executed shares = #Shares x 1000 x FR/100.")
     if "exec_shares" in df:
         ordered = max(float(df["order_shares"].sum()), 1.0)
         log("    order qty {:,.0f} -> executed {:,.0f} shares ({:.1f}%)".format(

@@ -26,7 +26,7 @@ Three facts you gave that shape everything below:
 | `Sym` | Market from the suffix. India split out — **NSE has no single-price closing auction**, it closes on the last-30-min VWAP, so its "MOC" is a different product and is never pooled with HK/JP/AU/KS/TT. |
 | `Side` | Buy/sell split, and the check that slippages are side-adjusted. |
 | `$Mln` | Executed notional — the weight on every aggregate, and the currency P&L. |
-| `#Shares` | Order qty. With `FR`, gives executed qty and the unfilled residual. |
+| `#Shares` | Order qty, **in thousands** (scaled x1,000 at load). With `FR`, gives executed qty and the unfilled residual. |
 | `FR` | Fill rate. A missed close cannot be retried — the day is gone, so `FR` carries more weight here than in any other TCA. |
 
 ## 2. Venue mix — the core
