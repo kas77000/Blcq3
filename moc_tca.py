@@ -61,6 +61,20 @@ AUTO_CLOSE_MIN_PCT = 5.0
 # Empty = keep every strategy in the file.
 STRATEGY_SCOPE: list[str] = ["VWAP", "CLOSE"]
 
+# Confirmed with the desk: the export is already side-adjusted, so a plus is
+# good and a minus is bad on every benchmark, for buys and sells alike. The
+# sanity report still prints the means by side - with this pinned True a gap
+# between buys and sells is a RESULT to explain, not a data error.
+SIDE_ADJUSTED = True
+
+# %CLOSE at 100 means every executed share printed in the auction, so the order
+# behaved as auction-only. This is an OUTCOME, not a permission flag: an order
+# free to trade continuously that happened to fill entirely in the auction
+# looks identical, and an order that never filled cannot be classified at all.
+# Good enough to split the cleared population; not good enough to explain a
+# miss, and the run log says so.
+AUCTION_ONLY_MIN_PCT = 99.5
+
 # Which strategies the MISS TAXONOMY applies to. A VWAP order was never meant
 # to reach the auction, so calling its low %CLOSE an unexplained miss would be
 # nonsense. Clearance, capacity, cohorts and the first-execution tables run on
@@ -212,6 +226,22 @@ MARKET_CLOSE_HKT = {
 # Markets with no single-price closing auction. Never pooled with the rest.
 NO_CLOSING_AUCTION = {"India"}
 
+# ...except where one arrived part-way through the period. India closed on a
+# VWAP of the last half hour until the Closing Auction Session went live on
+# 3 August 2026: a 20-minute call auction, 15:15 to 15:35, referenced to the
+# 15:00-15:15 VWAP, and only for stocks in the derivatives segment.
+#
+# So India is two different products inside one calendar year, and the split
+# is by DATE, not by market name. Before the date there is no auction to
+# reach, auction share means nothing, and "vs Close" is a genuine tracking
+# result rather than a degenerate one - you cannot print at a VWAP, you have
+# to work through the last half hour to track it. On or after the date India
+# joins the auction population, flagged small-sample and derivatives-only.
+#
+# A period ending before the date is unaffected: every India order stays on
+# the VWAP-close side and nothing changes.
+AUCTION_FROM = {"India": "2026-08-03"}
+
 # Australia observes daylight saving and Hong Kong does not, so the ASX session
 # moves an hour against an HKT clock twice a year. AEDT runs from the first
 # Sunday in October to the first Sunday in April.
@@ -347,6 +377,20 @@ def _parse_time(s: pd.Series) -> pd.Series:
     return mins
 
 
+def auction_available(market: pd.Series, date=None) -> pd.Series:
+    """True where a single-price closing auction existed on that date.
+
+    Market alone is not enough: a market can gain an auction part-way through
+    the period, and orders either side of that date are different products.
+    """
+    has = ~market.isin(NO_CLOSING_AUCTION)
+    if date is None:
+        return has
+    for name, start in AUCTION_FROM.items():
+        has = has | (market.eq(name) & (date >= pd.Timestamp(start)))
+    return has
+
+
 def market_from_symbol(sym: pd.Series) -> pd.Series:
     """Suffix after the last '.' or ' ' -> market name."""
     txt = sym.astype(str).str.strip().str.upper()
@@ -434,7 +478,9 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["side_label"] = np.where(df["is_buy"], "Buy", "Sell")
 
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
-    df["has_auction"] = ~df["market"].isin(NO_CLOSING_AUCTION)
+    df["has_auction"] = auction_available(df["market"], df.get("date"))
+    df["close_regime"] = np.where(df["has_auction"],
+                                  "single-price auction", "VWAP close")
 
     if "cap" in df:
         df["cap"] = _title_norm(df["cap"], CAP_ORDER)
@@ -804,9 +850,15 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
             chk.insert(0, "orders", df.groupby("side_label").size())
             for line in chk.to_string().splitlines():
                 log("    " + line)
-            log("    If Buy and Sell sit on OPPOSITE sides of zero by a")
-            log("    similar magnitude the data is not side-adjusted, and")
-            log("    every number below is wrong.")
+            if SIDE_ADJUSTED:
+                log("    SIDE_ADJUSTED is pinned True: the export is already")
+                log("    side-adjusted, so plus is good on both sides. A gap")
+                log("    between Buy and Sell is a RESULT to explain, not a")
+                log("    data error - look at it before writing it up.")
+            else:
+                log("    If Buy and Sell sit on OPPOSITE sides of zero by a")
+                log("    similar magnitude the data is not side-adjusted, and")
+                log("    every number below is wrong.")
 
     # --- notional basis ---------------------------------------------------
     log("")
@@ -850,7 +902,13 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
     for mkt, n in df["market"].value_counts().items():
         note = ""
         if mkt in NO_CLOSING_AUCTION:
-            note = "  <- NO single-price closing auction; reported separately"
+            g = df[df["market"] == mkt]
+            n_auc = int(g["has_auction"].sum())
+            if n_auc and mkt in AUCTION_FROM:
+                note = (f"  <- {len(g) - n_auc:,} on a VWAP close, {n_auc:,} on "
+                        f"the auction from {AUCTION_FROM[mkt]}; never pooled")
+            else:
+                note = "  <- NO single-price closing auction; reported separately"
         elif mkt == UNKNOWN_MARKET:
             note = "  <- suffix did not map; check SYMBOL_SUFFIX_MAP"
         elif not MARKET_CLOSE_HKT.get(mkt, ("", False))[1]:
@@ -1170,6 +1228,7 @@ CLEARED_MIN_PCT_CLOSE = 90.0    # at or above this, the auction did its job
 FRONTIER_SHORTFALL_PP = 15.0    # pp below the frontier before an order is short
 
 COHORT_ORDER = [
+    "Auction only",
     "Cleared the auction",
     "Partial - in line with peers",
     "Partial - below the frontier",
@@ -1203,15 +1262,20 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
              else pd.Series(0.0, index=idx)).fillna(0.0)
 
     never = fr < COHORT_FR_ZERO
-    cleared = ~never & (pc >= CLEARED_MIN_PCT_CLOSE)
-    size_ok = ~never & ~cleared & (adv >= COHORT_ADV_LOW)
-    open_ = ~never & ~cleared & ~size_ok          # small orders, under-cleared
+    # Everything printed in the auction: the order behaved as auction-only.
+    # Split out from "cleared" because an order that needed continuous help to
+    # get there is a different animal from one that never left the auction.
+    auction_only = ~never & (pc >= AUCTION_ONLY_MIN_PCT)
+    cleared = ~never & ~auction_only & (pc >= CLEARED_MIN_PCT_CLOSE)
+    size_ok = ~never & ~cleared & ~auction_only & (adv >= COHORT_ADV_LOW)
+    open_ = ~never & ~cleared & ~auction_only & ~size_ok   # small, under-cleared
     no_fill = open_ & (pc <= 0)
     partial = open_ & (pc > 0)
 
     return pd.Series(
         np.select(
             [never,
+             auction_only,
              cleared,
              size_ok,
              no_fill & lim,
@@ -1219,6 +1283,7 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
              partial & (short > FRONTIER_SHORTFALL_PP),
              partial],
             ["Never traded",
+             "Auction only",
              "Cleared the auction",
              "Size explains it",
              "Limit did not cross",
@@ -2367,8 +2432,22 @@ def self_test() -> int:
     check("markets resolve from the symbol suffix",
           df["market"].eq(UNKNOWN_MARKET).sum() == 0,
           df.loc[df["market"] == UNKNOWN_MARKET, "symbol"].head(3).tolist())
-    check("India is excluded from the auction population",
-          bool((~df.loc[df["market"] == "India", "has_auction"]).all()))
+    ind = df[df["market"] == "India"]
+    cas = pd.Timestamp(AUCTION_FROM["India"])
+    check("India in the sample is outside the auction population",
+          bool((~ind["has_auction"]).all()) and len(ind) > 0)
+    # Tested on a made-up series, because the sample stops before the CAS date
+    # and an empty selection would pass either way.
+    mkt = pd.Series(["India", "India", "Hong Kong", "India"])
+    dts = pd.to_datetime([cas - pd.Timedelta(days=1), cas,
+                          cas - pd.Timedelta(days=1), cas + pd.Timedelta(days=90)])
+    got = auction_available(mkt, pd.Series(dts)).tolist()
+    check("India gains an auction on the CAS date and not before",
+          got == [False, True, True, True], got)
+    check("an auction-only order is cohorted as such",
+          assign_cohort(pd.DataFrame({
+              "fill_rate": [100.0], "pct_close": [100.0], "adv_pct": [0.5],
+          })).iloc[0] == "Auction only")
     check("Australia close time shifts under AEDT",
           _hhmm_to_min("14:10") - 60 ==
           float(continuous_end_min(pd.Series(["Australia"]),

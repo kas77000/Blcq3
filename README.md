@@ -111,12 +111,21 @@ exclusion, in precedence order:
 | Cohort | Test |
 |---|---|
 | Never traded | `FR < 1` |
+| Auction only | `%CLOSE >= 99.5` |
 | Cleared the auction | `%CLOSE >= 90` |
 | Size explains it | `%Adv >= 5` |
 | Limit did not cross | no auction fill, and a limit order |
 | **No auction fill — unexplained** | traded, small, no limit, still nothing |
 | Partial — below the frontier | partial fill, >15pp under the frontier |
 | Partial — in line with peers | partial fill, at or above the frontier |
+
+`%CLOSE` at 100 means every executed share printed in the auction, so the order
+behaved as **auction only**. That is an outcome rather than a permission: an
+order free to trade continuously that happened to fill entirely in the auction
+looks identical, and an order that never filled cannot be classified at all. It
+is enough to split the cleared population into orders that never left the
+auction and orders that needed continuous help to get there. It is not enough
+to explain a miss, and the run log says so.
 
 The unexplained cohort is the deliverable: those orders are listed individually
 by id, date and symbol in `16_orders_to_review`, with the statement that the
@@ -137,23 +146,79 @@ for getting tagging into the extract.
   a normal-theory interval would be too narrow. Under n=8 there is no CI and the
   row is flagged small-sample. **A CI crossing zero means not distinguishable
   from zero**, and the findings block says so per line.
-- **India is never pooled with the rest.** NSE has no single-price closing
-  auction — it closes on a VWAP of the last half hour — so its "MOC" is a
-  different product and is reported separately.
+- **India is never pooled with the rest, and it is split by date.** It closed
+  on a VWAP of the last half hour until the Closing Auction Session went live
+  on **3 August 2026** — a 20-minute call auction, 15:15 to 15:35, referenced
+  to the 15:00–15:15 VWAP, and only for stocks in the derivatives segment. So
+  India is two products inside one calendar year. Before that date there is no
+  auction to reach, auction share means nothing, and `vs Close` is a genuine
+  tracking result rather than a degenerate one — you cannot print at a VWAP,
+  you have to work the last half hour to track it. From that date India joins
+  the auction population, flagged small-sample and derivatives-only. A period
+  ending before 3 August is unaffected.
 - Market close times are in HKT. Hong Kong, Japan and Australia are verified
   against the desk's own session windows; the rest are derived from published
   exchange hours and are **flagged UNVERIFIED wherever they affect a number**.
   Australia shifts an hour against HKT under AEDT and is handled per date.
 - Unrecognised `Cap` values are **kept and shown**, never dropped, and named in
   the run log.
+- The export is **already side-adjusted** — plus is good, minus is bad, on both
+  sides. `SIDE_ADJUSTED = True` records that, and the by-side means are then
+  printed as a result to explain rather than as a data error.
+
+## Scope, and what leaves the study
+
+`STRATEGY_SCOPE` pins the review to **VWAP and CLOSE**. CLOSE puts 53% of its
+value through the auction and VWAP only 7.6%, but VWAP is four times the book,
+so it carries 37% of every dollar this client sends to a closing auction.
+Between them the two are 98.8% of it. Keeping CLOSE alone would understate the
+close footprint by more than a third and hide the algo-selection question,
+which is usually worth more than algo performance. Every strategy dropped is
+named in the run log with its order count and value.
+
+The miss taxonomy runs on `MOC_STRATEGIES` only. A VWAP order was never aiming
+at the auction, so calling its low auction share an unexplained miss would be
+nonsense. VWAP keeps its benchmark, venue and decomposition tables and stays
+out of clearance, capacity and the cohorts. The capacity frontier is computed
+**within strategy** — pooling a 53% algo with a 7% one would drag the reference
+line down until nothing looked short.
+
+Exclusions work at the **value** level, not the order level. An infinity in
+`NextOpen` says nothing about that order's auction share, size or notional, so
+the cell is cleared and the order stays in every table its other columns can
+support. Dropping whole orders for one bad cell would bias the rest, because
+orders with broken cells are not a random sample. Only orders that cannot
+contribute anywhere leave — no notional, no quantity, no readable side — and
+each exit is counted with its value. **Nothing is ever removed for being
+large**: winsorising handles the tails, and deleting the extremes would delete
+the orders the review exists to find.
+
+## Basis points for money, spreads for comparison
+
+Slippage in bps answers "what did it cost". It does not compare across names or
+markets: a wide-spread mid-cap costs more bps than a large-cap for reasons that
+have nothing to do with the algo, so ranking on bps ranks the names. Dividing
+by the spread gives "how many spreads did we pay", which does compare.
+
+`eIS/Sprd`, `ePvwap/Sprd` and `Pvwap/Sprd` are read straight from the export
+where it carries them and derived from `slip / spread` where it does not, so
+either shape of file behaves the same. Tables `06a`–`06c` put the two side by
+side, by strategy, by market and by size band.
+
+The ratio is taken **between the two averages**, never as the average of
+per-order ratios — one name with a 0.5bp spread would otherwise produce a ratio
+in the hundreds and dominate the mean. The median per-order ratio sits beside
+it for what the typical order paid.
 
 ## What this analysis cannot show
 
 Stated on every run, so the gaps are explicit rather than discovered late:
 
-- Whether an order was **tagged** for the close. Without that flag, an order that
-  worked out in continuous cannot be told apart from one never meant for the
-  auction.
+- Whether an order was **tagged** for the close. `%CLOSE = 100` identifies
+  orders that *behaved* as auction-only, but it is an outcome, not a
+  permission, and it says nothing about an order that never filled. So an
+  order that worked out in continuous still cannot be told apart from one
+  never meant for the auction.
 - **Our share of the closing auction** — capacity is expressed as `%Adv` rather
   than as a share of the auction itself. Closing-auction volume by sym/date would
   fix this and may be cheap to get.
