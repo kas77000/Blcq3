@@ -35,7 +35,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ===========================================================================
 
 CLIENT_NAME = "Client"          # kept neutral; no firm or client branding in output
-PERIOD_LABEL = "Jan to 4 Sep 2026"
+PERIOD_LABEL = "H1 2026"
 CURRENCY = "USD"
 
 # Which Strategy values are close algos.
@@ -99,8 +99,13 @@ MAX_ABS_BPS = 2000.0
 #                     --label "H1 2026"
 #   python moc_tca.py --data orders.csv --out output_full \
 #                     --label "Jan to 4 Sep 2026"
-DATE_FROM = None                # e.g. "2026-01-01"
-DATE_TO = None                  # e.g. "2026-06-30"
+# H1 2026. The extract runs past this, so the filter is doing real work: it
+# also puts the whole window before India's Closing Auction Session on
+# 3 August 2026, which means India is one regime throughout and the CAS split
+# never fires. The run log confirms that on every run rather than leaving it
+# to be assumed.
+DATE_FROM = "2026-01-01"
+DATE_TO = "2026-06-30"
 
 # --- column mapping -------------------------------------------------------
 # Matched case-insensitively, ignoring spaces, dots, underscores and brackets.
