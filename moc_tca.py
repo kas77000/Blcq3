@@ -2060,6 +2060,17 @@ except Exception:                                   # pragma: no cover
 COST_SAVE_NOTE = "← cost   |   savings →"
 
 
+def _rows_high(n: int, per_row: float = 0.62, base: float = 1.9,
+               floor: float = 2.5) -> float:
+    """Figure height for a chart with `n` horizontal bars.
+
+    A panel sized for six strategies and given one draws a single block the
+    height of the page. Scoping the review to one strategy made every
+    by-strategy chart look like that, so height follows the bar count.
+    """
+    return max(floor, base + per_row * max(n, 1))
+
+
 def _fig(figsize=FIGSIZE, ncols=1):
     fig, axes = plt.subplots(1, ncols, figsize=figsize, dpi=DPI)
     fig.patch.set_facecolor(SURFACE)
@@ -2083,9 +2094,9 @@ def _style(ax, xlabel="", ylabel="", title="", horizontal=False):
     ax.set_axisbelow(True)
 
 
-def _save(fig, out_dir: Path, name: str) -> None:
+def _save(fig, out_dir: Path, name: str, bottom: float = 0.0) -> None:
     path = out_dir / name
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, bottom, 1, 1) if bottom else None)
     fig.savefig(path, facecolor=SURFACE, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
     log(f"    chart  {name}")
@@ -2115,6 +2126,11 @@ def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
     ax.set_yticks(y)
     ax.set_yticklabels([f"{l}{'  (small sample)' if small and small[i] else ''}"
                         for i, l in enumerate(labels)])
+    # Bar height is in data units, so with one category it fills the axis.
+    # Widen the y-range instead of thinning the bar: the bar keeps the same
+    # weight it has on a chart with six of them.
+    pad = 0.5 if len(labels) == 1 else (0.25 if len(labels) == 2 else 0.1)
+    ax.set_ylim(-0.5 - pad, len(labels) - 0.5 + pad)
     ax.invert_yaxis()
     # The whiskers reach past the bar ends, so the axis has to allow for them
     # and the label has to clear them. A CI line drawn through a value label
@@ -2197,16 +2213,18 @@ def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
                    name: str, title: str) -> None:
     if t.empty:
         return
-    fig, (ax,) = _fig()
+    fig, (ax,) = _fig((FIGSIZE[0], _rows_high(len(t))))
     ci = list(zip(t["CI low"], t["CI high"])) if "CI low" in t else None
     _diverging_barh(ax, list(t.index), list(t["wtd mean bps"]), ci=ci,
                     small=list(t["small sample"]) if "small sample" in t else None)
     _style(ax, xlabel=f"{value_label}, notional-weighted (bps)   {COST_SAVE_NOTE}",
            title=title, horizontal=True)
-    ax.text(0.0, -0.16, "whiskers are 95% bootstrap CIs; a CI crossing zero is "
-            "not distinguishable from zero", transform=ax.transAxes,
-            fontsize=7.5, color=INK_MUTED)
-    _save(fig, out, name)
+    # Anchored to the FIGURE. On a short panel an axes-relative offset is a
+    # small absolute distance and the note lands on the tick labels.
+    fig.text(0.01, 0.01, "whiskers are 95% bootstrap CIs; a CI crossing zero "
+             "is not distinguishable from zero", fontsize=7.5, color=INK_MUTED,
+             ha="left", va="bottom")
+    _save(fig, out, name, bottom=0.14)
 
 
 def chart_market_notional(t: pd.DataFrame, out: Path,
@@ -2321,7 +2339,7 @@ def chart_decomposition(t: pd.DataFrame, out: Path, name: str) -> None:
     """Two components with different owners, plus the total they sum to."""
     if t.empty:
         return
-    fig, (ax,) = _fig((10.0, 6.0))
+    fig, (ax,) = _fig((10.0, _rows_high(len(t), per_row=0.9, base=2.0)))
     y = np.arange(len(t))
     h = 0.34
     ax.barh(y - h / 2, t["cost of waiting for the close"], height=h,
