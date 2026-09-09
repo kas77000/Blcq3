@@ -18,3 +18,5 @@ reviews/
 *.heic
 *.HEIC
 *.pptx
+*.parquet
+data/

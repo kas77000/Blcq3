@@ -107,6 +107,30 @@ MAX_ABS_BPS = 2000.0
 DATE_FROM = "2026-01-01"
 DATE_TO = "2026-06-30"
 
+# --- the AWS extract ------------------------------------------------------
+# A second source, one parquet file per date/country/client, holding the same
+# orders with more columns on them. Every parquet in AWS_DIR is concatenated
+# and LEFT-joined onto the order file on AWS_JOIN_KEY, so the order file stays
+# the population and the extra columns ride along.
+#
+# Where a name exists in both, THE ORDER FILE WINS and the AWS column is kept
+# beside it with AWS_SUFFIX. Nothing that already works can change underneath
+# us, and the alternative is available by name when it is wanted.
+AWS_DIR = "data/aws"
+AWS_JOIN_KEY = "aggrTgtId"
+AWS_SUFFIX = "_aws"
+
+# India has no closing auction in this period - the close is a VWAP of the
+# last half hour - so %CLOSE is reported as 0 there and cannot say whether an
+# order was aimed at the close. What can say it is WHEN the order started.
+# India orders that began outside this window are not close orders and leave
+# the study; every other market is untouched.
+#
+# NSE closes 15:30 IST, which is 18:00 HKT, and the pre-CAS closing VWAP runs
+# over the last half hour, 17:30-18:00 HKT. This window is the first half of
+# that. Widen the second value to "18:00" to take the whole of it.
+INDIA_CLOSE_WINDOW_HKT = ("17:30", "17:45")
+
 # --- column mapping -------------------------------------------------------
 # Matched case-insensitively, ignoring spaces, dots, underscores and brackets.
 # First alternative that resolves wins.
@@ -151,6 +175,9 @@ COLUMNS = {
     "sprd_pvwap":    ["Pvwap/Sprd", "ePvwap/Sprd", "PvwapSprd"],
     "sprd_close":    ["Close/Sprd", "eClose/Sprd"],
     "sprd_vwap":     ["Vwap/Sprd", "eVwap/Sprd"],
+    # From the AWS extract. Optional: without it India cannot be windowed and
+    # the run says so rather than filtering on something it does not have.
+    "first_start_time": ["fstart_time", "fstart_time" + AWS_SUFFIX],
     # capacity and behaviour
     "adv_pct":       ["%Adv", "% Adv", "PctAdv"],
     "adv":           ["Adv", "ADV"],
@@ -172,7 +199,8 @@ REQUIRED = ["strategy", "date", "symbol", "side", "notional", "order_shares",
 
 # Present in some exports, computed here when absent. Never reported as a gap,
 # because a missing one costs nothing.
-OPTIONAL = ["sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap"]
+OPTIONAL = ["sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap",
+            "first_start_time"]
 
 # The export writes a banner on row 1 and the real header on row 2 in some
 # formats. 0 = header on the first row.
@@ -392,6 +420,116 @@ def read_file(path: Path) -> pd.DataFrame:
     return raw
 
 
+def read_aws(folder: Path) -> pd.DataFrame:
+    """Every parquet under `folder`, concatenated into one frame.
+
+    Files are per date/country/client, so columns can differ slightly between
+    them; concat unions the columns and leaves the gaps as NaN rather than
+    dropping a file for being a column short.
+    """
+    files = sorted(folder.rglob("*.parquet"))
+    if not files:
+        return pd.DataFrame()
+
+    frames, cols_seen = [], None
+    for path in files:
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc:
+            warn(f"could not read {path.name}: {exc}")
+            continue
+        if cols_seen is None:
+            cols_seen = set(df.columns)
+        elif set(df.columns) != cols_seen:
+            extra = sorted(set(df.columns) - cols_seen)
+            missing = sorted(cols_seen - set(df.columns))
+            if extra or missing:
+                warn(f"{path.name} has a different shape from the first file:")
+                if extra:
+                    log(f"    extra:   {', '.join(extra[:8])}")
+                if missing:
+                    log(f"    missing: {', '.join(missing[:8])}")
+            cols_seen |= set(df.columns)
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True, sort=False)
+    log(f"  {len(files)} parquet file(s) -> {len(out):,} rows x "
+        f"{len(out.columns)} columns")
+    return out
+
+
+def merge_aws(raw: pd.DataFrame, folder: Path) -> pd.DataFrame:
+    """Left-join the AWS extract onto the order file, and say what happened."""
+    if not folder.is_dir():
+        log(f"  no {folder} folder - running on the order file alone.")
+        return raw
+
+    section(f"AWS EXTRACT  {folder}")
+    aws = read_aws(folder)
+    if aws.empty:
+        warn(f"no parquet files in {folder} - running on the order file alone.")
+        return raw
+
+    key = AWS_JOIN_KEY
+    for name, frame in (("order file", raw), ("AWS extract", aws)):
+        if key not in frame.columns:
+            warn(f"{key} is not in the {name}; cannot join. Continuing without.")
+            return raw
+
+    # One row per order. A key that repeats would multiply the order file on
+    # the join and inflate every total silently, so it is collapsed here and
+    # counted rather than left to do that.
+    dupes = int(aws[key].duplicated().sum())
+    if dupes:
+        warn(f"{dupes:,} duplicate {key} values in the AWS extract - keeping "
+             f"the first of each.")
+        aws = aws.drop_duplicates(subset=[key], keep="first")
+
+    out = _merge_frames(raw, aws, verbose=True)
+    return out
+
+
+def _merge_frames(raw: pd.DataFrame, aws: pd.DataFrame,
+                  verbose: bool = False) -> pd.DataFrame:
+    """The join itself, separated so it can be tested without any files."""
+    key = AWS_JOIN_KEY
+    # Collide on the NORMALISED name, not the exact one. resolve_columns
+    # matches case-insensitively and ignores separators, so an AWS "sym" beside
+    # the order file's "Sym" is not a harmless near-miss: both would answer to
+    # the same logical field and whichever came first in column order would
+    # win. Renaming every normalised collision keeps the order file
+    # unambiguously in charge of its own population.
+    raw_norm = {_norm_name(c) for c in raw.columns}
+    overlap = sorted(c for c in aws.columns
+                     if c != key and _norm_name(c) in raw_norm)
+    if overlap and verbose:
+        log(f"  {len(overlap)} AWS column(s) answer to a name the order file")
+        log(f"    already uses. The order file wins; the AWS version is kept")
+        log(f"    as <name>{AWS_SUFFIX}:")
+        log("    " + ", ".join(overlap[:12])
+            + (f" ... and {len(overlap) - 12} more" if len(overlap) > 12 else ""))
+    if overlap:
+        aws = aws.rename(columns={c: c + AWS_SUFFIX for c in overlap})
+    before = len(raw)
+    out = raw.merge(aws, on=key, how="left", validate="m:1")
+    if not verbose:
+        return out
+    matched = int(out[[c for c in aws.columns if c != key][0]].notna().sum()) \
+        if len(aws.columns) > 1 else 0
+    log("")
+    log(f"  {before:,} orders in the order file")
+    log(f"  {matched:,} matched into the AWS extract "
+        f"({100.0 * matched / max(before, 1):.1f}%)")
+    if matched < before:
+        log(f"  {before - matched:,} did NOT match. They are KEPT - the order")
+        log("    file is the population - but their AWS columns are empty, so")
+        log("    anything derived from those columns excludes them.")
+    log(f"  columns {len(raw.columns)} -> {len(out.columns)}")
+    return out
+
+
 def resolve_columns(raw: pd.DataFrame) -> dict[str, str]:
     """logical name -> actual header. Unresolved logical names are absent."""
     lookup = {}
@@ -512,7 +650,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     if "date" in cols:
         df["date"] = pd.to_datetime(raw[cols["date"]], errors="coerce")
 
-    for logical in ["start_time", "end_time"]:
+    for logical in ["start_time", "end_time", "first_start_time"]:
         if logical in cols:
             df[logical + "_min"] = _parse_time(raw[cols[logical]])
 
@@ -663,6 +801,54 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["month"] = df["date"].dt.to_period("M").astype(str)
 
     return df
+
+
+def filter_india_close_window(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the India orders that began inside the closing window.
+
+    India runs no closing auction in this period, so %CLOSE is 0 on every one
+    of its orders and cannot say whether an order was aimed at the close.
+    When it STARTED can. An India order that began outside the closing window
+    was not a close order, whatever strategy label it carries, and including
+    it would drag every India number toward flow that was never trying.
+
+    Only India is touched. Every other market keeps all of its orders.
+    """
+    if "market" not in df or "India" not in set(df["market"]):
+        return df
+
+    is_india = df["market"] == "India"
+    n_india = int(is_india.sum())
+
+    if "first_start_time_min" not in df:
+        warn(f"India has {n_india:,} orders and no fstart_time to window them "
+             f"with.")
+        log("    Their %CLOSE is 0 by construction, so they cannot be told")
+        log("    apart from flow that never aimed at the close. Left in and")
+        log("    flagged rather than filtered on a column that is not here.")
+        return df
+
+    lo, hi = (_hhmm_to_min(t) for t in INDIA_CLOSE_WINDOW_HKT)
+    start = df["first_start_time_min"]
+    inside = start.between(lo, hi) & is_india
+    drop = is_india & ~inside
+
+    section("INDIA CLOSE WINDOW")
+    log(f"  India has no closing auction in this period, so an order aimed at")
+    log(f"  the close is one that STARTED in the closing window: "
+        f"{INDIA_CLOSE_WINDOW_HKT[0]}-{INDIA_CLOSE_WINDOW_HKT[1]} HKT.")
+    log("")
+    log(f"    {'India orders':<34}{n_india:>10,}")
+    log(f"    {'started inside the window':<34}{int(inside.sum()):>10,}")
+    log(f"    {'started outside it - removed':<34}{int(drop.sum()):>10,}")
+    missing = int((is_india & start.isna()).sum())
+    if missing:
+        log(f"    {'no fstart_time at all - removed':<34}{missing:>10,}")
+    val = float(df.loc[drop, "notional"].sum()) / 1e6 if "notional" in df else 0.0
+    log(f"    {'value removed (' + CURRENCY + 'm)':<34}{val:>10,.2f}")
+    log("")
+    log("  Every other market keeps all of its orders.")
+    return df[~drop].copy()
 
 
 def _title_norm(s: pd.Series, order: list[str]) -> pd.Series:
@@ -2969,6 +3155,30 @@ def self_test() -> int:
     blank = pd.DataFrame({"pct_close": [40.0, 100.0], "pct_open": [10.0, 0.0],
                           "pct_take": [0.0, 0.0], "pct_post": [0.0, 0.0],
                           "pct_dark": [0.0, 0.0], "notional": [1e6, 1e6]})
+    # The AWS join must not let a second source quietly take over a field the
+    # order file already owns - resolve_columns is case- and separator-blind.
+    raw_x = pd.DataFrame({"aggrTgtId": ["a", "b"], "Sym": ["X", "Y"],
+                          "Sprd": [1.0, 2.0]})
+    aws_x = pd.DataFrame({"aggrTgtId": ["a", "b"], "sym": ["Z", "W"],
+                          "Sprd": [9.0, 9.0], "fstart_time": ["17:31", "12:00"]})
+    joined = _merge_frames(raw_x, aws_x)
+    check("a differently-cased AWS column does not shadow the order file",
+          list(joined["Sym"]) == ["X", "Y"] and "sym_aws" in joined.columns,
+          list(joined.columns))
+    check("an exactly-matching AWS column is suffixed too",
+          list(joined["Sprd"]) == [1.0, 2.0] and "Sprd_aws" in joined.columns)
+
+    win = pd.DataFrame({
+        "market": ["India", "India", "Hong Kong"],
+        "first_start_time_min": [_hhmm_to_min("17:35"), _hhmm_to_min("09:30"),
+                                 _hhmm_to_min("09:30")],
+        "notional": [1e6, 1e6, 1e6],
+    })
+    kept = filter_india_close_window(win)
+    check("the India window keeps only orders that started in it, and only India",
+          len(kept) == 2 and set(kept["market"]) == {"India", "Hong Kong"},
+          kept["market"].tolist())
+
     check("weighting falls back when a weight column is all zeros",
           weight_column(pd.DataFrame({"cont_notional": [0.0, 0.0],
                                       "notional": [1.0, 2.0]}),
@@ -3105,8 +3315,10 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
         section(f"DATA  {path}")
         log(f"  {len(raw):,} rows x {len(raw.columns)} columns")
 
+    raw = merge_aws(raw, Path(AWS_DIR))
     cols = resolve_columns(raw)
     df = normalise(raw, cols)
+    df = filter_india_close_window(df)
 
     if DATE_FROM or DATE_TO:
         before = len(df)

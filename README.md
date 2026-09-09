@@ -225,6 +225,44 @@ for getting tagging into the extract.
   never silently dropped: it is named, and past half a percent of the book the
   run stops and asks for it.
 
+## The AWS extract
+
+A second source, one parquet per date/country/client, holding the same orders
+with more columns on them. Drop them in `data/aws/` and the run picks them up;
+with the folder empty it runs on the order file alone and says so.
+
+Every parquet is concatenated — files with a different column set are unioned
+and named in the log rather than dropped — deduplicated on `aggrTgtId`, and
+**left-joined onto the order file**. The order file stays the population: an
+order with no match is kept, and only the columns that came from AWS are empty
+on it.
+
+**Name collisions are resolved on the normalised name, not the exact one.**
+`resolve_columns` is case- and separator-blind, so an AWS `sym` sitting beside
+the order file's `Sym` is not a harmless near-miss — both answer to the same
+logical field, and whichever came first in column order would win. Every
+collision, exact or not, keeps the order file's version and renames the AWS one
+to `<name>_aws`. So nothing that already works can change underneath a run, and
+the alternative is there by name when it is wanted.
+
+## India, without an auction share
+
+India runs no closing auction in this period and the platform reports `%CLOSE`
+as 0 on every one of its orders, so auction share cannot say whether an order
+was aimed at the close. **When it started can.** `fstart_time` comes from the
+AWS extract, and India orders that began outside `INDIA_CLOSE_WINDOW_HKT` are
+not close orders whatever strategy label they carry, so they leave the study.
+Only India is touched; every other market keeps all of its orders.
+
+The window is `17:30–17:45` HKT. Worth checking against the desk: NSE closes
+15:30 IST — 18:00 HKT — and the pre-CAS closing VWAP runs over the last half
+hour, so the full window is 17:30–18:00 HKT and this is the first half of it.
+Widening it is a one-value change.
+
+Without `fstart_time` nothing is filtered: the run says India cannot be
+windowed and leaves those orders in, flagged, rather than filtering on a column
+it does not have.
+
 ## Scope, and what leaves the study
 
 `STRATEGY_SCOPE` pins the review to **CLOSE**. This is a review of the MOC
