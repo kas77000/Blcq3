@@ -263,6 +263,27 @@ Without `fstart_time` nothing is filtered: the run says India cannot be
 windowed and leaves those orders in, flagged, rather than filtering on a column
 it does not have.
 
+**The India orders that survive are then given `%CLOSE = 100`.** They ran
+through the VWAP that *is* the close, so their close share is 100 by the
+mechanism rather than by measurement — and leaving it at 0 would drag every
+all-market auction-share figure down with a number that measures nothing.
+
+It is **imputed, not observed**, and nothing hides that: the original value
+stays in `pct_close_measured`, the rows are flagged in `pct_close_imputed`, the
+run log says how many were set, and the findings block names the count and
+tells you to say so on the slide. Any auction-share figure that includes India
+is part measured and part assumed. Set `INDIA_CLOSE_PROXY = False` to leave the
+zeros alone.
+
+Because it is set before any venue field is derived, `close_notional`,
+`pct_continuous`, `close_bucket` and the rest all follow from the same number
+rather than from a stale one.
+
+India still stays **out of the auction-market tables** — clearance, capacity,
+the cohorts. Its close is a half-hour VWAP, not a single print, so "did it
+clear the auction" is not a question that can be asked there, and 100% imputed
+rows would answer it with an assumption.
+
 ## Scope, and what leaves the study
 
 `STRATEGY_SCOPE` pins the review to **CLOSE**. This is a review of the MOC

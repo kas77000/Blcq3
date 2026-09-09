@@ -131,6 +131,17 @@ AWS_SUFFIX = "_aws"
 # that. Widen the second value to "18:00" to take the whole of it.
 INDIA_CLOSE_WINDOW_HKT = ("17:30", "17:45")
 
+# An India order that ran inside that window traded through the VWAP that IS
+# the close, so its close share is 100 by the mechanism rather than by
+# measurement. Setting it makes India's auction share mean the same thing as
+# everywhere else instead of reading 0 and dragging every all-market figure
+# down with it.
+#
+# It is an IMPUTED value, not an observed one. The original is kept in
+# pct_close_measured, the rows are flagged in pct_close_imputed, and the run
+# log and the findings both say so. Set False to leave the zeros alone.
+INDIA_CLOSE_PROXY = True
+
 # --- column mapping -------------------------------------------------------
 # Matched case-insensitively, ignoring spaces, dots, underscores and brackets.
 # First alternative that resolves wins.
@@ -681,6 +692,15 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
 
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
     df["close_regime"] = close_regime(df["market"], df.get("date"))
+
+    # Before any venue field is derived, so close_notional, pct_continuous,
+    # close_bucket and the rest all follow from the same number.
+    if INDIA_CLOSE_PROXY and "pct_close" in df:
+        in_window = india_in_close_window(df)
+        df["pct_close_imputed"] = in_window
+        if in_window.any():
+            df["pct_close_measured"] = df["pct_close"]
+            df.loc[in_window, "pct_close"] = 100.0
     df["has_auction"] = df["close_regime"].eq(REGIME_AUCTION)
 
     if "cap" in df:
@@ -803,6 +823,22 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     return df
 
 
+def india_in_close_window(df: pd.DataFrame) -> pd.Series:
+    """India orders that started inside the closing window.
+
+    One definition, used by both the imputation and the filter, so the rows
+    that get %CLOSE = 100 are exactly the rows that survive.
+    """
+    empty = pd.Series(False, index=df.index)
+    if "market" not in df:
+        return empty
+    is_india = df["market"] == "India"
+    if not is_india.any() or "first_start_time_min" not in df:
+        return empty
+    lo, hi = (_hhmm_to_min(t) for t in INDIA_CLOSE_WINDOW_HKT)
+    return is_india & df["first_start_time_min"].between(lo, hi).fillna(False)
+
+
 def filter_india_close_window(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only the India orders that began inside the closing window.
 
@@ -828,9 +864,8 @@ def filter_india_close_window(df: pd.DataFrame) -> pd.DataFrame:
         log("    flagged rather than filtered on a column that is not here.")
         return df
 
-    lo, hi = (_hhmm_to_min(t) for t in INDIA_CLOSE_WINDOW_HKT)
     start = df["first_start_time_min"]
-    inside = start.between(lo, hi) & is_india
+    inside = india_in_close_window(df)
     drop = is_india & ~inside
 
     section("INDIA CLOSE WINDOW")
@@ -846,6 +881,13 @@ def filter_india_close_window(df: pd.DataFrame) -> pd.DataFrame:
         log(f"    {'no fstart_time at all - removed':<34}{missing:>10,}")
     val = float(df.loc[drop, "notional"].sum()) / 1e6 if "notional" in df else 0.0
     log(f"    {'value removed (' + CURRENCY + 'm)':<34}{val:>10,.2f}")
+    if INDIA_CLOSE_PROXY and "pct_close_imputed" in df:
+        n_imp = int(df.loc[inside, "pct_close_imputed"].sum())
+        log("")
+        log(f"  %CLOSE set to 100 on the {n_imp:,} that stayed: they ran through")
+        log("  the VWAP that IS the close, so their close share is 100 by the")
+        log("  mechanism. It is IMPUTED, not measured - the original sits in")
+        log("  pct_close_measured and the rows are flagged pct_close_imputed.")
     log("")
     log("  Every other market keeps all of its orders.")
     return df[~drop].copy()
@@ -3057,6 +3099,15 @@ def findings(t: dict) -> None:
         log("    that money'.")
         log("")
 
+    imputed = int(auc["pct_close_imputed"].sum()) if "pct_close_imputed" in auc else 0
+    if imputed:
+        log(f"  {imputed:,} of these orders carry an IMPUTED %CLOSE of 100 - India,")
+        log("  which runs no auction, where the order ran through the closing")
+        log("  VWAP window. Their close share is a property of the mechanism,")
+        log("  not a measurement, and any auction-share figure that includes")
+        log("  them is part measured and part assumed. Say so on the slide.")
+        log("")
+
     log("  WHAT THIS ANALYSIS CANNOT SHOW")
     log("    - Whether an order was TAGGED for the close. Without that flag an")
     log("      order that worked out in continuous cannot be distinguished from")
@@ -3178,6 +3229,26 @@ def self_test() -> int:
     check("the India window keeps only orders that started in it, and only India",
           len(kept) == 2 and set(kept["market"]) == {"India", "Hong Kong"},
           kept["market"].tolist())
+
+    # The rows that get %CLOSE = 100 must be exactly the rows that survive,
+    # and no other market may be touched.
+    imp = pd.DataFrame({
+        "market": ["India", "India", "Hong Kong"],
+        "first_start_time_min": [_hhmm_to_min("17:35"), _hhmm_to_min("09:30"),
+                                 _hhmm_to_min("17:35")],
+        "pct_close": [0.0, 0.0, 12.0],
+        "notional": [1e6, 1e6, 1e6],
+    })
+    mask = india_in_close_window(imp)
+    imp["pct_close_imputed"] = mask
+    imp.loc[mask, "pct_close"] = 100.0
+    out_i = filter_india_close_window(imp)
+    check("the kept India order carries %CLOSE 100, the other market is untouched",
+          list(out_i["pct_close"]) == [100.0, 12.0], list(out_i["pct_close"]))
+    check("imputation and the filter select the same rows",
+          bool((mask == (imp["market"].eq("India")
+                         & imp["first_start_time_min"].between(
+                             _hhmm_to_min("17:30"), _hhmm_to_min("17:45")))).all()))
 
     check("weighting falls back when a weight column is all zeros",
           weight_column(pd.DataFrame({"cont_notional": [0.0, 0.0],
