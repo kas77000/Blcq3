@@ -284,6 +284,30 @@ the cohorts. Its close is a half-hour VWAP, not a single print, so "did it
 clear the auction" is not a question that can be asked there, and 100% imputed
 rows would answer it with an assumption.
 
+## Opportunity is not outcome
+
+`37_close_opportunity` splits every market into orders that were still live
+into the closing window and orders that had finished before it. An order that
+ended at 11am never had a chance to reach the auction, so judging it as a close
+order says nothing — that is the honest analogue of the India window.
+
+**This is not the same as `%CLOSE = 0`, and the difference decides whether the
+review has a finding in it.** A zero on an order that *was* live into the close
+is a real outcome, and those orders are the most valuable population in the
+run: they could have cleared and did not. Dropping them would leave only the
+orders that worked, push auction share toward 100% by construction, and have
+the deck conclude that everything clears because everything that did not was
+removed.
+
+So it flags and drops nothing by default. `DROP_NO_CLOSE_OPPORTUNITY = True`
+removes them, after reading the table.
+
+**The table checks itself.** An order that finished before the close cannot
+also have printed in the auction. A market showing both is not telling you
+about its orders — it is telling you its close time in `MARKET_CLOSE_HKT` is
+wrong, and it names the ones flagged UNVERIFIED. Do not filter on this column
+for a market until its close time is confirmed against the desk's own sessions.
+
 ## Scope, and what leaves the study
 
 `STRATEGY_SCOPE` pins the review to **CLOSE**. This is a review of the MOC

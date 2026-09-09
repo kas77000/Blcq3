@@ -142,6 +142,24 @@ INDIA_CLOSE_WINDOW_HKT = ("17:30", "17:45")
 # log and the findings both say so. Set False to leave the zeros alone.
 INDIA_CLOSE_PROXY = True
 
+# An order that finished well before its market closed never ran into the
+# closing window, so it had no OPPORTUNITY to reach the auction and judging it
+# as a close order says nothing. That is the honest analogue of the India
+# window, and it is measured here.
+#
+# It is NOT the same as %CLOSE = 0, and the difference decides whether this
+# review has a finding in it. A zero on an order that WAS live into the close
+# is a real outcome and the single most valuable population in the run - the
+# orders that could have cleared and did not. Dropping those would leave only
+# the orders that worked, push auction share to ~100% by construction, and
+# have the deck conclude that everything clears because everything that did
+# not was removed.
+#
+# So this flags by default and drops nothing. Set DROP_NO_CLOSE_OPPORTUNITY
+# True to remove them, having seen 37_close_opportunity first.
+CLOSE_OPPORTUNITY_MIN = 5.0        # minutes before the close is "never got there"
+DROP_NO_CLOSE_OPPORTUNITY = False
+
 # --- column mapping -------------------------------------------------------
 # Matched case-insensitively, ignoring spaces, dots, underscores and brackets.
 # First alternative that resolves wins.
@@ -837,6 +855,70 @@ def india_in_close_window(df: pd.DataFrame) -> pd.Series:
         return empty
     lo, hi = (_hhmm_to_min(t) for t in INDIA_CLOSE_WINDOW_HKT)
     return is_india & df["first_start_time_min"].between(lo, hi).fillna(False)
+
+
+def mark_close_opportunity(df: pd.DataFrame) -> pd.DataFrame:
+    """Flag orders that finished before their market's closing window.
+
+    close_gap_min is the market's continuous close minus the order's end time,
+    so a large positive value means the order was long done before the close.
+    India is left alone: it has no continuous close to measure against and its
+    own window filter has already run.
+    """
+    if "close_gap_min" not in df:
+        return df
+    df = df.copy()
+    gap = df["close_gap_min"]
+    df["reached_close_window"] = ~(gap > CLOSE_OPPORTUNITY_MIN)
+    df.loc[gap.isna(), "reached_close_window"] = True   # unknown is not evidence
+    return df
+
+
+def t_close_opportunity(df: pd.DataFrame) -> pd.DataFrame:
+    """Who was still live into the closing window, and who was long gone."""
+    if "reached_close_window" not in df or "market" not in df:
+        return pd.DataFrame()
+    rows = []
+    for mkt, g in df.groupby("market", dropna=False, observed=True):
+        reached = g[g["reached_close_window"]]
+        missed = g[~g["reached_close_window"]]
+        rows.append({
+            "market": mkt,
+            "orders": len(g),
+            "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
+            "ran into the close": len(reached),
+            "finished before it": len(missed),
+            "% finished before it": 100.0 * len(missed) / max(len(g), 1),
+            "value finished before (" + CURRENCY + "m)":
+                missed["notional"].sum() / 1e6,
+            "wtd %CLOSE if it ran in": wmean(reached["pct_close"],
+                                             reached["notional"], winsor=False)
+                if "pct_close" in g and len(reached) else np.nan,
+            "wtd %CLOSE if it did not": wmean(missed["pct_close"],
+                                              missed["notional"], winsor=False)
+                if "pct_close" in g and len(missed) else np.nan,
+        })
+    out = pd.DataFrame(rows).set_index("market")
+    out = out.sort_values("value finished before (" + CURRENCY + "m)",
+                          ascending=False).round(2)
+
+    # The table checks itself. An order that finished before the close cannot
+    # also have printed in the auction, so a market showing both is not
+    # telling us about its orders - it is telling us its close time is wrong.
+    # Those are the markets flagged UNVERIFIED in MARKET_CLOSE_HKT.
+    bad = out[(out["finished before it"] > 0)
+              & (out["wtd %CLOSE if it did not"] > 5.0)]
+    if len(bad):
+        warn("these markets say an order finished BEFORE the close and still")
+        log("    printed in the auction. Both cannot be true - the close time")
+        log("    in MARKET_CLOSE_HKT is wrong, not the orders:")
+        for mkt, r in bad.iterrows():
+            flag = " (UNVERIFIED)" if MARKET_CLOSE_HKT.get(mkt, ("", True))[1] is False else ""
+            log(f"      {str(mkt):<14}{r['finished before it']:>6,} orders, "
+                f"{r['wtd %CLOSE if it did not']:>6.1f}% auction share{flag}")
+        log("    Do not filter on this column for those markets until the")
+        log("    close time is confirmed against the desk's own sessions.")
+    return out
 
 
 def filter_india_close_window(df: pd.DataFrame) -> pd.DataFrame:
@@ -2678,6 +2760,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["29_fill_rate"] = t_fill_rate(df)
     t["30_monthly"] = t_monthly(df)
     t["34_market_profile"] = t_market_profile(df)
+    t["37_close_opportunity"] = t_close_opportunity(df)
     if df["strategy"].nunique() > 1:
         t["36_algo_choice"] = t_algo_choice(df)
         t["35_market_by_strategy"] = t_market_by_strategy(df)
@@ -3390,6 +3473,19 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
     cols = resolve_columns(raw)
     df = normalise(raw, cols)
     df = filter_india_close_window(df)
+    df = mark_close_opportunity(df)
+    if DROP_NO_CLOSE_OPPORTUNITY and "reached_close_window" in df:
+        gone = ~df["reached_close_window"]
+        if gone.any():
+            section("ORDERS THAT NEVER RAN INTO THE CLOSE")
+            warn(f"removing {int(gone.sum()):,} orders that finished more than "
+                 f"{CLOSE_OPPORTUNITY_MIN:.0f} minutes")
+            log(f"    before their market closed, worth {CURRENCY} "
+                f"{df.loc[gone, 'notional'].sum() / 1e6:,.1f}m.")
+            log("    They had no opportunity to reach the auction. Orders that")
+            log("    WERE live into the close and still got nothing are kept -")
+            log("    those are the finding, not the noise.")
+            df = df[~gone].copy()
 
     if DATE_FROM or DATE_TO:
         before = len(df)
