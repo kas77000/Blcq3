@@ -3038,6 +3038,60 @@ def write_excel(t: dict, out_dir: Path) -> None:
         log(f"  tables written as CSV into {out_dir} instead")
 
 
+def write_excel_unified(t: dict, out_dir: Path) -> None:
+    """Every table stacked down one sheet, for photographing in one pass.
+
+    tables.xlsx keeps one table per sheet, which is right for working in.
+    This is the same content on a single sheet with each table titled, so a
+    run can be captured in a handful of screenshots instead of thirty-odd tab
+    clicks.
+    """
+    path = out_dir / "unified_tables.xlsx"
+    sheet = "all_tables"
+    try:
+        from openpyxl.styles import Font
+    except Exception as exc:                          # pragma: no cover
+        warn(f"openpyxl not available, no unified sheet: {exc}")
+        return
+
+    try:
+        row, written = 0, 0
+        with pd.ExcelWriter(path, engine="openpyxl") as xl:
+            for name, tab in t.items():
+                if name.startswith("_") or not isinstance(tab, pd.DataFrame):
+                    continue
+                if tab.empty:
+                    continue
+                # Title on its own row, then the table, then a gap. The title
+                # is a real cell rather than a merged block so a screenshot
+                # and a copy-paste both keep it.
+                pd.DataFrame({0: [name]}).to_excel(
+                    xl, sheet_name=sheet, startrow=row, index=False, header=False)
+                tab.to_excel(xl, sheet_name=sheet, startrow=row + 1)
+                # A single named index goes INTO the header row; only a
+                # MultiIndex costs an extra row. Get this wrong the other way
+                # and the next title lands on the last row of data.
+                extra = 1 if tab.index.nlevels > 1 else 0
+                row += 1 + 1 + extra + len(tab) + 2
+                written += 1
+
+            ws = xl.sheets[sheet]
+            bold = Font(bold=True)
+            for cell in ws["A"]:
+                if cell.value in t:
+                    cell.font = bold
+            widest = 0
+            for col in ws.columns:
+                longest = max((len(str(c.value)) for c in col if c.value is not None),
+                              default=0)
+                ws.column_dimensions[col[0].column_letter].width = min(
+                    max(longest + 2, 9), 34)
+                widest = max(widest, len(col))
+        log(f"  one sheet  -> {path}  ({written} tables, {row:,} rows)")
+    except Exception as exc:                          # pragma: no cover
+        warn(f"could not write {path}: {exc}")
+
+
 # ===========================================================================
 # FINDINGS - what the numbers say, with the caveats attached
 # ===========================================================================
@@ -3545,6 +3599,7 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
     stamp_path.write_text(stamp, encoding="utf-8")
     tables = build_tables(df, close_strats)
     write_excel(tables, out_dir)
+    write_excel_unified(tables, out_dir)
     build_charts(tables, out_dir)
 
     section("TABLES")

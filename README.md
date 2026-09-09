@@ -73,6 +73,7 @@ Output lands in `output/`:
 | File | What it is |
 |---|---|
 | `tables.xlsx` | every table, one sheet each |
+| `unified_tables.xlsx` | the same tables stacked down **one** sheet, titled and spaced, for capturing a whole run in a few screenshots instead of thirty tab clicks |
 | `charts/*.png` | every exhibit standalone at 200dpi |
 | `run_log.txt` | sanity report, close-algo selection, all tables, findings |
 
