@@ -45,21 +45,23 @@ CURRENCY = "USD"
 # AUTO_CLOSE_MIN_PCT. What it picked is printed loudly in the run log.
 #
 # Run --probe first, read the strategy table, then pin the list here.
-CLOSE_STRATEGIES: list[str] = ["CLOSE", "VWAP"]
+CLOSE_STRATEGIES: list[str] = ["CLOSE"]
 CLOSE_NAME_PATTERN = r"CLOSE|MOC|LOC|TWAPC|IIS"
 AUTO_CLOSE_MIN_PCT = 5.0
 
 # Which Strategy values enter the study at all. Everything else is excluded
 # with a count and a name in the run log, never silently.
 #
-# VWAP is in scope because 7.6% of a very large book is still 37% of every
-# dollar this client puts through a closing auction - second only to CLOSE
-# itself. Dropping it would understate the close footprint by more than a
-# third, and would hide the algo-selection question, which is usually worth
-# more than algo performance.
+# CLOSE only. This review is about the MOC product, and on this platform the
+# CLOSE label already covers it end to end - MOC and IIS both report under it.
+#
+# The consequence belongs on the deck rather than being left implicit: the
+# client's VWAP flow also reaches closing auctions, so what follows describes
+# the MOC PRODUCT, not the client's total auction footprint. 01_scope shows
+# how much of the book sits outside the review.
 #
 # Empty = keep every strategy in the file.
-STRATEGY_SCOPE: list[str] = ["VWAP", "CLOSE"]
+STRATEGY_SCOPE: list[str] = ["CLOSE"]
 
 # Confirmed with the desk: the export is already side-adjusted, so a plus is
 # good and a minus is bad on every benchmark, for buys and sells alike. The
@@ -2443,8 +2445,15 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["29_fill_rate"] = t_fill_rate(df)
     t["30_monthly"] = t_monthly(df)
     t["34_market_profile"] = t_market_profile(df)
-    t["36_algo_choice"] = t_algo_choice(df)
-    t["35_market_by_strategy"] = t_market_by_strategy(df)
+    if df["strategy"].nunique() > 1:
+        t["36_algo_choice"] = t_algo_choice(df)
+        t["35_market_by_strategy"] = t_market_by_strategy(df)
+    else:
+        only = df["strategy"].dropna().astype(str).unique()
+        name = only[0] if len(only) else "one strategy"
+        log(f"  scope is {name} alone, so there is nothing to compare it to:")
+        log("    35_market_by_strategy would only repeat 34, and 36_algo_choice")
+        log("    needs two strategies inside the same market and size band.")
     if "side_label" in df:
         t["33_by_side"] = by_group(df, "side_label", "slip_arrival",
                                    order=SIDE_ORDER)

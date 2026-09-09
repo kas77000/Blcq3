@@ -197,6 +197,13 @@ for getting tagging into the extract.
 
   To close this properly: get the F&O eligibility list, drop `India` from
   `AUCTION_SEGMENT_UNKNOWN`, and filter on the symbol.
+
+  **Known and unresolved:** India reports `%CLOSE` as 0 on every order, CLOSE
+  orders included, in both regimes. So it is not only the segment that cannot
+  be identified — auction share is not measured for that market at all. India
+  is about a third of the book, and while it sits inside the reviewed
+  population its zero drags the overall weighted auction share down. Read the
+  auction-market figures, not the all-market ones, until this is settled.
 - Market close times are in HKT. Hong Kong, Japan and Australia are verified
   against the desk's own session windows; the rest are derived from published
   exchange hours and are **flagged UNVERIFIED wherever they affect a number**.
@@ -216,20 +223,23 @@ for getting tagging into the extract.
 
 ## Scope, and what leaves the study
 
-`STRATEGY_SCOPE` pins the review to **VWAP and CLOSE**. CLOSE puts 53% of its
-value through the auction and VWAP only 7.6%, but VWAP is four times the book,
-so it carries 37% of every dollar this client sends to a closing auction.
-Between them the two are 98.8% of it. Keeping CLOSE alone would understate the
-close footprint by more than a third and hide the algo-selection question,
-which is usually worth more than algo performance. Every strategy dropped is
-named in the run log with its order count and value.
+`STRATEGY_SCOPE` pins the review to **CLOSE**. This is a review of the MOC
+product, and on this platform the CLOSE label already covers it end to end —
+MOC and IIS both report under it. Every strategy dropped is named in `01_scope`
+and in the run log with its order count and its value.
 
-The miss taxonomy runs on `MOC_STRATEGIES` only. A VWAP order was never aiming
-at the auction, so calling its low auction share an unexplained miss would be
-nonsense. VWAP keeps its benchmark, venue and decomposition tables and stays
-out of clearance, capacity and the cohorts. The capacity frontier is computed
-**within strategy** — pooling a 53% algo with a 7% one would drag the reference
-line down until nothing looked short.
+**State the consequence on the deck rather than leaving it implicit.** The
+client's VWAP flow also reaches closing auctions — on this book it is around
+70% of the value traded — so this describes the **MOC product**, not the
+client's total auction footprint. Those are different questions and only one
+of them is answered here.
+
+With a single strategy in scope there is nothing to compare it against, so
+`35_market_by_strategy` and `36_algo_choice` are skipped and the run log says
+why. Both come back on their own if a second strategy is added to the scope.
+
+The capacity frontier is computed **within strategy**, so it stays correct
+either way.
 
 Exclusions work at the **value** level, not the order level. An infinity in
 `NextOpen` says nothing about that order's auction share, size or notional, so
@@ -296,7 +306,8 @@ of the book so nobody has to guess which ones can actually move the number.
 `35_market_by_strategy` splits the same rows by strategy, because a market
 effect can be a mix effect: if one market is nearly all VWAP and another nearly
 all CLOSE, comparing the markets compares the strategies as much as the venues.
-Check this before attributing anything to a market.
+Check it before attributing anything to a market. With one strategy in scope
+it would only repeat `34`, so it is skipped.
 
 ## Money, and the algo-choice question
 
@@ -306,9 +317,10 @@ reads as a cost without a second convention to remember. The early-start
 tables are weighted by **continuous** notional, so their money is that portion
 of the order rather than the whole of it.
 
-`36_algo_choice` compares the two strategies on the same market and the same
-size band, and `15_algo_choice` charts it. Every cell needs at least 30 orders
-on **both** sides.
+`36_algo_choice` compares two strategies on the same market and the same size
+band, and `15_algo_choice` charts it. Every cell needs at least 30 orders on
+**both** sides, so with `STRATEGY_SCOPE` on a single strategy the table is
+skipped entirely. What follows applies when a second one is in scope.
 
 **It is not a controlled comparison, and must never be presented as one.**
 Orders are not assigned to a strategy at random. A trader choosing CLOSE for
