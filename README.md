@@ -1,15 +1,19 @@
 # MOC / close-algo TCA
 
-Close-algo review covering orders **to 4 September 2026**. **Tables and charts,
-no deck** — the narrative comes out of the numbers, not the other way round.
+**H1 2026** review of the MOC product. **Tables and charts, no deck** — the
+narrative comes out of the numbers, not the other way round.
 
-**The trading platform did not change inside the window.** This client has not
-migrated, so there is no platform cutover to split on and no date filter is
-needed — `DATE_FROM` / `DATE_TO` stay `None`.
+`DATE_FROM` / `DATE_TO` are pinned to **2026-01-01 .. 2026-06-30**. The extract
+runs past June, so the filter is doing real work, and `--from` / `--to`
+override it for a second window without touching the file.
 
-**One market did change inside the window.** India's Closing Auction Session
-went live on 3 August 2026, so India carries three regimes and is never pooled.
-See the India note under Conventions.
+**The trading platform did not change inside the window**, and neither did any
+market. This client has not migrated, so there is no platform cutover to split
+on. India's Closing Auction Session went live on 3 August 2026, which is after
+the period ends, so India is on a VWAP close throughout and the CAS split never
+fires — the run log confirms that on every run rather than leaving it to be
+assumed. The machinery stays in place because the extract itself extends past
+the date; see the India note under Conventions.
 
 Two consequences:
 
