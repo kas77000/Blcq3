@@ -184,6 +184,10 @@ COLUMNS = {
     "pct_post":      ["%POST", "PctPost", "Post %"],
     "pct_take":      ["%TAKE", "PctTake", "Take %"],
     "pct_dark":      ["%DARK", "PctDark", "Dark %"],
+    # From the AWS extract. Without these the five splits stop well short of
+    # 100 and everything that is not an auction looks like nothing at all.
+    "pct_other":     ["%OTHER", "PctOther", "Other %"],
+    "pct_cond":      ["%COND", "PctCond", "Cond %"],
     # benchmarks, bps, positive = savings
     "slip_close":    ["Close", "Close ImpBps"],
     "slip_arrival":  ["IS", "Arrival ImpBps"],
@@ -273,9 +277,14 @@ SCALE = {"notional": NOTIONAL_SCALE, "order_shares": 1e3}
 # instead of percentages. The sanity report warns if this looks wrong.
 PCT_FIELDS_ARE_FRACTIONS = False
 PCT_FIELDS = ["fill_rate", "adv_pct", "participation", "pr_cont",
-              "pct_close", "pct_open", "pct_post", "pct_take", "pct_dark"]
+              "pct_close", "pct_open", "pct_post", "pct_take", "pct_dark",
+              "pct_other", "pct_cond"]
 
-VENUE_FIELDS = ["pct_open", "pct_close", "pct_post", "pct_take", "pct_dark"]
+VENUE_FIELDS = ["pct_open", "pct_close", "pct_post", "pct_take", "pct_dark",
+                "pct_other", "pct_cond"]
+# Everything that is not an auction. %OTHER and %COND belong here: they are
+# not the auction, so whatever they are, they are continuous.
+CONTINUOUS_FIELDS = ["pct_take", "pct_post", "pct_dark", "pct_other", "pct_cond"]
 VENUE_SUM_TOL = 1.0          # pp; rows outside 100 +/- this are reported
 
 # --- markets --------------------------------------------------------------
@@ -559,20 +568,51 @@ def _merge_frames(raw: pd.DataFrame, aws: pd.DataFrame,
     return out
 
 
+def _has_signal(col: pd.Series) -> bool:
+    """True if the column carries anything at all - not all NaN, not all zero."""
+    v = pd.to_numeric(col, errors="coerce")
+    if v.notna().sum() == 0:
+        return col.notna().any() and col.astype(str).str.strip().ne("").any()
+    return bool((v.fillna(0) != 0).any())
+
+
 def resolve_columns(raw: pd.DataFrame) -> dict[str, str]:
-    """logical name -> actual header. Unresolved logical names are absent."""
+    """logical name -> actual header. Unresolved logical names are absent.
+
+    Where the order file and the AWS extract both answer to a name, the order
+    file's version was kept and the AWS one suffixed. That is the right
+    default - until the order file's column turns out to be empty. Then the
+    default silently throws away the only copy of the data that exists, which
+    is exactly what happened to %POST, %TAKE and %DARK.
+    """
     lookup = {}
     for actual in raw.columns:
         lookup.setdefault(_norm_name(actual), actual)
-    resolved = {}
+    resolved, swapped = {}, []
     for logical, candidates in COLUMNS.items():
         if isinstance(candidates, str):
             candidates = [candidates]
+        hits = []
         for cand in candidates:
-            hit = lookup.get(_norm_name(cand))
-            if hit is not None:
-                resolved[logical] = hit
-                break
+            for name in (cand, cand + AWS_SUFFIX):
+                hit = lookup.get(_norm_name(name))
+                if hit is not None and hit not in hits:
+                    hits.append(hit)
+        if not hits:
+            continue
+        chosen = hits[0]
+        if not _has_signal(raw[chosen]):
+            better = next((h for h in hits[1:] if _has_signal(raw[h])), None)
+            if better is not None:
+                swapped.append((logical, chosen, better))
+                chosen = better
+        resolved[logical] = chosen
+
+    if swapped:
+        warn("these columns are empty in the order file and populated in the")
+        log("    AWS extract, so the AWS version is used instead:")
+        for logical, was, now in swapped:
+            log(f"      {logical:<14}{was}  ->  {now}")
     return resolved
 
 
@@ -745,7 +785,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     present = [f for f in VENUE_FIELDS if f in df]
     if present:
         df["venue_sum"] = df[present].sum(axis=1, min_count=1)
-    cont_fields = [f for f in ["pct_take", "pct_post", "pct_dark"] if f in df]
+    cont_fields = [f for f in CONTINUOUS_FIELDS if f in df]
     if cont_fields:
         cont = df[cont_fields].sum(axis=1, min_count=1)
         # Present but never above zero means the export did not populate the
@@ -2521,13 +2561,25 @@ def chart_monthly(df: pd.DataFrame, out: Path) -> None:
     months = list(g.groups.keys())
     if len(months) < 2:
         return
+    # The table marks a month the extract only partly covers; the chart is
+    # what the client actually sees, so it has to say it too. A short month
+    # plotted beside full ones reads as a collapse rather than as less data.
+    labels = list(months)
+    if "date" in df and df["date"].notna().any():
+        lo, hi = df["date"].min(), df["date"].max()
+        labels = []
+        for m in months:
+            per = pd.Period(str(m), freq="M")
+            part = (per.end_time.date() > hi.date()
+                    or per.start_time.date() < lo.date())
+            labels.append(f"{m} (part)" if part else str(m))
     fig, axes = _fig((11.5, 4.4), ncols=2)
     pc = [wmean(x["pct_close"], x["notional"], winsor=False)
           for _, x in g] if "pct_close" in df else []
     axes[0].plot(range(len(months)), pc, marker="o", markersize=5.5,
                  linewidth=2, color=SERIES[0], zorder=3)
     axes[0].set_xticks(range(len(months)))
-    axes[0].set_xticklabels(months, rotation=30, ha="right")
+    axes[0].set_xticklabels(labels, rotation=30, ha="right")
     axes[0].set_ylim(0, 105)
     _style(axes[0], ylabel="auction share (%CLOSE), notional-weighted",
            title="Auction share by month")
@@ -2541,7 +2593,7 @@ def chart_monthly(df: pd.DataFrame, out: Path) -> None:
             axes[1].text(i, v, _fmt_bps(v), ha="center",
                          va="bottom" if v >= 0 else "top", fontsize=8, color=INK)
         axes[1].set_xticks(range(len(months)))
-        axes[1].set_xticklabels(months, rotation=30, ha="right")
+        axes[1].set_xticklabels(labels, rotation=30, ha="right")
         _style(axes[1], ylabel=f"vs Close, bps   {COST_SAVE_NOTE}",
                title="Execution vs the close by month")
     _save(fig, out, "12_monthly.png")
