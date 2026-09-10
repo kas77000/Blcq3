@@ -211,6 +211,15 @@ COLUMNS = {
     # From the AWS extract. Optional: without it India cannot be windowed and
     # the run says so rather than filtering on something it does not have.
     "first_start_time": ["fstart_time", "fstart_time" + AWS_SUFFIX],
+    # Our fill in the closing auction and the auction's own size. Together
+    # they give share OF THE AUCTION, which is the constraint that actually
+    # binds a close order - %Adv is only ever a proxy for it.
+    "fill_close_size":   ["fillCloseSize", "FillCloseSize"],
+    "market_close_size": ["marketCloseSize", "MarketCloseSize"],
+    # A limit and a close price, to ask whether the limit was ever going to
+    # cross. market_limit says "Limit" on every order and explains nothing.
+    "limit_price":   ["ordprice", "OrdPrice", "strike"],
+    "close_price":   ["PX_LAST", "PxLast", "LastEndTrade"],
     # capacity and behaviour
     "adv_pct":       ["%Adv", "% Adv", "PctAdv"],
     "adv":           ["Adv", "ADV"],
@@ -233,7 +242,8 @@ REQUIRED = ["strategy", "date", "symbol", "side", "notional", "order_shares",
 # Present in some exports, computed here when absent. Never reported as a gap,
 # because a missing one costs nothing.
 OPTIONAL = ["sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap",
-            "first_start_time"]
+            "first_start_time", "fill_close_size", "market_close_size",
+            "limit_price", "close_price"]
 
 # The export writes a banner on row 1 and the real header on row 2 in some
 # formats. 0 = header on the first row.
@@ -702,11 +712,18 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     """Build the working frame: logical names, base units, derived fields."""
     df = pd.DataFrame(index=raw.index)
 
+    # Anything mapped but not copied here never reaches the frame, so a column
+    # can resolve, be reported as found, and still do nothing. That is exactly
+    # what happened to the spread-normalised columns: the log said "read from
+    # the file" while the values were being derived behind it.
     numeric = ["notional", "order_shares", "fill_rate", "adv", "adv_pct",
                "participation", "pr_cont", "spread_bps", "volatility",
                "first_exec_vs_close"] + VENUE_FIELDS + [
                "slip_close", "slip_arrival", "slip_pvwap", "slip_vwap",
-               "slip_nextopen", "slip_open"]
+               "slip_nextopen", "slip_open",
+               "sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap",
+               "fill_close_size", "market_close_size",
+               "limit_price", "close_price"]
     for logical in numeric:
         if logical in cols:
             df[logical] = _to_num(raw[cols[logical]])
@@ -868,6 +885,32 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     if "end_time_min" in df and "date" in df:
         end_of_continuous = continuous_end_min(df["market"], df["date"])
         df["close_gap_min"] = end_of_continuous - df["end_time_min"]
+
+    # --- the four levers --------------------------------------------------
+    # Each one degrades to nothing if its column is absent. Everything below
+    # is reported as missing rather than assumed.
+
+    # 1. Our share of the auction itself, not of the day.
+    if "fill_close_size" in df and "market_close_size" in df:
+        mkt = pd.to_numeric(df["market_close_size"], errors="coerce")
+        ours = pd.to_numeric(df["fill_close_size"], errors="coerce")
+        df["auction_share_pct"] = np.where(mkt > 0, 100.0 * ours / mkt, np.nan)
+
+    # 2. How late the order arrived, against its own market's close.
+    if "first_start_time_min" in df and "market" in df and "date" in df:
+        close_at = continuous_end_min(df["market"], df["date"])
+        df["mins_to_close_at_start"] = close_at - df["first_start_time_min"]
+
+    # 3. Was the limit ever going to cross? A buy limit below the close, or a
+    #    sell limit above it, could not have traded in the auction. This is
+    #    the question market_limit cannot answer because it never varies.
+    if "limit_price" in df and "close_price" in df and "is_buy" in df:
+        lim = pd.to_numeric(df["limit_price"], errors="coerce")
+        cls = pd.to_numeric(df["close_price"], errors="coerce")
+        ok = lim.notna() & cls.notna() & (lim > 0) & (cls > 0)
+        away = np.where(df["is_buy"], cls - lim, lim - cls)
+        df["limit_gap_bps"] = np.where(ok, 1e4 * away / cls, np.nan)
+        df["limit_binding"] = ok & (pd.Series(away, index=df.index) > 0)
 
     # --- buckets ----------------------------------------------------------
     if "adv_pct" in df:
@@ -1764,6 +1807,7 @@ FRONTIER_SHORTFALL_PP = 15.0    # pp below the frontier before an order is short
 COHORT_ORDER = [
     "Auction only",
     "Cleared the auction",
+    "Limit could not cross",
     "Partial - in line with peers",
     "Partial - below the frontier",
     "Size explains it",
@@ -1809,6 +1853,19 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
     short = (df["frontier_shortfall_pp"] if "frontier_shortfall_pp" in df
              else pd.Series(0.0, index=idx)).fillna(0.0)
 
+    # A real cause, where the data carries it, tested BEFORE the residual: an
+    # order whose limit sat the wrong side of the close is explained, and
+    # leaving it among the unexplained sends the desk chasing the algo for
+    # something the order's own limit did.
+    #
+    # auctionOnly is deliberately NOT used. It reports the MARKET's mechanism
+    # as much as the order's permission - India's close orders come back
+    # ContinuousOnly because India has no auction to be eligible for - so
+    # reading it as permission would rule out a third of the book for a reason
+    # that was never about the order.
+    lim_binding = df["limit_binding"].fillna(False) \
+        if "limit_binding" in df else pd.Series(False, index=idx)
+
     never = fr < COHORT_FR_ZERO
     # Everything printed in the auction: the order behaved as auction-only.
     # Split out from "cleared" because an order that needed continuous help to
@@ -1825,6 +1882,7 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
             [never,
              auction_only,
              cleared,
+             no_fill & lim_binding,
              size_ok,
              no_fill & lim,
              no_fill & ~lim,
@@ -1833,6 +1891,7 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
             ["Never traded",
              "Auction only",
              "Cleared the auction",
+             "Limit could not cross",
              "Size explains it",
              "Limit did not cross",
              "No auction fill - unexplained",
@@ -2831,6 +2890,8 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["30_monthly"] = t_monthly(df)
     t["34_market_profile"] = t_market_profile(df)
     t["37_close_opportunity"] = t_close_opportunity(df)
+    t["38_auction_share"] = t_auction_share(auc)
+    t["39_lateness"] = t_lateness(auc)
     if df["strategy"].nunique() > 1:
         t["36_algo_choice"] = t_algo_choice(df)
         t["35_market_by_strategy"] = t_market_by_strategy(df)
@@ -3011,6 +3072,71 @@ def t_algo_choice(df: pd.DataFrame, benchmark: str = "slip_arrival") -> pd.DataF
     out = pd.DataFrame(rows)
     sort_col = "gap on the other side (" + CURRENCY + "k)"
     return out.sort_values(sort_col, ascending=False).round(2)
+
+
+def t_auction_share(df: pd.DataFrame) -> pd.DataFrame:
+    """Our share OF THE CLOSING AUCTION, by market and size band.
+
+    %Adv measures the order against a normal day. The auction is not a normal
+    day - it is one print, and how much of it we were is the constraint that
+    actually binds. Where an order took a large share of the auction, missing
+    the rest is capacity. Where it took a sliver and still missed, it is not.
+    """
+    if "auction_share_pct" not in df or "market" not in df:
+        return pd.DataFrame()
+    d = df[df["auction_share_pct"].notna()]
+    if d.empty:
+        return pd.DataFrame()
+    rows = []
+    for (mkt, bucket), g in d.groupby(["market", "adv_bucket"],
+                                      dropna=False, observed=True):
+        if g.empty:
+            continue
+        rows.append({
+            "market": mkt,
+            "%Adv bucket": bucket,
+            "orders": len(g),
+            "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
+            "median share of the auction %": g["auction_share_pct"].median(),
+            "p75 share of the auction %": g["auction_share_pct"].quantile(0.75),
+            "wtd %CLOSE": wmean(g["pct_close"], g["notional"], winsor=False)
+                if "pct_close" in g else np.nan,
+            "small sample": len(g) < MIN_N_FOR_CI,
+        })
+    return pd.DataFrame(rows).round(2)
+
+
+def t_lateness(df: pd.DataFrame) -> pd.DataFrame:
+    """Auction share against how late the order arrived.
+
+    The desk controls when an order is sent. If auction share falls away for
+    orders arriving inside the last few minutes, that is a lever - and one
+    nobody can pull without knowing where the cliff is.
+    """
+    if "mins_to_close_at_start" not in df or "pct_close" not in df:
+        return pd.DataFrame()
+    d = df[df["mins_to_close_at_start"].notna()]
+    if d.empty:
+        return pd.DataFrame()
+    bins = [-np.inf, 0, 2, 5, 15, 30, 60, 120, np.inf]
+    names = ["after the close", "0-2 min", "2-5 min", "5-15 min", "15-30 min",
+             "30-60 min", "1-2 h", "more than 2 h"]
+    band = pd.cut(d["mins_to_close_at_start"], bins, labels=names)
+    rows = []
+    for key, g in d.groupby(band, observed=True):
+        if g.empty:
+            continue
+        rows.append({
+            "sent before the close": key,
+            "orders": len(g),
+            "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
+            "wtd %CLOSE": wmean(g["pct_close"], g["notional"], winsor=False),
+            "% with no auction fill": 100.0 * (g["pct_close"] <= 0).mean(),
+            "vs Close bps (wtd)": wmean(g["slip_close"], g["notional"])
+                if "slip_close" in g else np.nan,
+            "small sample": len(g) < MIN_N_FOR_CI,
+        })
+    return pd.DataFrame(rows).set_index("sent before the close").round(2)
 
 
 def t_monthly(df: pd.DataFrame) -> pd.DataFrame:
@@ -3456,6 +3582,27 @@ def self_test() -> int:
           bool((mask == (imp["market"].eq("India")
                          & imp["first_start_time_min"].between(
                              _hhmm_to_min("17:30"), _hhmm_to_min("17:45")))).all()))
+
+    # A buy limit under the close, or a sell limit over it, could not have
+    # traded in the auction. Getting the side backwards here would blame the
+    # algo for orders their own limit ruled out, and exonerate the rest.
+    lim_df = pd.DataFrame({
+        "is_buy":      [True, True,  False, False],
+        "limit_price": [9.0,  11.0,  11.0,  9.0],
+        "close_price": [10.0, 10.0,  10.0,  10.0],
+    })
+    away = np.where(lim_df["is_buy"],
+                    lim_df["close_price"] - lim_df["limit_price"],
+                    lim_df["limit_price"] - lim_df["close_price"])
+    check("a limit on the wrong side of the close is flagged, both sides",
+          list(away > 0) == [True, False, True, False], list(away))
+
+    share = pd.DataFrame({"market_close_size": [1000.0, 0.0, 500.0],
+                          "fill_close_size":   [  50.0, 10.0,   0.0]})
+    mkt = pd.to_numeric(share["market_close_size"], errors="coerce")
+    got = np.where(mkt > 0, 100.0 * share["fill_close_size"] / mkt, np.nan)
+    check("share of the auction is a percentage, and zero auction size is not a share",
+          got[0] == 5.0 and np.isnan(got[1]) and got[2] == 0.0, list(got))
 
     check("weighting falls back when a weight column is all zeros",
           weight_column(pd.DataFrame({"cont_notional": [0.0, 0.0],

@@ -285,6 +285,38 @@ the cohorts. Its close is a half-hour VWAP, not a single print, so "did it
 clear the auction" is not a question that can be asked there, and 100% imputed
 rows would answer it with an assumption.
 
+## Three levers, not just a status
+
+A status report says how the close product did. These say what to change.
+
+**`38_auction_share` — our share of the closing auction.** `%Adv` measures an
+order against a normal day; the auction is not a normal day, it is one print,
+and how much of it we were is the constraint that actually binds. Built from
+`fillCloseSize / marketCloseSize` in the AWS extract, by market and size band.
+An order that took a large share of the auction and missed the rest hit
+capacity. An order that took a sliver and still missed did not — and those are
+opposite fixes.
+
+**`39_lateness` — how late the order arrived.** `fstart_time` against each
+market's own close, banded from "0–2 min" out to "more than 2 hours", with
+auction share and the miss rate for each band. The desk controls when an order
+is sent, so if auction share falls away inside the last few minutes that is a
+lever — and nobody can pull it without knowing where the cliff is. A band
+labelled *after the close* is a warning, not a finding: it means the close time
+in `MARKET_CLOSE_HKT` is wrong for that market.
+
+**"Limit could not cross" — a real cause in the taxonomy.** A buy limit under
+the close, or a sell limit over it, could not have traded in the auction. Built
+from the order's limit against the closing price, and tested *before* the
+residual, so those orders stop being filed as unexplained. `market_limit` could
+never answer this because it reads "Limit" on every order.
+
+**`auctionOnly` is deliberately not used.** It reports the market's mechanism
+as much as the order's permission — India's close orders come back
+`ContinuousOnly` because India has no auction to be eligible for — so reading
+it as permission would rule out a third of the book for a reason that was
+never about the order.
+
 ## Opportunity is not outcome
 
 `37_close_opportunity` splits every market into orders that were still live
