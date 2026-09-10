@@ -299,6 +299,15 @@ SCALE = {"notional": NOTIONAL_SCALE, "order_shares": 1e3}
 # Set True if PR / FR / %Adv / the venue-mix columns arrive as fractions (0-1)
 # instead of percentages. The sanity report warns if this looks wrong.
 PCT_FIELDS_ARE_FRACTIONS = False
+
+# Known to arrive as fractions: the AWS extract writes these 0-1 while
+# orders.csv writes 0-100, and after the join both sit in the same row.
+#
+# Declared rather than inferred. The detector below can only guess from the
+# largest value in the book, which is safe for a column that reaches 20% and
+# unsafe for one that never exceeds 1% legitimately - %COND could plausibly be
+# either. A column named here is scaled because it is known to need it.
+FRACTION_COLUMNS = {"pct_other", "pct_cond"}
 PCT_FIELDS = ["fill_rate", "adv_pct", "participation", "pr_cont",
               "pct_close", "pct_open", "pct_post", "pct_take", "pct_dark",
               "pct_other", "pct_cond"]
@@ -770,20 +779,38 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         # A share column whose largest value in the whole book is at or under
         # 1 is a fraction: across tens of thousands of orders at least one
         # should have put more than 1% somewhere.
-        rescaled = []
+        known, guessed, contradicted = [], [], []
         for f in PCT_FIELDS:
             if f not in df:
                 continue
             v = pd.to_numeric(df[f], errors="coerce")
             top = float(v.max()) if v.notna().any() else 0.0
-            if 0 < top <= 1.0:
+            if f in FRACTION_COLUMNS:
+                if top > 1.0:
+                    contradicted.append((f, top))     # declared, but not one
+                else:
+                    df[f] = v * 100.0
+                    known.append((f, top))
+            elif 0 < top <= 1.0:
                 df[f] = v * 100.0
-                rescaled.append((f, top))
-        if rescaled:
-            warn("these share columns are fractions, not percentages, and have")
-            log("    been multiplied by 100 to match the rest:")
-            for f, top in rescaled:
-                log(f"      {f:<16}largest value in the book was {top:.4f}")
+                guessed.append((f, top))
+        if known:
+            log("  share columns known to arrive as fractions, x100 applied:")
+            for f, top in known:
+                log(f"      {f:<16}largest value in the book {top:.4f}")
+        if guessed:
+            warn("these look like fractions and have been multiplied by 100:")
+            for f, top in guessed:
+                log(f"      {f:<16}largest value in the book {top:.4f}")
+            log("    Inferred, not declared. Across a whole book a genuine")
+            log("    percentage should exceed 1 somewhere - add it to")
+            log("    FRACTION_COLUMNS to make it certain, or check the source.")
+        if contradicted:
+            warn("declared as fractions in FRACTION_COLUMNS but reaching past 1:")
+            for f, top in contradicted:
+                log(f"      {f:<16}largest value {top:.2f}")
+            log("    Left alone. Either the source changed or the list is")
+            log("    wrong, and scaling on a bad assumption is worse than not.")
 
     # --- sign -------------------------------------------------------------
     if not POSITIVE_IS_SAVING:
