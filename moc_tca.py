@@ -2578,7 +2578,10 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
     labels = []
     for mkt, row in d.iterrows():
         share = row.get("% of notional", float("nan"))
-        labels.append(f"{mkt}   ({share:.0f}% of value)"
+        # "% of value" alone is ambiguous on a chart whose axis is basis
+        # points of saving and cost - a reader can take "value" to mean value
+        # added. Say what was traded there instead.
+        labels.append(f"{mkt}   ({share:.0f}% of value traded)"
                       if np.isfinite(share) else str(mkt))
     _diverging_barh(ax, labels, [float(v) for v in d[value]],
                     small=[bool(x) for x in d["small sample"]]

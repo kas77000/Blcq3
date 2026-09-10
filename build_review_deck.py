@@ -485,6 +485,14 @@ SOURCES = {
         ("Executed notional by market", "`34_market_profile`, chart "
          "`13_market_notional`", "Sum of executed notional per market, "
          "largest first. Totals to USD 1,061.44m.", "A"),
+        ("What '% of value traded' means on the market charts",
+         "`34_market_profile`, `% of notional`",
+         "That market's executed notional divided by the total across all "
+         "markets in the review, times 100 - a share of the MONEY, not of the "
+         "order count. The denominator is the full USD 1,061.44m, India "
+         "included. It sums to 100 across the markets. It is on the label so "
+         "the reader can tell which bars are worth arguing about: a dramatic "
+         "bar on 1% of the book is noise.", "A"),
     ],
     "Your close orders reached the auction and filled": [
         ("About 80% printed in the auction", "`30_monthly`, `wtd %CLOSE`",
