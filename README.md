@@ -76,6 +76,7 @@ Output lands in `output/`:
 | `unified_tables.xlsx` | the same tables stacked down **one** sheet, titled and spaced, for capturing a whole run in a few screenshots instead of thirty tab clicks |
 | `charts/*.png` | every exhibit standalone at 200dpi |
 | `run_log.txt` | sanity report, close-algo selection, all tables, findings |
+| `no_auction_orders.csv` | every order dropped for having no closing auction to reach, with `marketCloseSize` and `fillCloseSize` beside each |
 
 **What to check on the target machine:** [docs/WHAT-TO-CHECK.md](docs/WHAT-TO-CHECK.md)
 

@@ -1096,8 +1096,20 @@ def t_close_opportunity(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def filter_cas_eligible(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop orders that had no closing auction to reach."""
+NO_AUCTION_COLUMNS = ["order_id", "date", "symbol", "market", "strategy",
+                      "side_label", "cap", "notional", "order_shares",
+                      "fill_rate", "adv_pct", "pct_close",
+                      "market_close_size", "fill_close_size",
+                      "first_start_time_min", "close_gap_min"]
+
+
+def filter_cas_eligible(df, out_dir=None):
+    """Drop orders that had no closing auction to reach.
+
+    The dropped orders are written out one by one. A market that loses all of
+    them is either a market with no auction or a column the extract does not
+    populate there, and the only way to tell those apart is to look.
+    """
     if not REQUIRE_CAS_ELIGIBLE:
         return df
     if "auction_existed" not in df:
@@ -1133,6 +1145,20 @@ def filter_cas_eligible(df: pd.DataFrame) -> pd.DataFrame:
         log("    either a market with no auction, or a column the extract does")
         log("    not populate there - and those need opposite responses.")
         log("    Check before reading anything that excludes them.")
+
+    gone = df[~keep]
+    if out_dir is not None and len(gone):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cols = [c for c in NO_AUCTION_COLUMNS if c in gone.columns]
+        by = [c for c in ("market", "date") if c in cols]
+        path = out_dir / "no_auction_orders.csv"
+        (gone[cols].sort_values(by) if by else gone[cols]).to_csv(path, index=False)
+        log("")
+        log(f"  the {len(gone):,} dropped orders are listed one by one in")
+        log(f"    {path}")
+        log("    with marketCloseSize and fillCloseSize beside each, so a")
+        log("    market with no auction can be told apart from a column the")
+        log("    extract simply does not populate there.")
 
     out = df[keep].copy()
     if out.empty:
@@ -3945,7 +3971,7 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
     raw = merge_aws(raw, Path(AWS_DIR))
     cols = resolve_columns(raw)
     df = normalise(raw, cols)
-    df = filter_cas_eligible(df)
+    df = filter_cas_eligible(df, out_dir)
     df = filter_india_close_window(df)
     df = mark_close_opportunity(df)
     if DROP_NO_CLOSE_OPPORTUNITY and "reached_close_window" in df:
