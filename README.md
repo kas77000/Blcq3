@@ -285,6 +285,24 @@ the cohorts. Its close is a half-hour VWAP, not a single print, so "did it
 clear the auction" is not a question that can be asked there, and 100% imputed
 rows would answer it with an assumption.
 
+## The pipeline, in order
+
+1. Read `orders.csv` — this is the population, and it stays the population.
+2. Concatenate every parquet in `data/aws/` into one frame, dedupe on
+   `aggrTgtId`, and left-join it on. Name collisions resolve on the normalised
+   name and the order file wins, unless its column is empty.
+3. **Keep only the orders that had a closing auction to reach**
+   (`REQUIRE_CAS_ELIGIBLE`, measured by `marketCloseSize > 0`).
+4. Window India, scope the strategies, filter the period, clear unusable
+   values, drop orders that cannot contribute anywhere.
+5. Everything else — every check, table and chart — runs on what survives.
+
+Step 3 is an **opportunity** test, not an outcome test. A day with no auction
+puts a zero in the denominator of every auction-share figure for a reason that
+has nothing to do with the order or the algo. It never removes an order that
+reached for an auction and missed — those are the finding, and they stay in
+the cohorts. The run prints what it dropped per market.
+
 ## Three levers, not just a status
 
 A status report says how the close product did. These say what to change.

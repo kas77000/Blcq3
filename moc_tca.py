@@ -142,6 +142,19 @@ INDIA_CLOSE_WINDOW_HKT = ("17:30", "17:45")
 # log and the findings both say so. Set False to leave the zeros alone.
 INDIA_CLOSE_PROXY = True
 
+# Keep only orders that had a closing auction to reach at all.
+#
+# marketCloseSize is the auction's own size, so a zero means no auction ran
+# that day in that name - a holiday, a half day, a name that does not hold one.
+# Such an order cannot be judged as a close order, and leaving it in puts a
+# zero in the denominator of every auction-share figure for a reason that has
+# nothing to do with the order or the algo.
+#
+# This is an OPPORTUNITY test, not an outcome test. It removes orders that had
+# no auction to reach; it never removes an order that reached for one and
+# missed. Those are the finding.
+REQUIRE_CAS_ELIGIBLE = True
+
 # An order that finished well before its market closed never ran into the
 # closing window, so it had no OPPORTUNITY to reach the auction and judging it
 # as a close order says nothing. That is the honest analogue of the India
@@ -1008,6 +1021,44 @@ def t_close_opportunity(df: pd.DataFrame) -> pd.DataFrame:
                 f"{r['wtd %CLOSE if it did not']:>6.1f}% auction share{flag}")
         log("    Do not filter on this column for those markets until the")
         log("    close time is confirmed against the desk's own sessions.")
+    return out
+
+
+def filter_cas_eligible(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop orders that had no closing auction to reach."""
+    if not REQUIRE_CAS_ELIGIBLE:
+        return df
+    if "auction_existed" not in df:
+        warn("no marketCloseSize, so CAS eligibility cannot be tested.")
+        log("    Every order is kept. Auction-share figures then include")
+        log("    orders that never had an auction to reach.")
+        return df
+
+    section("CAS ELIGIBILITY")
+    keep = df["auction_existed"].fillna(False)
+    log("  Keeping only orders with a closing auction to reach, measured by")
+    log("  the auction's own size rather than by anything the order did.")
+    log("")
+    log(f"    {'market':<16}{'orders':>9}{'kept':>9}{'dropped':>9}"
+        f"{'value dropped (' + CURRENCY + 'm)':>26}")
+    for mkt, g in df.groupby("market", dropna=False, observed=True):
+        k = int(g["auction_existed"].fillna(False).sum())
+        val = float(g.loc[~g["auction_existed"].fillna(False), "notional"].sum())
+        log(f"    {str(mkt):<16}{len(g):>9,}{k:>9,}{len(g) - k:>9,}"
+            f"{val / 1e6:>26,.2f}")
+    out = df[keep].copy()
+    if out.empty:
+        raise SystemExit("\n".join([
+            "",
+            "CAS eligibility removed every order.",
+            "Check that marketCloseSize is populated, or set",
+            "REQUIRE_CAS_ELIGIBLE = False to run without the test.",
+        ]))
+    share = 100.0 * out["notional"].sum() / max(df["notional"].sum(), 1e-9)
+    log("")
+    log(f"    kept {len(out):,} of {len(df):,} orders, {share:.1f}% of value")
+    log("    An order that reached for the auction and missed is NOT removed")
+    log("    here - that is the finding, and it stays in the cohorts.")
     return out
 
 
@@ -3796,6 +3847,7 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
     raw = merge_aws(raw, Path(AWS_DIR))
     cols = resolve_columns(raw)
     df = normalise(raw, cols)
+    df = filter_cas_eligible(df)
     df = filter_india_close_window(df)
     df = mark_close_opportunity(df)
     if DROP_NO_CLOSE_OPPORTUNITY and "reached_close_window" in df:
