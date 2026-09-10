@@ -895,6 +895,13 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         mkt = pd.to_numeric(df["market_close_size"], errors="coerce")
         ours = pd.to_numeric(df["fill_close_size"], errors="coerce")
         df["auction_share_pct"] = np.where(mkt > 0, 100.0 * ours / mkt, np.nan)
+        # fillCloseSize settles eligibility better than any flag can, because
+        # it is an outcome rather than a permission: a positive fill IS the
+        # order having been in the auction, that day, in that name. And where
+        # the auction has no size there was nothing to miss - filing that as a
+        # failure sends the desk hunting a cause that cannot exist.
+        df["auction_existed"] = mkt > 0
+        df["auction_participated"] = ours.fillna(0) > 0
 
     # 2. How late the order arrived, against its own market's close.
     if "first_start_time_min" in df and "market" in df and "date" in df:
@@ -1392,6 +1399,33 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
                 log("    similar magnitude the data is not side-adjusted, and")
                 log("    every number below is wrong.")
 
+    # --- %CLOSE against fillCloseSize -------------------------------------
+    # Two independent sources for the same fact: did this order trade in the
+    # auction. They come from different systems, so where they disagree one of
+    # them is wrong, and the disagreement is worth more than either alone.
+    if "auction_participated" in df and "pct_close" in df:
+        d = df[df["auction_participated"].notna() & df["pct_close"].notna()]
+        if len(d):
+            said_yes = d["pct_close"] > 0
+            did = d["auction_participated"]
+            only_pct = int((said_yes & ~did).sum())
+            only_fill = int((~said_yes & did).sum())
+            agree = len(d) - only_pct - only_fill
+            log("")
+            log("  %CLOSE vs fillCloseSize - two sources, same question")
+            log(f"    {'agree':<40}{agree:>10,}  ({100.0 * agree / len(d):.1f}%)")
+            if only_pct:
+                log(f"    {'%CLOSE says yes, no auction fill':<40}{only_pct:>10,}")
+            if only_fill:
+                log(f"    {'auction fill, but %CLOSE reads 0':<40}{only_fill:>10,}")
+            if only_pct or only_fill:
+                warn("the two disagree on "
+                     f"{100.0 * (only_pct + only_fill) / len(d):.1f}% of orders.")
+                log("    fillCloseSize is a quantity actually printed in the")
+                log("    auction; %CLOSE is a share of executed quantity that")
+                log("    the export has already been caught leaving empty.")
+                log("    Where they differ, trust fillCloseSize.")
+
     # --- notional basis ---------------------------------------------------
     log("")
     log("  notional basis   <-- CHECK THIS BLOCK BEFORE QUOTING ANY MONEY FIGURE")
@@ -1807,6 +1841,7 @@ FRONTIER_SHORTFALL_PP = 15.0    # pp below the frontier before an order is short
 COHORT_ORDER = [
     "Auction only",
     "Cleared the auction",
+    "No auction that day",
     "Limit could not cross",
     "Partial - in line with peers",
     "Partial - below the frontier",
@@ -1865,6 +1900,11 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
     # that was never about the order.
     lim_binding = df["limit_binding"].fillna(False) \
         if "limit_binding" in df else pd.Series(False, index=idx)
+    # Where the auction had no size there was nothing to miss. Tested ahead
+    # of every other cause, because none of them apply to a day with no
+    # auction at all.
+    no_auction = ((~df["auction_existed"]).fillna(False)
+                  if "auction_existed" in df else pd.Series(False, index=idx))
 
     never = fr < COHORT_FR_ZERO
     # Everything printed in the auction: the order behaved as auction-only.
@@ -1882,6 +1922,7 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
             [never,
              auction_only,
              cleared,
+             no_fill & no_auction,
              no_fill & lim_binding,
              size_ok,
              no_fill & lim,
@@ -1891,6 +1932,7 @@ def assign_cohort(df: pd.DataFrame) -> pd.Series:
             ["Never traded",
              "Auction only",
              "Cleared the auction",
+             "No auction that day",
              "Limit could not cross",
              "Size explains it",
              "Limit did not cross",
@@ -3603,6 +3645,17 @@ def self_test() -> int:
     got = np.where(mkt > 0, 100.0 * share["fill_close_size"] / mkt, np.nan)
     check("share of the auction is a percentage, and zero auction size is not a share",
           got[0] == 5.0 and np.isnan(got[1]) and got[2] == 0.0, list(got))
+
+    # An order with no auction fill on a day with no auction is not a miss.
+    coh = assign_cohort(pd.DataFrame({
+        "fill_rate":        [100.0, 100.0],
+        "pct_close":        [  0.0,   0.0],
+        "adv_pct":          [  0.1,   0.1],
+        "auction_existed":  [False,  True],
+    }))
+    check("no auction that day is separated from a genuine miss",
+          list(coh) == ["No auction that day", "No auction fill - unexplained"],
+          list(coh))
 
     check("weighting falls back when a weight column is all zeros",
           weight_column(pd.DataFrame({"cont_notional": [0.0, 0.0],

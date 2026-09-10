@@ -311,6 +311,21 @@ from the order's limit against the closing price, and tested *before* the
 residual, so those orders stop being filed as unexplained. `market_limit` could
 never answer this because it reads "Limit" on every order.
 
+**Eligibility comes from `fillCloseSize`, not from a flag.** A positive fill
+*is* the order having been in the auction — that day, in that name — which is
+an outcome rather than a permission, and no flag can beat it. `marketCloseSize`
+adds the other half: where the auction itself had no size there was nothing to
+miss, so those orders get their own cohort, **"No auction that day"**, tested
+ahead of every other cause. Filing them as failures would send the desk hunting
+a cause that cannot exist.
+
+The two also **check each other**. `%CLOSE` and `fillCloseSize` answer the same
+question — was this order in the auction — from different systems, so the run
+reports how often they agree and names the disagreements. Where they differ,
+trust `fillCloseSize`: it is a quantity actually printed in the auction, while
+`%CLOSE` is a share of executed quantity that this export has already been
+caught leaving empty.
+
 **`auctionOnly` is deliberately not used.** It reports the market's mechanism
 as much as the order's permission — India's close orders come back
 `ContinuousOnly` because India has no auction to be eligible for — so reading
