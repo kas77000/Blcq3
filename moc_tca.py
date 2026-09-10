@@ -2563,7 +2563,8 @@ def chart_market_notional(t: pd.DataFrame, out: Path,
 
 def chart_market_slippage(t: pd.DataFrame, out: Path,
                           name: str = "14_market_slippage.png",
-                          value: str = "vs Arrival bps") -> None:
+                          value: str = "vs Arrival bps",
+                          title: str = None) -> None:
     """Cost by market, ordered by how much was traded there, not by cost.
 
     Ordering by cost would put a 61-order market at the top of the slide.
@@ -2583,7 +2584,7 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
                     small=[bool(x) for x in d["small sample"]]
                     if "small sample" in d else None)
     _style(ax, xlabel=f"{value}, notional-weighted   {COST_SAVE_NOTE}",
-           title="What each market cost, biggest by value first",
+           title=title or "What each market cost, biggest by value first",
            horizontal=True)
     ax.text(0.0, -0.14, "ordered by share of value traded, not by cost - a "
             "small market with a big number is still a small market",
@@ -3403,6 +3404,12 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_capacity(t.get("14_capacity", pd.DataFrame()), charts)
     chart_market_notional(t.get("34_market_profile", pd.DataFrame()), charts)
     chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts)
+    # The same by-market view against the CLOSE. A single summary bar says the
+    # least of any chart in the deck; per market it shows where the result
+    # comes from and whether it rests on one place.
+    chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts,
+                          name="15_market_vs_close.png", value="vs Close bps",
+                          title="Against the closing price, by market")
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_cohorts(t.get("15_cohorts", pd.DataFrame()), charts)
     chart_headline(t.get("17_first_exec_by_adv", pd.DataFrame())

@@ -294,14 +294,20 @@ def build(charts: Path, out: Path, n_slides: int, cover: bool = False,
             "answer straight if asked.")
 
     # --- 2. beat the close ------------------------------------------------
+    # The title deliberately does NOT claim a pattern across markets. Whether
+    # most of them are positive depends on the run, and a title that turns out
+    # false in front of the client is worse than one that says less. The
+    # chart shows the spread; the title states only what is measured.
     title = ("Your close orders work, and beat the closing price" if three
-             else f"You beat the closing price by {n['vs_close_bps']:.1f} basis points")
+             else "You beat the closing price overall")
     s = new(title)
     lead = three and not cover and not markets
     if lead:
         textbox(s, MARGIN, Inches(1.5), SLIDE_W - 2 * MARGIN, Inches(0.4),
                 scope_line, 13, color=INK_SOFT)
-    picture(s, charts / "03_headline_vs_close.png",
+    # By market rather than one summary bar: it shows where the result comes
+    # from, and whether it rests on a single place.
+    picture(s, charts / "15_market_vs_close.png",
             Inches(2.0) if lead else Inches(1.75), Inches(3.6))
     if three:
         items = [
@@ -312,10 +318,11 @@ def build(charts: Path, out: Path, n_slides: int, cover: bool = False,
         ]
     else:
         items = [
-            f"Worth about {money(round(n['vs_close_usdk']))} on auction flow.",
-            f"The range is {n['vs_close_ci_lo']:.1f} to {n['vs_close_ci_hi']:.1f},"
-            " so this is real.",
-            "Orders that cleared print at the close by definition.",
+            f"Across the book, {n['vs_close_bps']:.1f} basis points better — "
+            f"about {money(round(n['vs_close_usdk']))}.",
+            f"The range is {n['vs_close_ci_lo']:.1f} to "
+            f"{n['vs_close_ci_hi']:.1f}, so this is real.",
+            "Not every market, though. The chart shows where it came from.",
         ]
     bullets(s, Inches(5.6), items)
     s.notes_slide.notes_text_frame.text = (
@@ -490,8 +497,16 @@ SOURCES = {
          "Weighted fill rate 99.6%; 99.56% of orders at or above 99.5% "
          "filled; zero orders never traded.", "B"),
     ],
-    "You beat the closing price by 3.7 basis points": [
-        ("+3.74 bps against the close", "`05_headline_vs_close`, "
+    "You beat the closing price overall": [
+        ("Not every market, though", "`34_market_profile`, `vs Close bps`, "
+         "chart `15_market_vs_close`",
+         "Per market, notional-weighted, ordered by value traded rather than "
+         "by result. The title claims no pattern across markets on purpose - "
+         "whether most are positive depends on the run, and a title that "
+         "turns out false in front of the client is worse than one that says "
+         "less. Read the chart before presenting and be ready to name the "
+         "negative markets.", "B"),
+        ("+3.74 bps across the book", "`05_headline_vs_close`, "
          "`wtd mean bps`", "Notional-weighted, winsorised 1/99, on USD "
          "823.74m of auction-market flow.", "B"),
         ("Worth about $308,000", "`05_headline_vs_close`, `saved (USDk)`",
