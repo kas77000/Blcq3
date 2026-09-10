@@ -203,7 +203,8 @@ def draw_session_chart(out: Path) -> Path:
     return out
 
 
-def build(charts: Path, out: Path, n_slides: int, cover: bool = False) -> None:
+def build(charts: Path, out: Path, n_slides: int, cover: bool = False,
+          markets: bool = True) -> None:
     n = NUMBERS
     prs = Presentation()
     prs.slide_width, prs.slide_height = SLIDE_W, SLIDE_H
@@ -244,10 +245,36 @@ def build(charts: Path, out: Path, n_slides: int, cover: bool = False) -> None:
     scope_line = (f"{CLIENT} — {PERIOD}   ·   close orders only, "
                   f"USD {n['notional_musd']:,.0f}m traded")
 
+    # --- 0. where the money went -----------------------------------------
+    # First, because it is the only slide the client can check against their
+    # own records. Recognising the shape of their own book buys the benefit of
+    # the doubt on everything that follows.
+    if markets:
+        s = new("Where you traded")
+        if not cover:
+            textbox(s, MARGIN, Inches(1.5), SLIDE_W - 2 * MARGIN, Inches(0.4),
+                    scope_line, 13, color=INK_SOFT)
+        picture(s, charts / "13_market_notional.png", Inches(2.0), Inches(4.4))
+        s.notes_slide.notes_text_frame.text = "\n".join([
+            "34_market_profile, executed notional by market, largest first.",
+            "",
+            "No judgement on this slide, and that is deliberate. It is the one",
+            "page the client can check against their own records, so let them",
+            "recognise their own book before anything is claimed about it.",
+            "",
+            "If asked which market cost the most, the answer is on",
+            "14_market_slippage - but ordered by value traded, not by cost,",
+            "because a small market with a big number is still a small market.",
+            "",
+            "India is roughly a third of the book and runs no closing auction",
+            "in this period, so its auction share is imputed rather than",
+            "measured. Answer straight if asked; do not volunteer it here.",
+        ])
+
     # --- 1. it works ------------------------------------------------------
     if not three:
         s = new("Your close orders reached the auction and filled")
-        if not cover:
+        if not cover and not markets:
             textbox(s, MARGIN, Inches(1.5), SLIDE_W - 2 * MARGIN, Inches(0.4),
                     scope_line, 13, color=INK_SOFT)
         picture(s, charts / "12_monthly.png", Inches(2.0), Inches(3.7))
@@ -270,11 +297,12 @@ def build(charts: Path, out: Path, n_slides: int, cover: bool = False) -> None:
     title = ("Your close orders work, and beat the closing price" if three
              else f"You beat the closing price by {n['vs_close_bps']:.1f} basis points")
     s = new(title)
-    if three and not cover:
+    lead = three and not cover and not markets
+    if lead:
         textbox(s, MARGIN, Inches(1.5), SLIDE_W - 2 * MARGIN, Inches(0.4),
                 scope_line, 13, color=INK_SOFT)
     picture(s, charts / "03_headline_vs_close.png",
-            Inches(2.0) if (three and not cover) else Inches(1.75), Inches(3.6))
+            Inches(2.0) if lead else Inches(1.75), Inches(3.6))
     if three:
         items = [
             f"About {n['auction_share_avg']}% of each order printed in the auction.",
@@ -440,6 +468,8 @@ def main(argv=None) -> int:
                    help="output .pptx (default: MOC_review_<period>.pptx)")
     p.add_argument("--slides", type=int, choices=(3, 5), default=5,
                    help="5 (default) or 3; same deck, two collapsed")
+    p.add_argument("--no-markets", dest="markets", action="store_false",
+                   help="drop the 'where you traded' slide (default: keep it)")
     p.add_argument("--cover", action="store_true",
                    help="add a separate cover slide (default: scope goes on "
                         "the first slide instead, keeping the count at 5 or 3)")
@@ -452,7 +482,7 @@ def main(argv=None) -> int:
         return 2
     out = args.out or Path(f"MOC_review_{PERIOD.replace(' ', '_')}"
                            f"{'_short' if args.slides == 3 else ''}.pptx")
-    build(args.charts, out, args.slides, args.cover)
+    build(args.charts, out, args.slides, args.cover, args.markets)
     return 0
 
 
