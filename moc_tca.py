@@ -1035,7 +1035,18 @@ def filter_cas_eligible(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     section("CAS ELIGIBILITY")
-    keep = df["auction_existed"].fillna(False)
+    # A market that runs no auction at all cannot fail an auction test. India
+    # has no closing auction in this period, so marketCloseSize is zero there
+    # for a reason that is about the market, not the order - and applying the
+    # test would delete a third of the book on a technicality. It keeps its
+    # own window filter, its own imputed close share, and its own section.
+    exempt = df["market"].isin(NO_CLOSING_AUCTION) if "market" in df         else pd.Series(False, index=df.index)
+    keep = df["auction_existed"].fillna(False) | exempt
+    if exempt.any():
+        log("  " + ", ".join(sorted(set(df.loc[exempt, "market"]))) +
+            " exempt: no closing auction runs there in this period, so the")
+        log("  test cannot apply. Reported separately throughout.")
+        log("")
     log("  Keeping only orders with a closing auction to reach, measured by")
     log("  the auction's own size rather than by anything the order did.")
     log("")

@@ -285,6 +285,22 @@ the cohorts. Its close is a half-hour VWAP, not a single print, so "did it
 clear the auction" is not a question that can be asked there, and 100% imputed
 rows would answer it with an assumption.
 
+## Seeing the merged data for yourself
+
+`merge_aws.py` writes the two intermediate files out as CSV:
+
+```bash
+python merge_aws.py --orders orders.csv --aws data/aws
+```
+
+- `aws_all.csv` — every parquet in one frame, deduplicated on `aggrTgtId`
+- `merged.csv` — the order file with the AWS columns joined on
+
+It **imports the join from `moc_tca.py`** rather than writing it again, so what
+lands in `merged.csv` is exactly what the analysis sees: same collision rules,
+same direction, same suffix. Nothing about the script can drift away from the
+run. `--aws-only` writes the concatenated frame and stops.
+
 ## The pipeline, in order
 
 1. Read `orders.csv` — this is the population, and it stays the population.
@@ -292,7 +308,11 @@ rows would answer it with an assumption.
    `aggrTgtId`, and left-join it on. Name collisions resolve on the normalised
    name and the order file wins, unless its column is empty.
 3. **Keep only the orders that had a closing auction to reach**
-   (`REQUIRE_CAS_ELIGIBLE`, measured by `marketCloseSize > 0`).
+   (`REQUIRE_CAS_ELIGIBLE`, measured by `marketCloseSize > 0`). Markets in
+   `NO_CLOSING_AUCTION` are exempt — India runs no auction in this period, so
+   its zero is about the market rather than the order, and applying the test
+   would delete a third of the book on a technicality. India keeps its own
+   window filter, its own imputed close share, and its own section.
 4. Window India, scope the strategies, filter the period, clear unusable
    values, drop orders that cannot contribute anywhere.
 5. Everything else — every check, table and chart — runs on what survives.
