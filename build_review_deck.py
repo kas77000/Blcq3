@@ -334,20 +334,47 @@ def build(charts: Path, out: Path, n_slides: int, cover: bool = False) -> None:
         picture(s, draw_session_chart(charts / "_session_vs_close.png"),
                 Inches(1.75), Inches(3.6))
         bullets(s, Inches(5.6), [
-            "Trading through the day would have beaten the closing print.",
+            "The closing price was a worse level than the day's average.",
             f"True for large, mid and small alike — about "
             f"{money(abs(round(n['session_total'] / 10) * 10))}.",
-            "This is about where to trade, not how well.",
+            "You still beat the close. The close itself was the problem.",
         ])
-        s.notes_slide.notes_text_frame.text = (
-            "23_close_vs_session_cap: Large -254k, Mid -498k, Small -248k, "
-            "Other -45k. VWAP minus Close per order - same executed price on "
-            "both sides, so the difference is a pure price move. Negative means "
-            "the close was the worse place to trade.\n\n"
-            "Lean on the third bullet. This is NOT the algo underperforming - "
-            "the previous slide shows it beating its benchmark. It is a "
-            "question about where the flow goes, and it is the client's "
-            "decision. One half-year, not a law.")
+        s.notes_slide.notes_text_frame.text = "\n".join([
+            "THE QUESTION YOU WILL BE ASKED: how is slippage positive on the",
+            "last slide and this so negative?",
+            "",
+            "Because they measure different things. vs Close compares your",
+            "EXECUTION PRICE with the closing print. This compares TWO",
+            "BENCHMARKS with each other - the day's VWAP against the closing",
+            "print - using the same executed price on both sides, so the",
+            "execution cancels out and what is left is a pure price move.",
+            "",
+            "You executed well against a benchmark that was itself",
+            "unfavourable. You beat the shop's price by 3.7bps; the shop down",
+            "the road was about 10bps cheaper. Both true.",
+            "",
+            "The arithmetic: -1.04m on 1,061m is about -10bps, and you beat",
+            "the close by +3.7, so net against the session roughly -6bps.",
+            "",
+            "23_close_vs_session_cap: Large -254k, Mid -498k, Small -248k,",
+            "Other -45k.",
+            "",
+            "TWO THINGS TO SAY BEFORE SOMEONE ELSE DOES",
+            "",
+            "1. The denominators differ. +308k is on 824m of auction-market",
+            "   flow; -1.04m is on the full 1,061m including India. They are",
+            "   not subtractable.",
+            "",
+            "2. The session VWAP is a counterfactual you did not trade. These",
+            "   orders went to the close for a reason - urgency, a benchmark",
+            "   obligation, index tracking. If the flow buys names that rally",
+            "   into the close, the close will always look worse than the",
+            "   day's average, and that is the flow's character rather than a",
+            "   failure of the mechanism. This slide cannot tell them apart.",
+            "",
+            "So raise it as a question, never as a recommendation. One",
+            "half-year, not a law.",
+        ])
 
     # --- 5. what we would change -----------------------------------------
     s = new("What we would change")
