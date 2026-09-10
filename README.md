@@ -352,6 +352,19 @@ from the order's limit against the closing price, and tested *before* the
 residual, so those orders stop being filed as unexplained. `market_limit` could
 never answer this because it reads "Limit" on every order.
 
+**India passes eligibility on an imputed fill.** India runs no auction in this
+period, so both `marketCloseSize` and `fillCloseSize` come back empty there and
+every India order looks like it never went near a close. An order that ran
+inside the 17:30–17:45 window traded through the VWAP that *is* the close, so
+all of its executed quantity was in the close — `fillCloseSize` is set to the
+executed quantity, which is the same statement as setting `%CLOSE` to 100 and
+has to happen **before** eligibility is decided or the order is gone before its
+own window is ever consulted. Flagged in `fill_close_imputed`.
+
+An order's own fill is evidence the auction existed, so `auction_existed` is
+`marketCloseSize > 0` **or** `fillCloseSize > 0`. Requiring the market column
+alone would throw away every order whose own fill proves the point.
+
 **Eligibility comes from `fillCloseSize`, not from a flag.** A positive fill
 *is* the order having been in the auction — that day, in that name — which is
 an outcome rather than a permission, and no flag can beat it. `marketCloseSize`

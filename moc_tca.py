@@ -907,13 +907,29 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     if "fill_close_size" in df and "market_close_size" in df:
         mkt = pd.to_numeric(df["market_close_size"], errors="coerce")
         ours = pd.to_numeric(df["fill_close_size"], errors="coerce")
+
+        # India first. It runs no auction in this period, so both columns come
+        # back empty there and the order looks like it never went near a close.
+        # An order that ran inside the closing window traded through the VWAP
+        # that IS the close, so all of its executed quantity was in the close -
+        # that is the fillCloseSize equivalent of setting %CLOSE to 100, and it
+        # has to happen before eligibility is decided or the order is gone
+        # before its own window is ever consulted.
+        if INDIA_CLOSE_PROXY and "exec_shares" in df:
+            in_window = india_in_close_window(df)
+            if in_window.any():
+                df["fill_close_imputed"] = in_window
+                ours = ours.where(~in_window, df["exec_shares"])
+                df["fill_close_size"] = ours
+
         df["auction_share_pct"] = np.where(mkt > 0, 100.0 * ours / mkt, np.nan)
         # fillCloseSize settles eligibility better than any flag can, because
         # it is an outcome rather than a permission: a positive fill IS the
-        # order having been in the auction, that day, in that name. And where
-        # the auction has no size there was nothing to miss - filing that as a
-        # failure sends the desk hunting a cause that cannot exist.
-        df["auction_existed"] = mkt > 0
+        # order having been in the auction, that day, in that name. A fill
+        # implies an auction to have filled in, so either column carrying
+        # something is enough - requiring marketCloseSize alone would throw
+        # away every order whose own fill proves the point.
+        df["auction_existed"] = (mkt.fillna(0) > 0) | (ours.fillna(0) > 0)
         df["auction_participated"] = ours.fillna(0) > 0
 
     # 2. How late the order arrived, against its own market's close.
@@ -3723,6 +3739,16 @@ def self_test() -> int:
     check("no auction that day is separated from a genuine miss",
           list(coh) == ["No auction that day", "No auction fill - unexplained"],
           list(coh))
+
+    # A fill implies an auction to have filled in. Requiring marketCloseSize
+    # alone would throw away every order whose own fill proves the point -
+    # which is exactly the India case, where the imputed fill is the only
+    # evidence there is.
+    mkt_s = pd.Series([1000.0, 0.0, 0.0, np.nan])
+    our_s = pd.Series([50.0, 25.0, 0.0, 10.0])
+    existed = (mkt_s.fillna(0) > 0) | (our_s.fillna(0) > 0)
+    check("a close fill counts as evidence the auction existed",
+          list(existed) == [True, True, False, True], list(existed))
 
     check("weighting falls back when a weight column is all zeros",
           weight_column(pd.DataFrame({"cont_notional": [0.0, 0.0],
