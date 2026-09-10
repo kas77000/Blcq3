@@ -1035,18 +1035,9 @@ def filter_cas_eligible(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     section("CAS ELIGIBILITY")
-    # A market that runs no auction at all cannot fail an auction test. India
-    # has no closing auction in this period, so marketCloseSize is zero there
-    # for a reason that is about the market, not the order - and applying the
-    # test would delete a third of the book on a technicality. It keeps its
-    # own window filter, its own imputed close share, and its own section.
-    exempt = df["market"].isin(NO_CLOSING_AUCTION) if "market" in df         else pd.Series(False, index=df.index)
-    keep = df["auction_existed"].fillna(False) | exempt
-    if exempt.any():
-        log("  " + ", ".join(sorted(set(df.loc[exempt, "market"]))) +
-            " exempt: no closing auction runs there in this period, so the")
-        log("  test cannot apply. Reported separately throughout.")
-        log("")
+    # No exemptions. Every market is tested on whether an auction had size,
+    # and India is then narrowed further by its own start-time window.
+    keep = df["auction_existed"].fillna(False)
     log("  Keeping only orders with a closing auction to reach, measured by")
     log("  the auction's own size rather than by anything the order did.")
     log("")
@@ -1057,6 +1048,20 @@ def filter_cas_eligible(df: pd.DataFrame) -> pd.DataFrame:
         val = float(g.loc[~g["auction_existed"].fillna(False), "notional"].sum())
         log(f"    {str(mkt):<16}{len(g):>9,}{k:>9,}{len(g) - k:>9,}"
             f"{val / 1e6:>26,.2f}")
+    wiped = []
+    for mkt, g in df.groupby("market", dropna=False, observed=True):
+        if len(g) and not g["auction_existed"].fillna(False).any():
+            wiped.append((str(mkt), len(g), float(g["notional"].sum()) / 1e6))
+    if wiped:
+        log("")
+        warn("these markets lost EVERY order to the test:")
+        for mkt, n, val in sorted(wiped, key=lambda r: -r[2]):
+            log(f"      {mkt:<16}{n:>9,} orders   {CURRENCY} {val:>12,.2f}m")
+        log("    marketCloseSize is zero or absent for all of them. That is")
+        log("    either a market with no auction, or a column the extract does")
+        log("    not populate there - and those need opposite responses.")
+        log("    Check before reading anything that excludes them.")
+
     out = df[keep].copy()
     if out.empty:
         raise SystemExit("\n".join([

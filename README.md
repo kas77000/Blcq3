@@ -308,11 +308,14 @@ run. `--aws-only` writes the concatenated frame and stops.
    `aggrTgtId`, and left-join it on. Name collisions resolve on the normalised
    name and the order file wins, unless its column is empty.
 3. **Keep only the orders that had a closing auction to reach**
-   (`REQUIRE_CAS_ELIGIBLE`, measured by `marketCloseSize > 0`). Markets in
-   `NO_CLOSING_AUCTION` are exempt — India runs no auction in this period, so
-   its zero is about the market rather than the order, and applying the test
-   would delete a third of the book on a technicality. India keeps its own
-   window filter, its own imputed close share, and its own section.
+   (`REQUIRE_CAS_ELIGIBLE`, measured by `marketCloseSize > 0`). No market is
+   exempt; India is then narrowed further by its own start-time window.
+
+   A market that loses **every** order to this test is called out by name with
+   its value. That means `marketCloseSize` is zero or absent across the whole
+   market, which is either a market with no auction or a column the extract
+   does not populate there — and those need opposite responses. Read that
+   warning before trusting anything the test excluded.
 4. Window India, scope the strategies, filter the period, clear unusable
    values, drop orders that cannot contribute anywhere.
 5. Everything else — every check, table and chart — runs on what survives.
