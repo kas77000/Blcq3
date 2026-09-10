@@ -761,6 +761,29 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         for f in PCT_FIELDS:
             if f in df:
                 df[f] = df[f] * 100.0
+    else:
+        # The order file writes shares as percentages, the AWS extract writes
+        # some of them as fractions, and after the join both sit in the same
+        # row. A global flag cannot express that - it would fix one source and
+        # break the other - so each column is judged on its own.
+        #
+        # A share column whose largest value in the whole book is at or under
+        # 1 is a fraction: across tens of thousands of orders at least one
+        # should have put more than 1% somewhere.
+        rescaled = []
+        for f in PCT_FIELDS:
+            if f not in df:
+                continue
+            v = pd.to_numeric(df[f], errors="coerce")
+            top = float(v.max()) if v.notna().any() else 0.0
+            if 0 < top <= 1.0:
+                df[f] = v * 100.0
+                rescaled.append((f, top))
+        if rescaled:
+            warn("these share columns are fractions, not percentages, and have")
+            log("    been multiplied by 100 to match the rest:")
+            for f, top in rescaled:
+                log(f"      {f:<16}largest value in the book was {top:.4f}")
 
     # --- sign -------------------------------------------------------------
     if not POSITIVE_IS_SAVING:
@@ -789,6 +812,12 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         if in_window.any():
             df["pct_close_measured"] = df["pct_close"]
             df.loc[in_window, "pct_close"] = 100.0
+            # 100% in the close leaves nothing for anywhere else, so the rest
+            # of the mix goes to zero. Otherwise the row sums past 100 and
+            # every venue figure that includes India is quietly wrong.
+            for f in VENUE_FIELDS:
+                if f != "pct_close" and f in df:
+                    df.loc[in_window, f] = 0.0
     df["has_auction"] = df["close_regime"].eq(REGIME_AUCTION)
 
     if "cap" in df:
