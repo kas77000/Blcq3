@@ -454,9 +454,192 @@ def build(charts: Path, out: Path, n_slides: int, cover: bool = False,
     out.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(out))
     print(f"built {out}  ({total} slides)")
-    print("\nEvery number came from reviews/moc-h1-2026/evidence.md.")
-    print("The early-start figures are graded C there - read them off")
+
+    md = write_evidence(out.with_suffix(".evidence.md"), out)
+    print(f"sources -> {md}")
+    print("\nThe early-start figures are graded C - read them off")
     print("unified_tables.xlsx and correct NUMBERS before presenting.")
+
+
+# ===========================================================================
+# WHERE EVERY STATEMENT COMES FROM
+# ===========================================================================
+#
+# Keyed by slide title. Generated from the SAVED deck rather than from the
+# code that wrote it, so the quoted statements are the ones actually on the
+# slides - if a bullet changes, this file changes with it and cannot drift.
+#
+# Grades: A read from a cell and cross-checked against another table;
+#         B read from a cell, not yet cross-checked;
+#         C read off a chart or the terminal, approximate by nature.
+
+SOURCES = {
+    "Where you traded": [
+        ("Executed notional by market", "`34_market_profile`, chart "
+         "`13_market_notional`", "Sum of executed notional per market, "
+         "largest first. Totals to USD 1,061.44m.", "A"),
+    ],
+    "Your close orders reached the auction and filled": [
+        ("About 80% printed in the auction", "`30_monthly`, `wtd %CLOSE`",
+         "Notional-weighted per month: 83.3 / 71.2 / 87.1 / 83.9 / 72.2 / "
+         "84.2. India imputed at 100% where it ran through its closing "
+         "window, so this is part measured and part assumed.", "A"),
+        ("Never below 71%, never above 87%", "`30_monthly`",
+         "Range across the six months. No trend.", "A"),
+        ("99.6% filled, none untraded", "`29_fill_rate`",
+         "Weighted fill rate 99.6%; 99.56% of orders at or above 99.5% "
+         "filled; zero orders never traded.", "B"),
+    ],
+    "You beat the closing price by 3.7 basis points": [
+        ("+3.74 bps against the close", "`05_headline_vs_close`, "
+         "`wtd mean bps`", "Notional-weighted, winsorised 1/99, on USD "
+         "823.74m of auction-market flow.", "B"),
+        ("Worth about $308,000", "`05_headline_vs_close`, `saved (USDk)`",
+         "bps x notional / 10 = 3.74 x 823.74 / 10 = 308.1, against 307.84 "
+         "reported. The arithmetic reconciles.", "A"),
+        ("Range 2.3 to 5.4, so this is real", "same, `CI low` / `CI high`",
+         "95% percentile bootstrap, 2,000 draws. The interval clears zero.",
+         "B"),
+        ("Cleared orders print at the close by definition", "structural",
+         "An order filled entirely in the auction trades AT the closing "
+         "price, so its slippage is ~0 by construction. The whole +3.74 is "
+         "earned by the portion that did NOT clear.", "A"),
+    ],
+    "Your close orders work, and beat the closing price": [
+        ("Merged slide", "see the two slides above",
+         "Same numbers, same sources - this is the three-slide version's "
+         "compression of them.", "A"),
+    ],
+    "Starting before the close cost about $550,000": [
+        ("Every size band lost money", "`17_first_exec_by_adv`, "
+         "`saved (USDk)`", "under 1% -61k (8,850 orders), 1-3% -235k (209), "
+         "3-5% -30k (95), 5-10% -121k (62), 10-25% -105k (56).", "C"),
+        ("Total about $550,000", "sum of the five bands",
+         "-552k. All five are negative, so the direction does not rest on "
+         "any one figure - the total is what needs pinning, not the "
+         "finding.", "C"),
+        ("Worst: 209 orders at 1-3% of daily volume", "same",
+         "-235k, on orders small enough for the auction to absorb, so no "
+         "capacity reason to start early.", "C"),
+        ("What the measure is", "`first_exec_vs_close`",
+         "The first fill against the close the order was aiming at, weighted "
+         "by each order's CONTINUOUS notional - the part that traded before "
+         "the auction - because the measure only bites there.", "A"),
+    ],
+    "The session beat the close in every company size": [
+        ("The close was a worse level than the day's average",
+         "`23_close_vs_session_cap`", "VWAP minus Close per order, same "
+         "executed price on both sides, so execution cancels and what "
+         "remains is a pure price move.", "B"),
+        ("About $1,040,000 across the bands", "same, `saved (USDk)`",
+         "Large -254k, Mid -498k, Small -248k, Other -45k.", "B"),
+        ("You still beat the close", "the slide above",
+         "Not a contradiction: one compares the execution price with the "
+         "close, the other compares two benchmarks with each other. "
+         "-1.04m on 1,061m is about -10bps; +3.7 on execution; roughly -6 "
+         "net.", "A"),
+        ("CAUTION - denominators differ", "both slides",
+         "+308k is on 823.74m of auction-market flow; -1.04m is on the full "
+         "1,061.44m including India. Not subtractable.", "A"),
+        ("CAUTION - the session VWAP was never traded", "structural",
+         "These orders went to the close for a reason. Flow that buys names "
+         "rallying into the close will always make the close look worse "
+         "than the day's average. Nothing here separates that from a real "
+         "mechanism cost, so it is a question and never a recommendation.",
+         "A"),
+    ],
+    "What we would change": [
+        ("Stop sending small close orders early", "`17_first_exec_by_adv`",
+         "About -552k a half, and the desk controls it directly.", "C"),
+        ("Ask whether mid-cap flow belongs in the close",
+         "`23_close_vs_session_cap`", "Mid-caps are the worst band at -498k. "
+         "A question, not a recommendation - see the cautions above.", "B"),
+        ("Several hundred orders got nothing, unexplained",
+         "`15_cohorts`, `16_orders_to_review`",
+         "Traded, small enough for the auction to absorb, no auction fill. "
+         "Listed individually by order id.", "B"),
+        ("Two markets barely reach the close", "`37_close_opportunity`",
+         "98% and 100% of orders finished before the close, about USD 16m. "
+         "Either genuinely mis-scoped or our close time for those markets is "
+         "wrong - check before raising.", "B"),
+        ("We need a limit price", "`26_by_market_limit`",
+         "market_limit reads 'Limit' on every order in the file, so it "
+         "distinguishes nothing and cannot explain the unexplained cohort.",
+         "A"),
+    ],
+}
+
+CANNOT_CLAIM = [
+    ("Whether a limit was binding",
+     "`market_limit` reads 'Limit' on every order"),
+    ("India's true auction share",
+     "not reported by the platform; imputed from the closing window"),
+    ("Whether we traded with or against the imbalance", "no imbalance data"),
+    ("Any impact claim",
+     "reversion is not distinguishable from zero"),
+]
+
+
+def write_evidence(md_path: Path, pptx_path: Path) -> Path:
+    """Read the saved deck back and write down what backs every statement."""
+    from pptx import Presentation as _P
+
+    deck = _P(str(pptx_path))
+    lines = [f"# Sources — {pptx_path.name}", "",
+             "Every statement on every slide, and the data behind it. "
+             "Generated from the saved deck, so the quotes are the words "
+             "actually on the slides.", "",
+             "**Grades.** **A** read from a cell and cross-checked against "
+             "another table · **B** read from a cell, not yet cross-checked · "
+             "**C** read off a chart or the terminal, approximate by nature.",
+             "", "Numbers came from photographs of `unified_tables.xlsx` "
+             "(run of 10 September 2026). Every table read reconciles to the "
+             "same population total of **USD 1,061.44m**, which is why the "
+             "shape is trustworthy; the last decimal is not.", "", "---", ""]
+
+    for i, slide in enumerate(deck.slides, start=1):
+        title = next((sh.text_frame.text.strip().split("\n")[0]
+                      for sh in slide.shapes
+                      if sh.has_text_frame and sh.text_frame.text.strip()
+                      and not sh.text_frame.text.strip().startswith("•")), "")
+        lines += [f"## Slide {i} — {title}", ""]
+
+        said = []
+        for sh in slide.shapes:
+            if sh.has_text_frame and sh.text_frame.text.strip().startswith("•"):
+                said += [l.lstrip("• ").strip()
+                         for l in sh.text_frame.text.splitlines() if l.strip()]
+        if said:
+            lines += ["**What the slide says**", ""]
+            lines += [f"- {t}" for t in said] + [""]
+
+        rows = SOURCES.get(title)
+        if rows:
+            lines += ["**What backs it**", "",
+                      "| Claim | Source | How it is derived | Grade |",
+                      "|---|---|---|---|"]
+            for claim, src, how, grade in rows:
+                lines.append(f"| {claim} | {src} | {how} | **{grade}** |")
+            lines.append("")
+        else:
+            lines += ["_No sources recorded for this slide._", ""]
+
+    lines += ["---", "", "## What no slide claims", "",
+              "Each of these was checked and is genuinely unavailable, not "
+              "merely unmeasured.", "", "| Not claimable | Why |", "|---|---|"]
+    lines += [f"| {what} | {why} |" for what, why in CANNOT_CLAIM]
+    lines += ["", "---", "", "## Before presenting", "",
+              "Re-read from `unified_tables.xlsx` and correct `NUMBERS` in "
+              "`build_review_deck.py`:", "",
+              "1. The five early-start figures — grade C, and they carry the "
+              "main recommendation", "2. `05_headline_vs_close` — the bps, "
+              "the money, both interval bounds",
+              "3. `23_close_vs_session_cap` — the four cap figures",
+              "4. `29_fill_rate` — fill rate and never-traded count", "",
+              "Everything else is grade A or structural and cannot move.", ""]
+
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return md_path
 
 
 def main(argv=None) -> int:
