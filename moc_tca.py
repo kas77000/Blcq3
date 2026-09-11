@@ -2779,7 +2779,6 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
                           name: str = "14_market_slippage.png",
                           value: str = "vs Arrival bps",
                           title: str = None,
-                          show_share: bool = True,
                           vertical: bool = True) -> None:
     """Cost by market, ordered by how much was traded there, not by cost.
 
@@ -2793,14 +2792,11 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
     if d.empty:
         return
     fig, (ax,) = _fig((11.0, 6.0))
-    labels = []
-    for mkt, row in d.iterrows():
-        share = row.get("% of notional", float("nan"))
-        # The share tells the reader which bars can move the total, which
-        # matters on a cost chart and only adds noise on one the client is
-        # reading market by market. show_share decides.
-        labels.append(f"{mkt}   ({share:.0f}% of value traded)"
-                      if show_share and np.isfinite(share) else str(mkt))
+    # Market names only. The share used to sit beside each one; it made the
+    # axis long and asked the reader to hold two numbers per bar. The bars
+    # are still ORDERED by value, and the note below says so, which is the
+    # part that actually changes how the chart should be read.
+    labels = [str(m) for m in d.index]
     small = [bool(x) for x in d["small sample"]] if "small sample" in d else None
     vals = [float(v) for v in d[value]]
     draw = _diverging_barv if vertical else _diverging_barh
@@ -3711,8 +3707,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # comes from and whether it rests on one place.
     chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts,
                           name="15_market_vs_close.png", value="vs Close bps",
-                          title="Against the closing price, by market",
-                          show_share=False)
+                          title="Against the closing price, by market")
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
 
@@ -3778,8 +3773,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
         chart_market_slippage(fx, charts, "10b_first_exec_market.png",
                               value="vs first-exec bps",
                               title="Was starting before the close right? "
-                                    "By market",
-                              show_share=False)
+                                    "By market")
     chart_headline(t.get("20_reversion_strategy", pd.DataFrame()), charts,
                    "next open vs close", "11_reversion.png",
                    "Reversion - did the auction print come back?")
