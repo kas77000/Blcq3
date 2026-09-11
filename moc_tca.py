@@ -2478,8 +2478,12 @@ def _style(ax, xlabel="", ylabel="", title="", horizontal=False):
     ax.set_axisbelow(True)
 
 
+_WRITTEN_CHARTS: set = set()
+
+
 def _save(fig, out_dir: Path, name: str, bottom: float = 0.0) -> None:
     path = out_dir / name
+    _WRITTEN_CHARTS.add(name)
     fig.tight_layout(rect=(0, bottom, 1, 1) if bottom else None)
     fig.savefig(path, facecolor=SURFACE, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
@@ -3673,6 +3677,11 @@ def build_charts(t: dict, out_dir: Path) -> None:
         return
     charts = out_dir / "charts"
     charts.mkdir(parents=True, exist_ok=True)
+    # What was here before this run. Anything still present at the end that
+    # this run did not write is from an older version of the analysis - a
+    # chart that has since been renamed, split or retired. Left alone it sits
+    # in the folder looking current and walks into a deck.
+    before = {p.name for p in charts.glob("*.png") if p.name[:1].isdigit()}
     log("")
     log("  charts")
     chart_scope(t.get("01_scope", pd.DataFrame()), charts)
@@ -3785,6 +3794,19 @@ def build_charts(t: dict, out_dir: Path) -> None:
             chart_monthly(ind, charts, "12b_monthly_india.png", "India only")
         else:
             chart_monthly(df, charts)
+
+    # Anything this run did not write is left over from an older version of
+    # the analysis. A retired chart that stays in the folder looks exactly
+    # like a current one and is the easiest way for a wrong number to reach a
+    # client, so it goes - and it is named, never removed quietly.
+    stale = sorted(before - _WRITTEN_CHARTS)
+    if stale:
+        warn(f"{len(stale)} chart(s) in {charts} are from an earlier run and")
+        log("    are no longer produced. Removing them, so nothing retired")
+        log("    can be mistaken for current:")
+        for name in stale:
+            (charts / name).unlink(missing_ok=True)
+            log(f"      {name}")
 
 
 def write_excel(t: dict, out_dir: Path) -> None:
