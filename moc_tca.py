@@ -2703,6 +2703,39 @@ def drop_unattributable(d: pd.DataFrame, what: str = "chart") -> pd.DataFrame:
     return d[~gone.to_numpy()]
 
 
+def apportion(values: list, target: float) -> list:
+    """Round parts to whole numbers that still add up to the rounded total.
+
+    Rounding every part on its own is what puts a 13 underneath a 14: each
+    part rounds down, the total rounds up, and the reader is left doing
+    arithmetic that does not work. On a client slide that is not a rounding
+    detail, it is the moment someone stops trusting the chart.
+
+    Largest remainder keeps each part within one unit of the truth and makes
+    the column add up. Ties go to the bigger part, so a sliver beside a large
+    number never collects the spare unit.
+    """
+    tot = int(round(target))
+    floors = [int(math.floor(v)) for v in values]
+    rem = tot - sum(floors)
+    order = sorted(range(len(values)),
+                   key=lambda i: (values[i] - floors[i], values[i]),
+                   reverse=True)
+    k = 0
+    while rem > 0 and order:
+        floors[order[k % len(order)]] += 1
+        rem -= 1
+        k += 1
+    k = 0
+    while rem < 0 and k < 4 * max(len(order), 1):
+        idx = order[-1 - (k % len(order))]
+        if floors[idx] > 0:
+            floors[idx] -= 1
+            rem += 1
+        k += 1
+    return floors
+
+
 def chart_market_notional(df: pd.DataFrame, out: Path,
                           name: str = "13_market_notional.png") -> None:
     """Value traded by market, split cash against swap.
@@ -2754,8 +2787,18 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     ax.set_ylim(0, span * 1.42)
     for j, m in enumerate(markets):
         share = 100.0 * bottom[j] / max(grand, 1e-9)
-        lines = [f"{p} {by_part[p][j]:,.0f}" for p in parts
-                 if p != "All" and round(by_part.get(p, [0])[j]) > 0]
+        shown = [p for p in parts if p != "All"]
+        whole = apportion([by_part[p][j] for p in shown], bottom[j])
+        # A part too small to round to a million is shown as "<1m" rather
+        # than dropped. It is true, it keeps the column adding up, and it
+        # does not pretend a business line that exists is not there.
+        lines = []
+        for p, n in zip(shown, whole):
+            raw = by_part[p][j]
+            if n > 0:
+                lines.append(f"{p} {n:,.0f}m")
+            elif raw > 0:
+                lines.append(f"{p} <1m")
         if lines:
             ax.text(j, bottom[j] + span * 0.02, chr(10).join(lines),
                     va="bottom", ha="center", fontsize=7.5, color=INK_SECOND,
