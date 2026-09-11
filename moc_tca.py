@@ -77,6 +77,11 @@ SIDE_ADJUSTED = True
 # miss, and the run log says so.
 AUCTION_ONLY_MIN_PCT = 99.5
 
+# The NextOpen column in this export is already next open vs close, so it is
+# the reversion as it stands. Set False if a future extract measures NextOpen
+# against the execution price instead, and it will be differenced again.
+NEXTOPEN_IS_VS_CLOSE = True
+
 # Which strategies the MISS TAXONOMY applies to. A VWAP order was never meant
 # to reach the auction, so calling its low %CLOSE an unexplained miss would be
 # nonsense. Clearance, capacity, cohorts and the first-execution tables run on
@@ -966,7 +971,12 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     if "slip_nextopen" in df and "slip_close" in df:
         # closing price -> next open. Negative = the price moved back against
         # where we traded, i.e. temporary impact we paid.
-        df["reversion_bps"] = df["slip_nextopen"] - df["slip_close"]
+        # NextOpen in this export is already measured AGAINST THE CLOSE, so
+        # it IS the reversion. Subtracting slip_close from it, as this used
+        # to, took the close out twice and produced a number that was neither
+        # one thing nor the other. Confirmed with the desk.
+        df["reversion_bps"] = (df["slip_nextopen"] if NEXTOPEN_IS_VS_CLOSE
+                               else df["slip_nextopen"] - df["slip_close"])
 
     # Implied execution of the portion that MISSED the auction.
     # The auction portion prints at the close by construction, contributing ~0
@@ -1038,9 +1048,19 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     # is the population reversion can say something about: an order that only
     # ever printed in the auction has no pre-trade to have moved the price
     # with, so its reversion is the market's, not ours.
+    # Reversion only means something for an order that was IN the close. With
+    # nothing printed in the auction there is no close print to have reverted
+    # from, and those orders were the source of the odd numbers by market.
+    # India passes this by construction - its close share is imputed - which
+    # is exactly why its reversion reads as a separate line rather than
+    # pooled with markets that really ran an auction.
     if "pct_close" in df:
-        traded = (df["fill_rate"] >= COHORT_FR_ZERO) if "fill_rate" in df             else pd.Series(True, index=df.index)
-        df["pretraded"] = traded & (df["pct_close"] < AUCTION_ONLY_MIN_PCT)
+        traded = ((df["fill_rate"] >= COHORT_FR_ZERO) if "fill_rate" in df
+                  else pd.Series(True, index=df.index))
+        in_close = traded & (df["pct_close"] > 0)
+        df["executed_in_close"] = in_close
+        df["pretraded"] = in_close & (df["pct_close"] < AUCTION_ONLY_MIN_PCT)
+        df["close_only"] = in_close & (df["pct_close"] >= AUCTION_ONLY_MIN_PCT)
 
     # --- buckets ----------------------------------------------------------
     if "adv_pct" in df:
@@ -1057,10 +1077,10 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         if ok.sum() >= 8 and v[ok].nunique() >= 4:
             try:
                 _, edges = pd.qcut(v[ok], 4, retbins=True, duplicates="drop")
-                names = [f"Q{i + 1}  {edges[i]:.1f}-{edges[i + 1]:.1f} bps"
+                # Ranges only, like the %Adv bands. "Q1" carries no meaning
+                # a reader can use; "0.8-9.2" does.
+                names = [f"{edges[i]:.1f}-{edges[i + 1]:.1f}"
                          for i in range(len(edges) - 1)]
-                names[0] = names[0] + chr(10) + "(tightest)"
-                names[-1] = names[-1] + chr(10) + "(widest)"
                 df["spread_bucket"] = pd.cut(v, edges, labels=names,
                                              include_lowest=True)
             except (ValueError, IndexError):
@@ -2994,7 +3014,10 @@ def chart_capacity(t: pd.DataFrame, out: Path) -> None:
     if t.empty:
         return
     fig, (ax,) = _fig()
-    markets = [m for m in t["market"].unique() if m not in NO_CLOSING_AUCTION]
+    markets = [m for m in t["market"].unique()
+               if m not in NO_CLOSING_AUCTION
+               and m not in EXCLUDE_MARKETS_FROM_CHARTS
+               and str(m).strip().lower() not in NON_CATEGORIES]
     markets = sorted(markets,
                      key=lambda m: -t.loc[t["market"] == m,
                                           "notional (" + CURRENCY + "m)"].sum())[:6]
@@ -3339,14 +3362,19 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     # pre-traded cut says how much of it we brought on ourselves, because
     # reversion on an order that never left the auction is the market moving,
     # not us moving it.
-    t["44_reversion_by_market"] = by_group(auc, "market", "reversion_bps")
-    if "pretraded" in auc:
+    # Two populations, one measure. An order that worked before the close had
+    # a chance to move the price; one that only ever printed in the auction
+    # did not. Comparing the two per market is what separates our own impact
+    # from the market's own overnight move.
+    if "pretraded" in auc and "close_only" in auc:
         pre = auc[auc["pretraded"].fillna(False)]
+        only = auc[auc["close_only"].fillna(False)]
         if len(pre):
-            t["45_reversion_pretraded"] = by_group(pre, "close_bucket",
+            t["44_reversion_pretraded"] = by_group(pre, "market",
                                                    "reversion_bps")
-            t["46_reversion_pretraded_mkt"] = by_group(pre, "market",
-                                                       "reversion_bps")
+        if len(only):
+            t["45_reversion_close_only"] = by_group(only, "market",
+                                                    "reversion_bps")
     if "spread_bucket" in auc:
         t["42_close_by_spread"] = by_group(auc, "spread_bucket", "slip_close")
         t["43_first_exec_by_spread"] = t_first_exec(moc, "spread_bucket")
@@ -3666,21 +3694,21 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
 
-    chart_headline(t.get("44_reversion_by_market", pd.DataFrame()), charts,
-                   "next open vs close", "21_reversion_by_market.png",
-                   "Reversion by market", vertical=True)
-    # The bands are auction share, so the LEFT of this chart is the orders
-    # that pre-traded most. Without saying so the chart reads backwards.
-    chart_headline(t.get("45_reversion_pretraded", pd.DataFrame()), charts,
-                   "next open vs close", "22_reversion_pretraded.png",
-                   "Reversion on orders that traded before the close",
+    rev_note = ("orders that printed in the close only; negative means the "
+                "price came back against us the next morning")
+    chart_headline(t.get("44_reversion_pretraded", pd.DataFrame()), charts,
+                   "next open vs close", "21_reversion_pretraded.png",
+                   "Reversion by market - orders that traded before the close",
                    vertical=True,
-                   note="bands are how much of the order reached the auction, "
-                        "so the left-hand bars traded the most before it; "
-                        "negative means the price came back against us")
-    chart_headline(t.get("46_reversion_pretraded_mkt", pd.DataFrame()), charts,
-                   "next open vs close", "23_reversion_pretraded_market.png",
-                   "Where the pre-trade came back, by market", vertical=True)
+                   note="these orders worked in continuous before the "
+                        "auction, so they had a chance to move the price. "
+                        + rev_note)
+    chart_headline(t.get("45_reversion_close_only", pd.DataFrame()), charts,
+                   "next open vs close", "22_reversion_close_only.png",
+                   "Reversion by market - orders that only traded in the close",
+                   vertical=True,
+                   note="these orders never worked before the auction, so any "
+                        "move here is the market's, not ours. " + rev_note)
 
     # Close performance and the early start, each by size and by spread.
     # Vertical, to match the by-market charts.
@@ -4201,7 +4229,9 @@ def self_test() -> int:
     check("close vs session identity: Vwap - Close",
           np.allclose(df["close_vs_session_bps"],
                       df["slip_vwap"] - df["slip_close"]))
-    check("reversion identity: NextOpen - Close",
+    check("reversion is NextOpen as it stands, not differenced again",
+          np.allclose(df["reversion_bps"], df["slip_nextopen"])
+          if NEXTOPEN_IS_VS_CLOSE else
           np.allclose(df["reversion_bps"],
                       df["slip_nextopen"] - df["slip_close"]))
     check("decomposition is exact: waiting + execution = vs Arrival",
