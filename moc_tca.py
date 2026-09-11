@@ -2803,10 +2803,12 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
     draw(ax, labels, vals, small=small)
     if vertical:
         _style(ax, ylabel=f"{value}, notional-weighted",
-               title=title or "What each market cost, biggest by value first")
+               title=title or "Arrival slippage (IS) by market, "
+                              "biggest by value first")
     else:
         _style(ax, xlabel=f"{value}, notional-weighted",
-               title=title or "What each market cost, biggest by value first",
+               title=title or "Arrival slippage (IS) by market, "
+                              "biggest by value first",
                horizontal=True)
     ax.text(0.0, -0.30 if vertical else -0.14,
             "ordered by share of value traded, not by cost - a "
@@ -3390,6 +3392,11 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
                                                     "reversion_bps")
     if "spread_bucket" in auc:
         t["42_close_by_spread"] = by_group(auc, "spread_bucket", "slip_close")
+        # The same cut against arrival. Close says whether the auction print
+        # was good; arrival says whether the whole order was, and a wide name
+        # can look fine on one and poor on the other - that gap is the cost
+        # of the time spent getting there, which is what IS is for.
+        t["28b_by_spread"] = by_group(auc, "spread_bucket", "slip_arrival")
         t["43_first_exec_by_spread"] = t_first_exec(moc, "spread_bucket")
     if df["strategy"].nunique() > 1:
         t["36_algo_choice"] = t_algo_choice(df)
@@ -3737,6 +3744,18 @@ def build_charts(t: dict, out_dir: Path) -> None:
     ]:
         chart_headline(t.get(key, pd.DataFrame()), charts, label, name, title,
                        vertical=True)
+    # The same two cuts against ARRIVAL. Each sits beside its close twin so
+    # the pair can be read together: the close chart is the auction print,
+    # the arrival chart is the whole order, and where they disagree the
+    # difference is what the order paid on the way to the auction.
+    for key, name, title in [
+        ("28_by_adv", "17b_arrival_by_adv.png",
+         "Arrival slippage (IS) by order size"),
+        ("28b_by_spread", "18b_arrival_by_spread.png",
+         "Arrival slippage (IS) by spread quartile"),
+    ]:
+        chart_headline(t.get(key, pd.DataFrame()), charts, "vs Arrival (IS)",
+                       name, title, vertical=True)
     for key, name, title in [
         ("17_first_exec_by_adv", "19_first_exec_by_adv.png",
          "First execution vs the close, by order size"),
