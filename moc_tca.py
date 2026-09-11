@@ -2884,7 +2884,7 @@ def chart_spread_relative(t: pd.DataFrame, out: Path,
     for _, row in d.iterrows():
         mkt = row.get("market", "")
         sprd = row.get("spread bps (wtd)", float("nan"))
-        labels.append(f"{mkt}\n1 spread = {sprd:.1f} bps"
+        labels.append(f"{mkt}\n[{sprd:.1f} bps]"
                       if np.isfinite(sprd) else str(mkt))
         vals.append(float(row[value]))
 
@@ -2898,8 +2898,8 @@ def chart_spread_relative(t: pd.DataFrame, out: Path,
            title="Spread relative performance")
     ax.text(0.0, -0.34, "basis points are not comparable between markets - a "
             "wide-spread name costs more of them whatever the algo does. "
-            "Spreads are.", transform=ax.transAxes, fontsize=7.5,
-            color=INK_MUTED)
+            "Spreads are. [x bps] is one spread in that market.",
+            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
     _save(fig, out, name)
 
 
@@ -3138,8 +3138,15 @@ def chart_cohorts(t: pd.DataFrame, out: Path) -> None:
 
 def chart_monthly(df: pd.DataFrame, out: Path,
                   name: str = "12_monthly.png", subtitle: str = "") -> None:
-    """Two measures over time, two panels."""
-    if "month" not in df or df.empty:
+    """Close performance, month by month.
+
+    One panel. The auction-share line that used to sit beside it came off at
+    the desk's request. It answered "did the orders reach the close", which
+    the deck already covers, and here it competed with the only question a
+    month-by-month view is good at: did the result hold up across the
+    period, or does it rest on one month.
+    """
+    if "month" not in df or df.empty or "slip_close" not in df:
         return
     g = df.groupby("month", observed=True)
     months = list(g.groups.keys())
@@ -3149,31 +3156,25 @@ def chart_monthly(df: pd.DataFrame, out: Path,
     # desk's request - it is still in the 30_monthly table, where an analyst
     # reads it, rather than on a slide a client reads.
     labels = [str(m) for m in months]
-    fig, axes = _fig((11.5, 4.4), ncols=2)
-    pc = [wmean(x["pct_close"], x["notional"], winsor=False)
-          for _, x in g] if "pct_close" in df else []
-    axes[0].plot(range(len(months)), pc, marker="o", markersize=5.5,
-                 linewidth=2, color=SERIES[0], zorder=3)
-    axes[0].set_xticks(range(len(months)))
-    axes[0].set_xticklabels(labels, rotation=30, ha="right")
-    axes[0].set_ylim(0, 105)
-    _style(axes[0], ylabel="auction share (%CLOSE), notional-weighted",
-           title="% Executed in the close per month"
+    fig, (ax,) = _fig((11.0, 5.4))
+    sc = [wmean(x["slip_close"], x["notional"]) for _, x in g]
+    colors = [POS if v >= 0 else NEG for v in sc]
+    ax.bar(range(len(months)), sc, color=colors, width=0.62, zorder=3)
+    ax.axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
+    reach = [abs(v) for v in sc if v is not None and not math.isnan(v)]
+    span = max(reach or [1.0])
+    ax.set_ylim(-span * 1.32, span * 1.32)
+    for i, v in enumerate(sc):
+        if v is None or math.isnan(v):
+            continue
+        ax.text(i, v + (span * 0.04 if v >= 0 else -span * 0.04), _fmt_bps(v),
+                ha="center", va="bottom" if v >= 0 else "top", fontsize=8.5,
+                color=INK, zorder=5)
+    ax.set_xticks(range(len(months)))
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    _style(ax, ylabel="vs Close, bps",
+           title="Close performance by month"
                  + (f" — {subtitle}" if subtitle else ""))
-
-    if "slip_close" in df:
-        sc = [wmean(x["slip_close"], x["notional"]) for _, x in g]
-        colors = [POS if v >= 0 else NEG for v in sc]
-        axes[1].bar(range(len(months)), sc, color=colors, width=0.62, zorder=3)
-        axes[1].axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
-        for i, v in enumerate(sc):
-            axes[1].text(i, v, _fmt_bps(v), ha="center",
-                         va="bottom" if v >= 0 else "top", fontsize=8, color=INK)
-        axes[1].set_xticks(range(len(months)))
-        axes[1].set_xticklabels(labels, rotation=30, ha="right")
-        _style(axes[1], ylabel="vs Close, bps",
-               title="Close performance by month"
-                     + (f" — {subtitle}" if subtitle else ""))
     _save(fig, out, name)
 
 
