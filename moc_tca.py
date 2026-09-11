@@ -2516,9 +2516,11 @@ def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps"):
                         zorder=4)
     ax.axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
     ax.set_xticks(x)
-    ax.set_xticklabels(
-        [f"{l}{chr(10)}(small sample)" if small and small[i] else str(l)
-         for i, l in enumerate(labels)], rotation=30, ha="right")
+    # The small-sample marking is deliberately NOT on the tick label. It
+    # crowds a client chart and reads as an apology. The flag is still on
+    # every row of the table the chart came from, and the run log names the
+    # thin categories, so the caveat survives where an analyst will meet it.
+    ax.set_xticklabels([str(l) for l in labels], rotation=30, ha="right")
 
     reach = [abs(v) for v in values if v is not None and not math.isnan(v)]
     if ci is not None:
@@ -2564,8 +2566,7 @@ def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
             ax.plot([hi, hi], [i - .1, i + .1], color=INK_SECOND, lw=1.4, zorder=4)
     ax.axvline(0, color=BASELINE, linewidth=1.0, zorder=2)
     ax.set_yticks(y)
-    ax.set_yticklabels([f"{l}{'  (small sample)' if small and small[i] else ''}"
-                        for i, l in enumerate(labels)])
+    ax.set_yticklabels([str(l) for l in labels])
     # Bar height is in data units, so with one category it fills the axis.
     # Widen the y-range instead of thinning the bar: the bar keeps the same
     # weight it has on a chart with six of them.
@@ -4048,6 +4049,20 @@ def findings(t: dict) -> None:
                 f"({len(ss):,} of {len(auc):,})")
             log(f"    {100.0 * ss['notional'].sum() / max(auc['notional'].sum(), 1e-9):>6.1f}% "
                 f"of value ({CURRENCY} {ss['notional'].sum() / 1e6:,.1f}m)")
+            log("")
+
+    # The charts no longer carry a small-sample marking - it crowds a client
+    # slide - so the thin groups are named once, here, where whoever presents
+    # the deck will meet them before the meeting rather than during it.
+    prof = t.get("34_market_profile", pd.DataFrame())
+    if not prof.empty and "small sample" in prof.columns:
+        thin = prof[prof["small sample"].astype(bool)]
+        if len(thin):
+            log(f"  Markets under {MIN_N_FOR_CI} orders - shown on the charts,")
+            log("  but do not quote them as results:")
+            for mkt, r in thin.iterrows():
+                log(f"      {str(mkt):<16}{int(r['orders']):>6,} orders   "
+                    f"{CURRENCY} {r['notional (' + CURRENCY + 'm)']:>9,.2f}m")
             log("")
 
     log("  WHAT THIS ANALYSIS CANNOT SHOW")
