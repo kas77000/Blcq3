@@ -1040,6 +1040,23 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     if "pct_close" in df:
         df["close_bucket"] = pd.cut(df["pct_close"], CLOSE_BUCKETS,
                                     labels=CLOSE_LABELS)
+    # Spread quartiles, cut on the data rather than on fixed thresholds, so
+    # they stay quarters whatever the book looks like. The label carries the
+    # actual range: "Q1" alone tells a reader nothing about how tight tight is.
+    if "spread_bps" in df:
+        v = pd.to_numeric(df["spread_bps"], errors="coerce")
+        ok = v.notna() & (v > 0)
+        if ok.sum() >= 8 and v[ok].nunique() >= 4:
+            try:
+                _, edges = pd.qcut(v[ok], 4, retbins=True, duplicates="drop")
+                names = [f"Q{i + 1}  {edges[i]:.1f}-{edges[i + 1]:.1f} bps"
+                         for i in range(len(edges) - 1)]
+                names[0] = names[0] + chr(10) + "(tightest)"
+                names[-1] = names[-1] + chr(10) + "(widest)"
+                df["spread_bucket"] = pd.cut(v, edges, labels=names,
+                                             include_lowest=True)
+            except (ValueError, IndexError):
+                pass
     if "date" in df:
         df["month"] = df["date"].dt.to_period("M").astype(str)
 
@@ -2445,6 +2462,57 @@ def _fmt_bps(v) -> str:
     return "-" if (v is None or (isinstance(v, float) and math.isnan(v))) else f"{v:+.1f}"
 
 
+def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps"):
+    """Diverging bars standing up: categories along the bottom, value up.
+
+    The horizontal twin of this is _diverging_barh. Same colours, same
+    convention - blue above zero is a saving, red below it is a cost - and
+    the same rule that every bar carries its own number, so colour is never
+    the only encoding.
+    """
+    x = np.arange(len(labels))
+    colors = [POS if (v is not None and not math.isnan(v) and v >= 0) else NEG
+              for v in values]
+    ax.bar(x, values, color=colors, width=0.62, zorder=3)
+    if ci is not None:
+        for i, (lo, hi) in enumerate(ci):
+            if lo is None or math.isnan(lo):
+                continue
+            ax.plot([i, i], [lo, hi], color=INK_SECOND, linewidth=1.4, zorder=4)
+            for b in (lo, hi):
+                ax.plot([i - .1, i + .1], [b, b], color=INK_SECOND, lw=1.4,
+                        zorder=4)
+    ax.axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [f"{l}{chr(10)}(small sample)" if small and small[i] else str(l)
+         for i, l in enumerate(labels)], rotation=30, ha="right")
+
+    reach = [abs(v) for v in values if v is not None and not math.isnan(v)]
+    if ci is not None:
+        reach += [abs(b) for lo, hi in ci for b in (lo, hi)
+                  if b is not None and not math.isnan(b)]
+    span = max(reach or [1.0])
+    pad = span * 0.30
+    ax.set_ylim(-span - pad, span + pad)
+    for i, v in enumerate(values):
+        if v is None or math.isnan(v):
+            continue
+        edge = v
+        if ci is not None and i < len(ci):
+            lo, hi = ci[i]
+            if (lo is not None and hi is not None
+                    and not math.isnan(lo) and not math.isnan(hi)):
+                edge = max(v, hi) if v >= 0 else min(v, lo)
+        off = span * 0.03
+        label = f"{v:+.2f}" if unit == "spreads" else _fmt_bps(v)
+        ax.text(i, edge + (off if v >= 0 else -off), label, ha="center",
+                va="bottom" if v >= 0 else "top", color=INK, fontsize=8.5,
+                zorder=6,
+                bbox=dict(boxstyle="round,pad=0.16", facecolor=SURFACE,
+                          edgecolor="none", alpha=0.85))
+
+
 def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
     """unit only changes how the value labels are formatted, never the data."""
     """Horizontal diverging bars: blue = savings, red = cost, zero baseline.
@@ -2551,15 +2619,26 @@ def chart_scope(t: pd.DataFrame, out: Path) -> None:
 
 
 def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
-                   name: str, title: str) -> None:
+                   name: str, title: str, vertical: bool = False) -> None:
     if t.empty:
         return
-    fig, (ax,) = _fig((FIGSIZE[0], _rows_high(len(t))))
+    # A NaN category is a bucket of orders whose grouping value was missing -
+    # a cleared quote error, say. It is never a finding, and on a client slide
+    # a bar labelled "nan" is worse than one bar fewer.
+    t = t[[str(i).lower() not in ("nan", "none", "nat") for i in t.index]]
+    if t.empty:
+        return
+    fig, (ax,) = _fig((FIGSIZE[0], 5.4 if vertical else _rows_high(len(t))))
     ci = list(zip(t["CI low"], t["CI high"])) if "CI low" in t else None
-    _diverging_barh(ax, list(t.index), list(t["wtd mean bps"]), ci=ci,
-                    small=list(t["small sample"]) if "small sample" in t else None)
-    _style(ax, xlabel=f"{value_label}, notional-weighted (bps)",
-           title=title, horizontal=True)
+    small = list(t["small sample"]) if "small sample" in t else None
+    draw = _diverging_barv if vertical else _diverging_barh
+    draw(ax, list(t.index), list(t["wtd mean bps"]), ci=ci, small=small)
+    if vertical:
+        _style(ax, ylabel=f"{value_label}, notional-weighted (bps)",
+               title=title)
+    else:
+        _style(ax, xlabel=f"{value_label}, notional-weighted (bps)",
+               title=title, horizontal=True)
     # Anchored to the FIGURE. On a short panel an axes-relative offset is a
     # small absolute distance and the note lands on the tick labels.
     fig.text(0.01, 0.01, "whiskers are 95% bootstrap CIs; a CI crossing zero "
@@ -2568,15 +2647,23 @@ def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
     _save(fig, out, name, bottom=0.14)
 
 
+NON_CATEGORIES = {"nan", "none", "nat", ""}
+
+
 def drop_unattributable(d: pd.DataFrame, what: str = "chart") -> pd.DataFrame:
-    """Take the unattributable markets out of a chart, and say so once."""
-    if "market" in d.columns:
-        gone = d["market"].isin(EXCLUDE_MARKETS_FROM_CHARTS)
-        keep = d[~gone]
-    else:
-        gone = d.index.isin(EXCLUDE_MARKETS_FROM_CHARTS)
-        keep = d[~gone]
-    return keep
+    """Take the unattributable rows out of a chart.
+
+    Two kinds go: a market that could not be resolved from the symbol, and a
+    category that is missing altogether. Neither is ever a finding, and a bar
+    labelled "Unknown" or "nan" on a client slide invites a question nobody
+    in the room can answer. Both stay in the tables, where the totals must
+    still add up.
+    """
+    keys = d["market"] if "market" in d.columns else pd.Series(
+        d.index, index=d.index)
+    text = keys.astype(str).str.strip().str.lower()
+    gone = keys.isin(EXCLUDE_MARKETS_FROM_CHARTS) | text.isin(NON_CATEGORIES)
+    return d[~gone.to_numpy()]
 
 
 def chart_market_notional(df: pd.DataFrame, out: Path,
@@ -2597,44 +2684,43 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     parts = [p for p in NOTIONAL_TYPE_ORDER
              if have_type and (d["notional_type"] == p).any()] or ["All"]
     totals = (d.groupby("market", observed=True)["notional"].sum() / 1e6
-              ).sort_values(ascending=False).head(14)
+              ).sort_values(ascending=False).head(12)
     markets = list(totals.index)
     grand = float(totals.sum())
 
-    fig, (ax,) = _fig((11.0, 6.6))
-    y = np.arange(len(markets))
-    left = np.zeros(len(markets))
+    fig, (ax,) = _fig((11.0, 6.0))
+    x = np.arange(len(markets))
+    bottom = np.zeros(len(markets))
     for i, part in enumerate(parts):
         sub_d = d if part == "All" else d[d["notional_type"] == part]
         vals = [float(sub_d.loc[sub_d["market"] == m, "notional"].sum()) / 1e6
                 for m in markets]
-        ax.barh(y, vals, left=left, height=0.62, color=SERIES[i % len(SERIES)],
-                zorder=3, label=part, edgecolor=SURFACE, linewidth=1.4)
+        ax.bar(x, vals, bottom=bottom, width=0.62, color=SERIES[i % len(SERIES)],
+               zorder=3, label=part, edgecolor=SURFACE, linewidth=1.4)
         for j, v in enumerate(vals):
-            # Only label a segment wide enough to hold the text.
-            if v > grand * 0.02:
-                ax.text(left[j] + v / 2, j, f"{v:,.0f}", ha="center",
+            # Only label a segment tall enough to hold the text.
+            if v > grand * 0.025:
+                ax.text(j, bottom[j] + v / 2, f"{v:,.0f}", ha="center",
                         va="center", fontsize=8, color="white", zorder=5)
-        left = left + np.array(vals)
+        bottom = bottom + np.array(vals)
 
-    ax.set_yticks(y)
-    ax.set_yticklabels(markets)
-    ax.invert_yaxis()
-    ax.grid(axis="x", zorder=0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(markets, rotation=30, ha="right")
+    ax.grid(axis="y", zorder=0)
     ax.set_axisbelow(True)
-    span = max(left.max() if len(left) else 1.0, 1.0)
-    ax.set_xlim(0, span * 1.3)
+    span = max(bottom.max() if len(bottom) else 1.0, 1.0)
+    ax.set_ylim(0, span * 1.16)
     for j, m in enumerate(markets):
-        share = 100.0 * left[j] / max(grand, 1e-9)
-        ax.text(left[j], j, f"  {left[j]:,.0f}m  ({share:.0f}%)", va="center",
-                ha="left", fontsize=8.5, color=INK, zorder=5)
+        share = 100.0 * bottom[j] / max(grand, 1e-9)
+        ax.text(j, bottom[j], f"{bottom[j]:,.0f}m\n({share:.0f}%)",
+                va="bottom", ha="center", fontsize=8.5, color=INK, zorder=5)
     if len(parts) > 1:
-        ax.legend(frameon=False, ncol=len(parts), loc="lower right",
+        ax.legend(frameon=False, ncol=len(parts), loc="upper right",
                   fontsize=8.5)
-    _style(ax, xlabel=f"executed notional ({CURRENCY}m)",
-           title="Value traded by market", horizontal=True)
+    _style(ax, ylabel=f"executed notional ({CURRENCY}m)",
+           title="Value traded by market")
     if len(parts) > 1:
-        ax.text(0.0, -0.11, "cash and swap split by client account; the "
+        ax.text(0.0, -0.30, "cash and swap split by client account; the "
                 "percentage is the market's share of the value traded",
                 transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
     _save(fig, out, name)
@@ -2644,7 +2730,8 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
                           name: str = "14_market_slippage.png",
                           value: str = "vs Arrival bps",
                           title: str = None,
-                          show_share: bool = True) -> None:
+                          show_share: bool = True,
+                          vertical: bool = True) -> None:
     """Cost by market, ordered by how much was traded there, not by cost.
 
     Ordering by cost would put a 61-order market at the top of the slide.
@@ -2653,10 +2740,10 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
     """
     if t.empty or value not in t:
         return
-    d = drop_unattributable(t).head(14)
+    d = drop_unattributable(t).head(12)
     if d.empty:
         return
-    fig, (ax,) = _fig((11.0, 6.4))
+    fig, (ax,) = _fig((11.0, 6.0))
     labels = []
     for mkt, row in d.iterrows():
         share = row.get("% of notional", float("nan"))
@@ -2665,13 +2752,19 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
         # reading market by market. show_share decides.
         labels.append(f"{mkt}   ({share:.0f}% of value traded)"
                       if show_share and np.isfinite(share) else str(mkt))
-    _diverging_barh(ax, labels, [float(v) for v in d[value]],
-                    small=[bool(x) for x in d["small sample"]]
-                    if "small sample" in d else None)
-    _style(ax, xlabel=f"{value}, notional-weighted",
-           title=title or "What each market cost, biggest by value first",
-           horizontal=True)
-    ax.text(0.0, -0.14, "ordered by share of value traded, not by cost - a "
+    small = [bool(x) for x in d["small sample"]] if "small sample" in d else None
+    vals = [float(v) for v in d[value]]
+    draw = _diverging_barv if vertical else _diverging_barh
+    draw(ax, labels, vals, small=small)
+    if vertical:
+        _style(ax, ylabel=f"{value}, notional-weighted",
+               title=title or "What each market cost, biggest by value first")
+    else:
+        _style(ax, xlabel=f"{value}, notional-weighted",
+               title=title or "What each market cost, biggest by value first",
+               horizontal=True)
+    ax.text(0.0, -0.30 if vertical else -0.14,
+            "ordered by share of value traded, not by cost - a "
             "small market with a big number is still a small market",
             transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
     _save(fig, out, name)
@@ -2701,19 +2794,19 @@ def chart_spread_relative(t: pd.DataFrame, out: Path,
     for _, row in d.iterrows():
         mkt = row.get("market", "")
         sprd = row.get("spread bps (wtd)", float("nan"))
-        labels.append(f"{mkt}   (1 spread = {sprd:.1f} bps)"
+        labels.append(f"{mkt}\n1 spread = {sprd:.1f} bps"
                       if np.isfinite(sprd) else str(mkt))
         vals.append(float(row[value]))
 
-    fig, (ax,) = _fig((11.0, _rows_high(len(d))))
-    _diverging_barh(ax, labels, vals, unit="spreads",
+    fig, (ax,) = _fig((11.0, 6.0))
+    _diverging_barv(ax, labels, vals, unit="spreads",
                     small=[bool(x) for x in d["small sample"]]
                     if "small sample" in d.columns else None)
-    ax.xaxis.set_major_formatter(
+    ax.yaxis.set_major_formatter(
         matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:+.2f}"))
-    _style(ax, xlabel=f"{value.replace(' spreads', '')}, in spreads paid",
-           title="Spread relative performance", horizontal=True)
-    ax.text(0.0, -0.13, "basis points are not comparable between markets - a "
+    _style(ax, ylabel=f"{value.replace(' spreads', '')}, in spreads paid",
+           title="Spread relative performance")
+    ax.text(0.0, -0.34, "basis points are not comparable between markets - a "
             "wide-spread name costs more of them whatever the algo does. "
             "Spreads are.", transform=ax.transAxes, fontsize=7.5,
             color=INK_MUTED)
@@ -2847,6 +2940,7 @@ def chart_clearance(t: pd.DataFrame, out: Path) -> None:
 
 
 def chart_venue_mix(t: pd.DataFrame, out: Path, name: str, title: str) -> None:
+    t = drop_unattributable(t)
     """Part-to-whole across five venues. Five series, all direct-labelled."""
     if t.empty:
         return
@@ -2920,6 +3014,7 @@ def chart_capacity(t: pd.DataFrame, out: Path) -> None:
 
 
 def chart_cohorts(t: pd.DataFrame, out: Path) -> None:
+    t = drop_unattributable(t)
     """Emphasis: the unexplained cohort is the point; the rest is context."""
     if t.empty:
         return
@@ -3223,6 +3318,14 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["37_close_opportunity"] = t_close_opportunity(df)
     t["38_auction_share"] = t_auction_share(auc)
     t["39_lateness"] = t_lateness(auc)
+    # Close performance and the early start, each cut two ways: by order size
+    # and by how wide the name trades. Size says whether the auction could
+    # ever have absorbed it; spread says whether the name was cheap or
+    # expensive to be in at all. They fail differently and the fix differs.
+    t["41_close_by_adv"] = by_group(auc, "adv_bucket", "slip_close")
+    if "spread_bucket" in auc:
+        t["42_close_by_spread"] = by_group(auc, "spread_bucket", "slip_close")
+        t["43_first_exec_by_spread"] = t_first_exec(moc, "spread_bucket")
     if df["strategy"].nunique() > 1:
         t["36_algo_choice"] = t_algo_choice(df)
         t["35_market_by_strategy"] = t_market_by_strategy(df)
@@ -3538,6 +3641,30 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           show_share=False)
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
+
+    # Close performance and the early start, each by size and by spread.
+    # Vertical, to match the by-market charts.
+    for key, name, label, title in [
+        ("41_close_by_adv", "17_close_by_adv.png", "vs Close",
+         "Close performance by order size"),
+        ("42_close_by_spread", "18_close_by_spread.png", "vs Close",
+         "Close performance by spread quartile"),
+    ]:
+        chart_headline(t.get(key, pd.DataFrame()), charts, label, name, title,
+                       vertical=True)
+    for key, name, title in [
+        ("17_first_exec_by_adv", "19_first_exec_by_adv.png",
+         "First execution vs the close, by order size"),
+        ("43_first_exec_by_spread", "20_first_exec_by_spread.png",
+         "First execution vs the close, by spread quartile"),
+    ]:
+        fe = t.get(key, pd.DataFrame())
+        if not fe.empty:
+            chart_headline(
+                fe.rename(columns={"first exec vs Close bps (wtd)":
+                                   "wtd mean bps"}),
+                charts, "first execution vs Close", name, title,
+                vertical=True)
     chart_cohorts(t.get("15_cohorts", pd.DataFrame()), charts)
     chart_headline(t.get("17_first_exec_by_adv", pd.DataFrame())
                    .rename(columns={"first exec vs Close bps (wtd)":
@@ -3556,9 +3683,13 @@ def build_charts(t: dict, out_dir: Path) -> None:
         ncol = "continuous notional (" + CURRENCY + "m)"
         if ncol in fx.columns:
             fx = fx.sort_values(ncol, ascending=False)
-        chart_headline(fx, charts, "first execution vs Close",
-                       "10b_first_exec_market.png",
-                       "Was starting before the close right? By market")
+        fx = fx.rename(columns={"wtd mean bps": "vs first-exec bps"})
+        fx["market"] = fx.index if "market" not in fx.columns else fx["market"]
+        chart_market_slippage(fx, charts, "10b_first_exec_market.png",
+                              value="vs first-exec bps",
+                              title="Was starting before the close right? "
+                                    "By market",
+                              show_share=False)
     chart_headline(t.get("20_reversion_strategy", pd.DataFrame()), charts,
                    "next open vs close", "11_reversion.png",
                    "Reversion - did the auction print come back?")
