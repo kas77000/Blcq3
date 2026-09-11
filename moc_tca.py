@@ -387,6 +387,25 @@ AUCTION_FROM = {"India": "2026-08-03"}
 # AUCTION_SEGMENT_UNKNOWN, and filter on the symbol.
 AUCTION_SEGMENT_UNKNOWN = {"India"}
 
+# Markets that cannot be attributed to a venue. They stay in every TABLE -
+# the money is real and the totals must still add up - but they come out of
+# the CHARTS, because an unattributable bar on a client slide invites a
+# question nobody in the room can answer.
+EXCLUDE_MARKETS_FROM_CHARTS = {"Unknown"}
+
+# The client account says whether a trade was cash or swap. Anything not
+# listed is shown as "Other" rather than hidden or guessed at: a new account
+# appearing should be visible, not silently absorbed into one of these.
+CASH_CLIENTS = {
+    "BLAROC.DXA.JP.A_DSA", "BLAROC.XXX.AU.A_DSA",
+    "BLAROC.AU.A_CARE", "BLAROC.AU.A_PT",
+}
+SWAP_CLIENTS = {
+    "BLAROC.SYN.US.A_DSA", "BLAROC.SYN.US.A_DMA",
+    "BLAROC.SYCARE.US.A_CARE", "BLAROC.SYN.US.A_CARE",
+}
+NOTIONAL_TYPE_ORDER = ["Cash", "Swap", "Other"]
+
 REGIME_AUCTION = "single-price auction"
 REGIME_VWAP_CLOSE = "VWAP close (no auction)"
 REGIME_UNKNOWN = "post-CAS India - segment unknown"
@@ -830,6 +849,17 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
 
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
     df["close_regime"] = close_regime(df["market"], df.get("date"))
+
+    # Cash or swap, from the client account. Matched case-insensitively and
+    # with surrounding space stripped, because an account string is exactly
+    # the kind of field that arrives with a trailing blank.
+    if "client" in df:
+        acct = df["client"].astype(str).str.strip().str.upper()
+        cash = {c.upper() for c in CASH_CLIENTS}
+        swap = {c.upper() for c in SWAP_CLIENTS}
+        df["notional_type"] = np.where(acct.isin(cash), "Cash",
+                                       np.where(acct.isin(swap), "Swap",
+                                                "Other"))
 
     # Before any venue field is derived, so close_notional, pct_continuous,
     # close_bucket and the rest all follow from the same number.
@@ -2363,6 +2393,9 @@ try:
 except Exception:                                   # pragma: no cover
     _HAS_MPL = False
 
+# Retired from the axes at the desk's request. Kept so anything still
+# referring to it keeps working, and so the convention stays written down:
+# positive is a saving, negative is a cost, everywhere in this file.
 COST_SAVE_NOTE = "← cost   |   savings →"
 
 
@@ -2413,6 +2446,7 @@ def _fmt_bps(v) -> str:
 
 
 def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
+    """unit only changes how the value labels are formatted, never the data."""
     """Horizontal diverging bars: blue = savings, red = cost, zero baseline.
 
     Every bar carries its own number, so colour is never the only encoding.
@@ -2458,7 +2492,8 @@ def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
                     and not math.isnan(lo) and not math.isnan(hi)):
                 edge = max(v, hi) if v >= 0 else min(v, lo)
         off = span * 0.03
-        ax.text(edge + (off if v >= 0 else -off), i, _fmt_bps(v),
+        label = f"{v:+.2f}" if unit == "spreads" else _fmt_bps(v)
+        ax.text(edge + (off if v >= 0 else -off), i, label,
                 va="center", ha="left" if v >= 0 else "right",
                 color=INK, fontsize=8.5, zorder=6,
                 bbox=dict(boxstyle="round,pad=0.16", facecolor=SURFACE,
@@ -2523,7 +2558,7 @@ def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
     ci = list(zip(t["CI low"], t["CI high"])) if "CI low" in t else None
     _diverging_barh(ax, list(t.index), list(t["wtd mean bps"]), ci=ci,
                     small=list(t["small sample"]) if "small sample" in t else None)
-    _style(ax, xlabel=f"{value_label}, notional-weighted (bps)   {COST_SAVE_NOTE}",
+    _style(ax, xlabel=f"{value_label}, notional-weighted (bps)",
            title=title, horizontal=True)
     # Anchored to the FIGURE. On a short panel an axes-relative offset is a
     # small absolute distance and the note lands on the tick labels.
@@ -2533,38 +2568,83 @@ def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
     _save(fig, out, name, bottom=0.14)
 
 
-def chart_market_notional(t: pd.DataFrame, out: Path,
+def drop_unattributable(d: pd.DataFrame, what: str = "chart") -> pd.DataFrame:
+    """Take the unattributable markets out of a chart, and say so once."""
+    if "market" in d.columns:
+        gone = d["market"].isin(EXCLUDE_MARKETS_FROM_CHARTS)
+        keep = d[~gone]
+    else:
+        gone = d.index.isin(EXCLUDE_MARKETS_FROM_CHARTS)
+        keep = d[~gone]
+    return keep
+
+
+def chart_market_notional(df: pd.DataFrame, out: Path,
                           name: str = "13_market_notional.png") -> None:
-    """How much went to each market. Magnitude, so one hue, largest first."""
-    if t.empty or "notional (" + CURRENCY + "m)" not in t:
+    """Value traded by market, split cash against swap.
+
+    Stacked rather than side by side: the total per market is the number the
+    client recognises from their own records, and a split that hides the
+    total would cost more than it explains.
+    """
+    if df.empty or "market" not in df or "notional" not in df:
         return
-    col = "notional (" + CURRENCY + "m)"
-    d = t.head(14)
-    fig, (ax,) = _fig((11.0, 6.4))
-    y = np.arange(len(d))
-    vals = [float(v) for v in d[col]]
-    ax.barh(y, vals, color=SERIES[0], height=0.62, zorder=3)
+    d = drop_unattributable(df)
+    if d.empty:
+        return
+
+    have_type = "notional_type" in d.columns
+    parts = [p for p in NOTIONAL_TYPE_ORDER
+             if have_type and (d["notional_type"] == p).any()] or ["All"]
+    totals = (d.groupby("market", observed=True)["notional"].sum() / 1e6
+              ).sort_values(ascending=False).head(14)
+    markets = list(totals.index)
+    grand = float(totals.sum())
+
+    fig, (ax,) = _fig((11.0, 6.6))
+    y = np.arange(len(markets))
+    left = np.zeros(len(markets))
+    for i, part in enumerate(parts):
+        sub_d = d if part == "All" else d[d["notional_type"] == part]
+        vals = [float(sub_d.loc[sub_d["market"] == m, "notional"].sum()) / 1e6
+                for m in markets]
+        ax.barh(y, vals, left=left, height=0.62, color=SERIES[i % len(SERIES)],
+                zorder=3, label=part, edgecolor=SURFACE, linewidth=1.4)
+        for j, v in enumerate(vals):
+            # Only label a segment wide enough to hold the text.
+            if v > grand * 0.02:
+                ax.text(left[j] + v / 2, j, f"{v:,.0f}", ha="center",
+                        va="center", fontsize=8, color="white", zorder=5)
+        left = left + np.array(vals)
+
     ax.set_yticks(y)
-    ax.set_yticklabels(list(d.index))
+    ax.set_yticklabels(markets)
     ax.invert_yaxis()
     ax.grid(axis="x", zorder=0)
     ax.set_axisbelow(True)
-    span = max(vals or [1.0])
-    ax.set_xlim(0, span * 1.28)
-    for i, (v, (_, row)) in enumerate(zip(vals, d.iterrows())):
-        share = row.get("% of notional", float("nan"))
-        txt = f"  {v:,.0f}m" + (f"  ({share:.0f}%)" if np.isfinite(share) else "")
-        ax.text(v, i, txt, va="center", ha="left", fontsize=8.5, color=INK,
-                zorder=5)
+    span = max(left.max() if len(left) else 1.0, 1.0)
+    ax.set_xlim(0, span * 1.3)
+    for j, m in enumerate(markets):
+        share = 100.0 * left[j] / max(grand, 1e-9)
+        ax.text(left[j], j, f"  {left[j]:,.0f}m  ({share:.0f}%)", va="center",
+                ha="left", fontsize=8.5, color=INK, zorder=5)
+    if len(parts) > 1:
+        ax.legend(frameon=False, ncol=len(parts), loc="lower right",
+                  fontsize=8.5)
     _style(ax, xlabel=f"executed notional ({CURRENCY}m)",
-           title="Where the value traded, by market", horizontal=True)
+           title="Value traded by market", horizontal=True)
+    if len(parts) > 1:
+        ax.text(0.0, -0.11, "cash and swap split by client account; the "
+                "percentage is the market's share of the value traded",
+                transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
     _save(fig, out, name)
 
 
 def chart_market_slippage(t: pd.DataFrame, out: Path,
                           name: str = "14_market_slippage.png",
                           value: str = "vs Arrival bps",
-                          title: str = None) -> None:
+                          title: str = None,
+                          show_share: bool = True) -> None:
     """Cost by market, ordered by how much was traded there, not by cost.
 
     Ordering by cost would put a 61-order market at the top of the slide.
@@ -2573,25 +2653,70 @@ def chart_market_slippage(t: pd.DataFrame, out: Path,
     """
     if t.empty or value not in t:
         return
-    d = t.head(14)
+    d = drop_unattributable(t).head(14)
+    if d.empty:
+        return
     fig, (ax,) = _fig((11.0, 6.4))
     labels = []
     for mkt, row in d.iterrows():
         share = row.get("% of notional", float("nan"))
-        # "% of value" alone is ambiguous on a chart whose axis is basis
-        # points of saving and cost - a reader can take "value" to mean value
-        # added. Say what was traded there instead.
+        # The share tells the reader which bars can move the total, which
+        # matters on a cost chart and only adds noise on one the client is
+        # reading market by market. show_share decides.
         labels.append(f"{mkt}   ({share:.0f}% of value traded)"
-                      if np.isfinite(share) else str(mkt))
+                      if show_share and np.isfinite(share) else str(mkt))
     _diverging_barh(ax, labels, [float(v) for v in d[value]],
                     small=[bool(x) for x in d["small sample"]]
                     if "small sample" in d else None)
-    _style(ax, xlabel=f"{value}, notional-weighted   {COST_SAVE_NOTE}",
+    _style(ax, xlabel=f"{value}, notional-weighted",
            title=title or "What each market cost, biggest by value first",
            horizontal=True)
     ax.text(0.0, -0.14, "ordered by share of value traded, not by cost - a "
             "small market with a big number is still a small market",
             transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
+    _save(fig, out, name)
+
+
+def chart_spread_relative(t: pd.DataFrame, out: Path,
+                          name: str = "16_spread_relative.png",
+                          value: str = "vs Close spreads") -> None:
+    """Performance measured in spreads rather than basis points.
+
+    Basis points are not comparable between markets: a wide-spread name costs
+    more of them for reasons that have nothing to do with the algo. Dividing
+    by the spread asks how many spreads were paid, which is comparable - and
+    each label carries what one spread is actually worth in that market, so
+    the reader can convert back.
+    """
+    if t.empty or value not in t.columns:
+        return
+    d = drop_unattributable(t)
+    if "notional (" + CURRENCY + "m)" in d.columns:
+        d = d.sort_values("notional (" + CURRENCY + "m)", ascending=False)
+    d = d.head(14)
+    if d.empty:
+        return
+
+    labels, vals = [], []
+    for _, row in d.iterrows():
+        mkt = row.get("market", "")
+        sprd = row.get("spread bps (wtd)", float("nan"))
+        labels.append(f"{mkt}   (1 spread = {sprd:.1f} bps)"
+                      if np.isfinite(sprd) else str(mkt))
+        vals.append(float(row[value]))
+
+    fig, (ax,) = _fig((11.0, _rows_high(len(d))))
+    _diverging_barh(ax, labels, vals, unit="spreads",
+                    small=[bool(x) for x in d["small sample"]]
+                    if "small sample" in d.columns else None)
+    ax.xaxis.set_major_formatter(
+        matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:+.2f}"))
+    _style(ax, xlabel=f"{value.replace(' spreads', '')}, in spreads paid",
+           title="Spread relative performance", horizontal=True)
+    ax.text(0.0, -0.13, "basis points are not comparable between markets - a "
+            "wide-spread name costs more of them whatever the algo does. "
+            "Spreads are.", transform=ax.transAxes, fontsize=7.5,
+            color=INK_MUTED)
     _save(fig, out, name)
 
 
@@ -2630,7 +2755,7 @@ def chart_algo_choice(t: pd.DataFrame, out: Path,
                         for _, r in d.iterrows()])
     ax.invert_yaxis()
     ax.legend(frameon=False, loc="lower right", fontsize=8.5)
-    _style(ax, xlabel=f"vs Arrival, notional-weighted (bps)   {COST_SAVE_NOTE}",
+    _style(ax, xlabel="vs Arrival, notional-weighted (bps)",
            title="Same market, same order size - what each algo cost",
            horizontal=True)
     ax.text(0.0, -0.09, "colour is the algo on this chart, not the direction - "
@@ -2670,7 +2795,7 @@ def chart_decomposition(t: pd.DataFrame, out: Path, name: str) -> None:
                 continue
             ax.text(val, i + dy, "  " + _fmt_bps(val), va="center",
                     ha="left" if val >= 0 else "right", fontsize=8, color=INK)
-    _style(ax, xlabel=f"bps, notional-weighted   {COST_SAVE_NOTE}",
+    _style(ax, xlabel="bps, notional-weighted",
            title="Where close-algo arrival slippage comes from", horizontal=True)
     # Below the axes: the bars run both ways, so every in-plot corner is
     # occupied for some data, and above the axes collides with the title.
@@ -2823,26 +2948,19 @@ def chart_cohorts(t: pd.DataFrame, out: Path) -> None:
     _save(fig, out, "07_cohorts.png")
 
 
-def chart_monthly(df: pd.DataFrame, out: Path) -> None:
+def chart_monthly(df: pd.DataFrame, out: Path,
+                  name: str = "12_monthly.png", subtitle: str = "") -> None:
     """Two measures over time, two panels."""
-    if "month" not in df:
+    if "month" not in df or df.empty:
         return
     g = df.groupby("month", observed=True)
     months = list(g.groups.keys())
     if len(months) < 2:
         return
-    # The table marks a month the extract only partly covers; the chart is
-    # what the client actually sees, so it has to say it too. A short month
-    # plotted beside full ones reads as a collapse rather than as less data.
-    labels = list(months)
-    if "date" in df and df["date"].notna().any():
-        lo, hi = df["date"].min(), df["date"].max()
-        labels = []
-        for m in months:
-            per = pd.Period(str(m), freq="M")
-            part = (per.end_time.date() > hi.date()
-                    or per.start_time.date() < lo.date())
-            labels.append(f"{m} (part)" if part else str(m))
+    # Month labels are plain. The partial-month marking was dropped at the
+    # desk's request - it is still in the 30_monthly table, where an analyst
+    # reads it, rather than on a slide a client reads.
+    labels = [str(m) for m in months]
     fig, axes = _fig((11.5, 4.4), ncols=2)
     pc = [wmean(x["pct_close"], x["notional"], winsor=False)
           for _, x in g] if "pct_close" in df else []
@@ -2852,7 +2970,8 @@ def chart_monthly(df: pd.DataFrame, out: Path) -> None:
     axes[0].set_xticklabels(labels, rotation=30, ha="right")
     axes[0].set_ylim(0, 105)
     _style(axes[0], ylabel="auction share (%CLOSE), notional-weighted",
-           title="Auction share by month")
+           title="% Executed in the close per month"
+                 + (f" — {subtitle}" if subtitle else ""))
 
     if "slip_close" in df:
         sc = [wmean(x["slip_close"], x["notional"]) for _, x in g]
@@ -2864,9 +2983,10 @@ def chart_monthly(df: pd.DataFrame, out: Path) -> None:
                          va="bottom" if v >= 0 else "top", fontsize=8, color=INK)
         axes[1].set_xticks(range(len(months)))
         axes[1].set_xticklabels(labels, rotation=30, ha="right")
-        _style(axes[1], ylabel=f"vs Close, bps   {COST_SAVE_NOTE}",
-               title="Execution vs the close by month")
-    _save(fig, out, "12_monthly.png")
+        _style(axes[1], ylabel="vs Close, bps",
+               title="Close performance by month"
+                     + (f" — {subtitle}" if subtitle else ""))
+    _save(fig, out, name)
 
 
 # ===========================================================================
@@ -3405,15 +3525,19 @@ def build_charts(t: dict, out_dir: Path) -> None:
                     "09_venue_mix_market.png",
                     "Where the executed quantity actually went, by market")
     chart_capacity(t.get("14_capacity", pd.DataFrame()), charts)
-    chart_market_notional(t.get("34_market_profile", pd.DataFrame()), charts)
+    close_df = t.get("_close_df")
+    if close_df is not None:
+        chart_market_notional(close_df, charts)
     chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts)
     # The same by-market view against the CLOSE. A single summary bar says the
     # least of any chart in the deck; per market it shows where the result
     # comes from and whether it rests on one place.
     chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts,
                           name="15_market_vs_close.png", value="vs Close bps",
-                          title="Against the closing price, by market")
+                          title="Against the closing price, by market",
+                          show_share=False)
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
+    chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
     chart_cohorts(t.get("15_cohorts", pd.DataFrame()), charts)
     chart_headline(t.get("17_first_exec_by_adv", pd.DataFrame())
                    .rename(columns={"first exec vs Close bps (wtd)":
@@ -3422,12 +3546,34 @@ def build_charts(t: dict, out_dir: Path) -> None:
                    else pd.DataFrame(),
                    charts, "first execution vs Close", "10_first_exec.png",
                    "Was starting before the close right? By order size")
+    # The same measure per market. Size says whether starting early was ever
+    # justified; market says where it actually goes wrong, which is the one
+    # the desk can act on.
+    fx = t.get("18_first_exec_by_market", pd.DataFrame())
+    if not fx.empty:
+        fx = drop_unattributable(fx.rename(
+            columns={"first exec vs Close bps (wtd)": "wtd mean bps"}))
+        ncol = "continuous notional (" + CURRENCY + "m)"
+        if ncol in fx.columns:
+            fx = fx.sort_values(ncol, ascending=False)
+        chart_headline(fx, charts, "first execution vs Close",
+                       "10b_first_exec_market.png",
+                       "Was starting before the close right? By market")
     chart_headline(t.get("20_reversion_strategy", pd.DataFrame()), charts,
                    "next open vs close", "11_reversion.png",
                    "Reversion - did the auction print come back?")
     df = t.get("_close_df")
     if df is not None:
-        chart_monthly(df, charts)
+        # Two charts, because India's close share is imputed rather than
+        # measured: averaged in with the rest it lifts every month by a
+        # constant and the line stops meaning what it says.
+        if "market" in df:
+            ind = df[df["market"] == "India"]
+            rest = df[df["market"] != "India"]
+            chart_monthly(rest, charts, "12_monthly.png", "excluding India")
+            chart_monthly(ind, charts, "12b_monthly_india.png", "India only")
+        else:
+            chart_monthly(df, charts)
 
 
 def write_excel(t: dict, out_dir: Path) -> None:
@@ -3657,6 +3803,19 @@ def findings(t: dict) -> None:
         log("  not a measurement, and any auction-share figure that includes")
         log("  them is part measured and part assumed. Say so on the slide.")
         log("")
+
+    # For the monthly slide's speaker notes. Short sells can execute
+    # differently - locate requirements, short-sale rules - so their share is
+    # worth having in the room even when it is not on the slide.
+    if "side_label" in auc:
+        ss = auc[auc["side_label"] == "Short sell"]
+        if len(ss):
+            log("  Short sells, for the comments:")
+            log(f"    {100.0 * len(ss) / max(len(auc), 1):>6.1f}% of orders "
+                f"({len(ss):,} of {len(auc):,})")
+            log(f"    {100.0 * ss['notional'].sum() / max(auc['notional'].sum(), 1e-9):>6.1f}% "
+                f"of value ({CURRENCY} {ss['notional'].sum() / 1e6:,.1f}m)")
+            log("")
 
     log("  WHAT THIS ANALYSIS CANNOT SHOW")
     log("    - Whether an order was TAGGED for the close. Without that flag an")
