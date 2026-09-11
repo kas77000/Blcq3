@@ -2251,6 +2251,16 @@ def t_first_exec(df: pd.DataFrame, by: str) -> pd.DataFrame:
     """
     if "first_exec_vs_close" not in df:
         return pd.DataFrame()
+    # Pre-traded orders only. For an order that never left the auction the
+    # first fill IS the close, so its first-exec-vs-close is zero by
+    # construction. That is not a result, and averaged in with the rest it
+    # drags every band toward zero and buries the orders that did start
+    # early - the ones the question is actually about. Same "pretraded"
+    # flag the reversion charts use, so the deck means one thing by the word.
+    if "pretraded" in df:
+        df = df[df["pretraded"].fillna(False)]
+    if df.empty:
+        return pd.DataFrame()
     w = weight_column(df, "cont_notional")
     rows = []
     for key, g in df.groupby(by, dropna=False, observed=True):
@@ -2442,6 +2452,11 @@ except Exception:                                   # pragma: no cover
 # referring to it keeps working, and so the convention stays written down:
 # positive is a saving, negative is a cost, everywhere in this file.
 COST_SAVE_NOTE = "← cost   |   savings →"
+
+# Every first-execution chart is on pre-traded orders only, and every one of
+# them says so. The measure is undefined for an order that only ever printed
+# in the auction, and a reader has no way to know that from the title.
+PRE_TRADED_NOTE = ("orders that traded before the close; an auction-only order has no first execution to measure and is not in here")
 
 
 def _rows_high(n: int, per_row: float = 0.62, base: float = 1.9,
@@ -3812,7 +3827,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
                 fe.rename(columns={"first exec vs Close bps (wtd)":
                                    "wtd mean bps"}),
                 charts, "first execution vs Close", name, title,
-                vertical=True)
+                vertical=True, note=PRE_TRADED_NOTE)
     chart_cohorts(t.get("15_cohorts", pd.DataFrame()), charts)
     chart_headline(t.get("17_first_exec_by_adv", pd.DataFrame())
                    .rename(columns={"first exec vs Close bps (wtd)":
@@ -3820,7 +3835,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
                    if not t.get("17_first_exec_by_adv", pd.DataFrame()).empty
                    else pd.DataFrame(),
                    charts, "first execution vs Close", "10_first_exec.png",
-                   "Was starting before the close right? By order size")
+                   "Was starting before the close right? By order size",
+                   note=PRE_TRADED_NOTE)
     # The same measure per market. Size says whether starting early was ever
     # justified; market says where it actually goes wrong, which is the one
     # the desk can act on.
@@ -3836,7 +3852,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
         chart_market_slippage(fx, charts, "10b_first_exec_market.png",
                               value="vs first-exec bps",
                               title="Was starting before the close right? "
-                                    "By market")
+                                    "By market, orders that traded "
+                                    "before the close")
     chart_headline(t.get("20_reversion_strategy", pd.DataFrame()), charts,
                    "next open vs close", "11_reversion.png",
                    "Reversion - did the auction print come back?")
