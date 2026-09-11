@@ -2723,17 +2723,16 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     fig, (ax,) = _fig((11.0, 6.0))
     x = np.arange(len(markets))
     bottom = np.zeros(len(markets))
+    by_part = {}
     for i, part in enumerate(parts):
         sub_d = d if part == "All" else d[d["notional_type"] == part]
         vals = [float(sub_d.loc[sub_d["market"] == m, "notional"].sum()) / 1e6
                 for m in markets]
         ax.bar(x, vals, bottom=bottom, width=0.62, color=SERIES[i % len(SERIES)],
                zorder=3, label=part, edgecolor=SURFACE, linewidth=1.4)
-        for j, v in enumerate(vals):
-            # Only label a segment tall enough to hold the text.
-            if v > grand * 0.025:
-                ax.text(j, bottom[j] + v / 2, f"{v:,.0f}", ha="center",
-                        va="center", fontsize=8, color="white", zorder=5)
+        # Nothing is written inside a segment. A thin one cannot hold its
+        # number, and a split that disappears on small markets is no split.
+        by_part[part] = vals
         bottom = bottom + np.array(vals)
 
     ax.set_xticks(x)
@@ -2741,11 +2740,24 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     ax.grid(axis="y", zorder=0)
     ax.set_axisbelow(True)
     span = max(bottom.max() if len(bottom) else 1.0, 1.0)
-    ax.set_ylim(0, span * 1.16)
+    # Everything goes above the bar. A segment can be too thin to hold its own
+    # number, and the cash/swap split is the point of the chart - it cannot be
+    # the part that gets dropped whenever a market is small.
+    # The split stacks DOWN the label rather than running across it. Side by
+    # side it is wider than a bar slot and the text from neighbouring markets
+    # collides; one part per line is narrow and never does.
+    ax.set_ylim(0, span * 1.42)
     for j, m in enumerate(markets):
         share = 100.0 * bottom[j] / max(grand, 1e-9)
-        ax.text(j, bottom[j], f"{bottom[j]:,.0f}m\n({share:.0f}%)",
-                va="bottom", ha="center", fontsize=8.5, color=INK, zorder=5)
+        lines = [f"{p} {by_part[p][j]:,.0f}" for p in parts
+                 if p != "All" and round(by_part.get(p, [0])[j]) > 0]
+        if lines:
+            ax.text(j, bottom[j] + span * 0.02, chr(10).join(lines),
+                    va="bottom", ha="center", fontsize=7.5, color=INK_SECOND,
+                    linespacing=1.35, zorder=5)
+        ax.text(j, bottom[j] + span * (0.045 + 0.037 * len(lines)),
+                f"{bottom[j]:,.0f}m  ({share:.0f}%)",
+                va="bottom", ha="center", fontsize=9, color=INK, zorder=5)
     if len(parts) > 1:
         ax.legend(frameon=False, ncol=len(parts), loc="upper right",
                   fontsize=8.5)
