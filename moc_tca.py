@@ -1034,6 +1034,14 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["limit_gap_bps"] = np.where(ok, 1e4 * away / cls, np.nan)
         df["limit_binding"] = ok & (pd.Series(away, index=df.index) > 0)
 
+    # An order that put anything through continuous before the auction. That
+    # is the population reversion can say something about: an order that only
+    # ever printed in the auction has no pre-trade to have moved the price
+    # with, so its reversion is the market's, not ours.
+    if "pct_close" in df:
+        traded = (df["fill_rate"] >= COHORT_FR_ZERO) if "fill_rate" in df             else pd.Series(True, index=df.index)
+        df["pretraded"] = traded & (df["pct_close"] < AUCTION_ONLY_MIN_PCT)
+
     # --- buckets ----------------------------------------------------------
     if "adv_pct" in df:
         df["adv_bucket"] = pd.cut(df["adv_pct"], ADV_BUCKETS, labels=ADV_LABELS)
@@ -2619,7 +2627,8 @@ def chart_scope(t: pd.DataFrame, out: Path) -> None:
 
 
 def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
-                   name: str, title: str, vertical: bool = False) -> None:
+                   name: str, title: str, vertical: bool = False,
+                   note: str = "") -> None:
     if t.empty:
         return
     # A NaN category is a bucket of orders whose grouping value was missing -
@@ -2641,10 +2650,13 @@ def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
                title=title, horizontal=True)
     # Anchored to the FIGURE. On a short panel an axes-relative offset is a
     # small absolute distance and the note lands on the tick labels.
-    fig.text(0.01, 0.01, "whiskers are 95% bootstrap CIs; a CI crossing zero "
-             "is not distinguishable from zero", fontsize=7.5, color=INK_MUTED,
+    tail = ("whiskers are 95% bootstrap CIs; a CI crossing zero is not "
+            "distinguishable from zero")
+    if note:
+        tail = note + chr(10) + tail
+    fig.text(0.01, 0.01, tail, fontsize=7.5, color=INK_MUTED,
              ha="left", va="bottom")
-    _save(fig, out, name, bottom=0.14)
+    _save(fig, out, name, bottom=0.20 if note else 0.14)
 
 
 NON_CATEGORIES = {"nan", "none", "nat", ""}
@@ -3323,6 +3335,18 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     # ever have absorbed it; spread says whether the name was cheap or
     # expensive to be in at all. They fail differently and the fix differs.
     t["41_close_by_adv"] = by_group(auc, "adv_bucket", "slip_close")
+    # Reversion, two ways. Per market says where the price comes back; the
+    # pre-traded cut says how much of it we brought on ourselves, because
+    # reversion on an order that never left the auction is the market moving,
+    # not us moving it.
+    t["44_reversion_by_market"] = by_group(auc, "market", "reversion_bps")
+    if "pretraded" in auc:
+        pre = auc[auc["pretraded"].fillna(False)]
+        if len(pre):
+            t["45_reversion_pretraded"] = by_group(pre, "close_bucket",
+                                                   "reversion_bps")
+            t["46_reversion_pretraded_mkt"] = by_group(pre, "market",
+                                                       "reversion_bps")
     if "spread_bucket" in auc:
         t["42_close_by_spread"] = by_group(auc, "spread_bucket", "slip_close")
         t["43_first_exec_by_spread"] = t_first_exec(moc, "spread_bucket")
@@ -3641,6 +3665,22 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           show_share=False)
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
+
+    chart_headline(t.get("44_reversion_by_market", pd.DataFrame()), charts,
+                   "next open vs close", "21_reversion_by_market.png",
+                   "Reversion by market", vertical=True)
+    # The bands are auction share, so the LEFT of this chart is the orders
+    # that pre-traded most. Without saying so the chart reads backwards.
+    chart_headline(t.get("45_reversion_pretraded", pd.DataFrame()), charts,
+                   "next open vs close", "22_reversion_pretraded.png",
+                   "Reversion on orders that traded before the close",
+                   vertical=True,
+                   note="bands are how much of the order reached the auction, "
+                        "so the left-hand bars traded the most before it; "
+                        "negative means the price came back against us")
+    chart_headline(t.get("46_reversion_pretraded_mkt", pd.DataFrame()), charts,
+                   "next open vs close", "23_reversion_pretraded_market.png",
+                   "Where the pre-trade came back, by market", vertical=True)
 
     # Close performance and the early start, each by size and by spread.
     # Vertical, to match the by-market charts.
