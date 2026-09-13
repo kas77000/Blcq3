@@ -341,7 +341,7 @@ def build(charts: Path, out: Path, n_slides: int, cover: bool = False,
     # --- 3. the early start ----------------------------------------------
     s = new(f"Starting before the close cost about "
             f"{money(abs(round(n['early_total'] / 10) * 10))}")
-    picture(s, charts / "10_first_exec.png", Inches(1.75), Inches(3.6))
+    picture(s, charts / "19_first_exec_by_adv.png", Inches(1.75), Inches(3.6))
     worst = min(n["early_bands"], key=lambda b: b[1])
     bullets(s, Inches(5.6), [
         "Every size of order lost money by starting early.",

@@ -2616,56 +2616,6 @@ def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
                           edgecolor="none", alpha=0.85))
 
 
-def chart_scope(t: pd.DataFrame, out: Path) -> None:
-    """Part-to-whole: how much of the book the close algos are."""
-    if t.empty:
-        return
-    fig, (ax,) = _fig((11.0, 3.0))
-    ncol = "notional (" + CURRENCY + "m)"
-    # The last row is the whole file, which is the sum of the others - drawing
-    # it would double the bar.
-    parts = t.drop(index="Everything in the file", errors="ignore")
-    parts = parts[parts[ncol] > 0]
-    left = 0.0
-    total = max(float(t.loc["Everything in the file", ncol])
-                if "Everything in the file" in t.index else parts[ncol].sum(),
-                1e-9)
-    for i, (label, row) in enumerate(parts.iterrows()):
-        w = float(row[ncol])
-        reviewed = "(reviewed)" in str(label)
-        ax.barh([0], [w], left=[left], height=0.5,
-                color=SERIES[i % 3] if reviewed else NEUTRAL, zorder=3)
-        share = 100.0 * w / total
-        if share >= 4.0:
-            ax.text(left + w / 2, 0,
-                    f"{str(label).replace(' (reviewed)', '')}\n"
-                    f"{CURRENCY} {w:,.0f}m  ({share:.0f}%)",
-                    ha="center", va="center", fontsize=9,
-                    color="white" if reviewed else INK)
-        left += w + total * 0.004        # 2px-equivalent surface gap
-    ax.set_yticks([])
-    ax.set_xlim(0, left)
-    # A thin grey sliver with no label is worse than no sliver: the reader can
-    # see something was left out and cannot tell what. Name it under the axis.
-    out_rows = [(str(i).replace(" (out of scope)", ""), float(r[ncol]))
-                for i, r in parts.iterrows() if "(reviewed)" not in str(i)]
-    if out_rows:
-        out_n = sum(v for _, v in out_rows)
-        names = ", ".join(n for n, _ in sorted(out_rows, key=lambda x: -x[1])[:5])
-        ax.text(0.0, -0.42,
-                f"grey = not reviewed: {CURRENCY} {out_n:,.0f}m "
-                f"({100 * out_n / total:.1f}%) - {names}",
-                transform=ax.transAxes, fontsize=8, color=INK_MUTED)
-    _style(ax, xlabel=f"executed notional ({CURRENCY}m)",
-           title=f"Scope - what is reviewed, and what is not, {PERIOD_LABEL}",
-           horizontal=True)
-    ax.grid(False)
-    for s in ax.spines.values():
-        s.set_visible(False)
-    ax.tick_params(length=0)
-    _save(fig, out, "01_scope.png")
-
-
 def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
                    name: str, title: str, vertical: bool = False,
                    note: str = "") -> None:
@@ -2966,189 +2916,6 @@ def chart_algo_choice(t: pd.DataFrame, out: Path,
             "saved that'.", transform=ax.transAxes, fontsize=7.5,
             color=INK_MUTED, wrap=True)
     _save(fig, out, name)
-
-
-def chart_decomposition(t: pd.DataFrame, out: Path, name: str) -> None:
-    """Two components with different owners, plus the total they sum to."""
-    if t.empty:
-        return
-    fig, (ax,) = _fig((10.0, _rows_high(len(t), per_row=0.9, base=2.0)))
-    y = np.arange(len(t))
-    h = 0.34
-    ax.barh(y - h / 2, t["cost of waiting for the close"], height=h,
-            color=SERIES[1], zorder=3, label="Cost of waiting for the close")
-    ax.barh(y + h / 2, t["execution vs the close"], height=h,
-            color=SERIES[0], zorder=3, label="Execution vs the close")
-    if "= vs Arrival" in t:
-        ax.scatter(t["= vs Arrival"], y, marker="D", s=34, color=INK,
-                   zorder=5, label="= vs Arrival (their sum)")
-    ax.axvline(0, color=BASELINE, linewidth=1.0, zorder=2)
-    ax.set_yticks(y)
-    ax.set_yticklabels(list(t.index))
-    ax.invert_yaxis()
-    for i in range(len(t)):
-        for val, dy in [(t["cost of waiting for the close"].iloc[i], -h / 2),
-                        (t["execution vs the close"].iloc[i], h / 2)]:
-            if pd.isna(val):
-                continue
-            ax.text(val, i + dy, "  " + _fmt_bps(val), va="center",
-                    ha="left" if val >= 0 else "right", fontsize=8, color=INK)
-    _style(ax, xlabel="bps, notional-weighted",
-           title="Where close-algo arrival slippage comes from", horizontal=True)
-    # Below the axes: the bars run both ways, so every in-plot corner is
-    # occupied for some data, and above the axes collides with the title.
-    leg = ax.legend(frameon=False, fontsize=8, ncol=3, loc="upper center",
-                    bbox_to_anchor=(0.5, -0.13))
-    for txt in leg.get_texts():
-        txt.set_color(INK_SECOND)
-    ax.text(0.0, -0.26,
-            "vs Arrival = cost of waiting for the close + execution vs the "
-            "close. The first term is a pure price move and carries no "
-            "information about fill quality.",
-            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
-    _save(fig, out, name)
-
-
-def chart_clearance(t: pd.DataFrame, out: Path) -> None:
-    """Two measures, two panels - never two y-scales on one plot."""
-    if t.empty:
-        return
-    fig, axes = _fig((11.5, 5.0), ncols=2)
-    labels = [str(i) for i in t.index]
-    ramp = (ORDINAL_BLUE * 3)[:len(labels)]
-    x = np.arange(len(labels))
-
-    axes[0].bar(x, t["% of notional"], color=ramp, width=0.68, zorder=3)
-    for i, v in enumerate(t["% of notional"]):
-        axes[0].text(i, v, f"{v:.0f}%", ha="center", va="bottom",
-                     fontsize=8.5, color=INK)
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(labels, rotation=30, ha="right")
-    _style(axes[0], ylabel="% of executed notional",
-           title="How much of the order cleared in the auction")
-
-    vals = list(t["vs Close bps (wtd)"])
-    colors = [POS if (not pd.isna(v) and v >= 0) else NEG for v in vals]
-    axes[1].bar(x, [0 if pd.isna(v) else v for v in vals], color=colors,
-                width=0.68, zorder=3)
-    axes[1].axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
-    for i, v in enumerate(vals):
-        if pd.isna(v):
-            continue
-        axes[1].text(i, v, _fmt_bps(v), ha="center",
-                     va="bottom" if v >= 0 else "top", fontsize=8.5, color=INK)
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(labels, rotation=30, ha="right")
-    _style(axes[1], ylabel=f"vs Close, bps   {COST_SAVE_NOTE}",
-           title="What the orders in each band achieved")
-    _save(fig, out, "04_clearance.png")
-
-
-def chart_venue_mix(t: pd.DataFrame, out: Path, name: str, title: str) -> None:
-    t = drop_unattributable(t)
-    """Part-to-whole across five venues. Five series, all direct-labelled."""
-    if t.empty:
-        return
-    cols = [c for c in ["%OPEN", "%CLOSE", "%POST", "%TAKE", "%DARK"]
-            if c in t.columns]
-    if not cols:
-        return
-    fig, (ax,) = _fig((10.0, max(2.6, 0.62 * len(t) + 1.8)))
-    y = np.arange(len(t))
-    left = np.zeros(len(t))
-    for i, c in enumerate(cols):
-        vals = t[c].fillna(0).values
-        ax.barh(y, vals, left=left, height=0.6, color=SERIES[i], zorder=3,
-                label=c, edgecolor=SURFACE, linewidth=1.2)
-        for j, v in enumerate(vals):
-            if v >= 6:
-                ax.text(left[j] + v / 2, j, f"{v:.0f}", ha="center",
-                        va="center", fontsize=8, color="white")
-        left = left + vals
-    ax.set_yticks(y)
-    ax.set_yticklabels(list(t.index))
-    ax.invert_yaxis()
-    ax.set_xlim(0, 100)
-    _style(ax, xlabel="% of executed quantity", title=title, horizontal=True)
-    leg = ax.legend(frameon=False, fontsize=8, ncol=len(cols),
-                    loc="lower center", bbox_to_anchor=(0.5, -0.30))
-    for txt in leg.get_texts():
-        txt.set_color(INK_SECOND)
-    _save(fig, out, name)
-
-
-def chart_capacity(t: pd.DataFrame, out: Path) -> None:
-    """Achieved auction share against order size, per market.
-
-    The downward slope IS the capacity constraint: a large order cannot clear
-    the auction and is not expected to. A market sitting below the others at
-    the SAME size is the finding.
-    """
-    if t.empty:
-        return
-    fig, (ax,) = _fig()
-    markets = [m for m in t["market"].unique()
-               if m not in NO_CLOSING_AUCTION
-               and m not in EXCLUDE_MARKETS_FROM_CHARTS
-               and str(m).strip().lower() not in NON_CATEGORIES]
-    markets = sorted(markets,
-                     key=lambda m: -t.loc[t["market"] == m,
-                                          "notional (" + CURRENCY + "m)"].sum())[:6]
-    for i, mkt in enumerate(markets):
-        g = t[t["market"] == mkt].set_index("%Adv bucket").reindex(ADV_LABELS)
-        ax.plot(range(len(ADV_LABELS)), g["median %CLOSE (frontier)"],
-                marker="o", markersize=5.5, linewidth=2, color=SERIES[i],
-                label=mkt, zorder=3)
-        last = g["median %CLOSE (frontier)"].last_valid_index()
-        if last is not None and len(markets) <= 4:
-            xi = ADV_LABELS.index(last)
-            ax.text(xi + 0.08, g.loc[last, "median %CLOSE (frontier)"], mkt,
-                    fontsize=8, color=INK_SECOND, va="center")
-    ax.set_xticks(range(len(ADV_LABELS)))
-    ax.set_xticklabels(ADV_LABELS)
-    ax.set_ylim(0, 105)
-    _style(ax, xlabel="order size (% of ADV)",
-           ylabel="median auction share achieved (%CLOSE)",
-           title="Capacity frontier - how much of an order this size clears the auction")
-    leg = ax.legend(frameon=False, fontsize=8, ncol=3)
-    for txt in leg.get_texts():
-        txt.set_color(INK_SECOND)
-    ax.text(0.0, -0.17,
-            "A falling line is the auction's capacity limit, not a defect. An "
-            "order is only called short when it sits below the frontier for "
-            "its own size.", transform=ax.transAxes, fontsize=7.5,
-            color=INK_MUTED)
-    _save(fig, out, "06_capacity.png")
-
-
-def chart_cohorts(t: pd.DataFrame, out: Path) -> None:
-    t = drop_unattributable(t)
-    """Emphasis: the unexplained cohort is the point; the rest is context."""
-    if t.empty:
-        return
-    fig, (ax,) = _fig((10.0, 4.2))
-    ncol = "notional (" + CURRENCY + "m)"
-    y = np.arange(len(t))
-    colors = [NEG if str(i) == "No auction fill - unexplained"
-              else (SERIES[1] if str(i) == "Partial - below the frontier"
-                    else NEUTRAL) for i in t.index]
-    ax.barh(y, t[ncol], color=colors, height=0.6, zorder=3)
-    for i, (lab, row) in enumerate(t.iterrows()):
-        ax.text(row[ncol], i, f"  {CURRENCY} {row[ncol]:,.0f}m "
-                f"({row['% of notional']:.0f}%)  {int(row['orders'])} orders",
-                va="center", fontsize=8, color=INK)
-    ax.set_yticks(y)
-    ax.set_yticklabels(list(t.index))
-    ax.invert_yaxis()
-    ax.set_xlim(0, t[ncol].max() * 1.55)
-    _style(ax, xlabel=f"executed notional ({CURRENCY}m)",
-           title="Why orders did not clear the auction", horizontal=True)
-    ax.text(0.0, -0.20,
-            "Causes are assigned by exclusion. 'Unexplained' means no benign "
-            "reason is present in this file - not that a fault is proven. "
-            "Those orders are listed individually in the tables.",
-            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
-    _save(fig, out, "07_cohorts.png")
 
 
 def chart_monthly(df: pd.DataFrame, out: Path,
@@ -3747,23 +3514,9 @@ def build_charts(t: dict, out_dir: Path) -> None:
     before = {p.name for p in charts.glob("*.png") if p.name[:1].isdigit()}
     log("")
     log("  charts")
-    chart_scope(t.get("01_scope", pd.DataFrame()), charts)
-    chart_headline(t.get("04_headline_vs_arrival", pd.DataFrame()), charts,
-                   "vs Arrival", "02_headline_vs_arrival.png",
-                   "Close algos vs arrival - the full decision cost")
-    chart_headline(t.get("05_headline_vs_close", pd.DataFrame()), charts,
-                   "vs Close", "03_headline_vs_close.png",
-                   "Close algos vs the closing price")
-    chart_decomposition(t.get("07_decomposition_strategy", pd.DataFrame()),
-                        charts, "05_decomposition.png")
-    chart_clearance(t.get("11_clearance", pd.DataFrame()), charts)
-    chart_venue_mix(t.get("09_venue_mix_strategy", pd.DataFrame()), charts,
-                    "08_venue_mix_strategy.png",
-                    "Where the executed quantity actually went, by strategy")
-    chart_venue_mix(t.get("10_venue_mix_market", pd.DataFrame()), charts,
-                    "09_venue_mix_market.png",
-                    "Where the executed quantity actually went, by market")
-    chart_capacity(t.get("14_capacity", pd.DataFrame()), charts)
+    # Charts 01-10 were retired at the desk's request (10b stays). Their
+    # TABLES are all still built and written - the findings, the workbook and
+    # the deck's numbers read from those, not from the pictures.
     close_df = t.get("_close_df")
     if close_df is not None:
         chart_market_notional(close_df, charts)
@@ -3828,15 +3581,6 @@ def build_charts(t: dict, out_dir: Path) -> None:
                                    "wtd mean bps"}),
                 charts, "first execution vs Close", name, title,
                 vertical=True, note=PRE_TRADED_NOTE)
-    chart_cohorts(t.get("15_cohorts", pd.DataFrame()), charts)
-    chart_headline(t.get("17_first_exec_by_adv", pd.DataFrame())
-                   .rename(columns={"first exec vs Close bps (wtd)":
-                                    "wtd mean bps"})
-                   if not t.get("17_first_exec_by_adv", pd.DataFrame()).empty
-                   else pd.DataFrame(),
-                   charts, "first execution vs Close", "10_first_exec.png",
-                   "Was starting before the close right? By order size",
-                   note=PRE_TRADED_NOTE)
     # The same measure per market. Size says whether starting early was ever
     # justified; market says where it actually goes wrong, which is the one
     # the desk can act on.
