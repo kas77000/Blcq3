@@ -3254,7 +3254,7 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
         if "%ADV (notional-weighted)" in t.columns:
             bits.append(f"{r['%ADV (notional-weighted)']:.2f}% ADV")
         if "% of notional in the close" in t.columns:
-            bits.append(f"{r['% of notional in the close']:.0f}% of it in the close")
+            bits.append(f"{r['% of notional in the close']:.0f}% executed in the close")
         ticks.append(chr(10).join(bits))
     ax.set_xticks(x)
     ax.set_xticklabels(ticks)

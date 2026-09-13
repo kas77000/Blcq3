@@ -305,8 +305,12 @@ def story(run: Run, period: str) -> list[dict]:
             f"{num(r, '%ADV (notional-weighted)'):.2f}% ADV, "
             f"{num(r, '% of notional in the close'):.0f}% in the close"
             for k, r in flow.iterrows()))
-        b.append(f"{num(pre, '% of notional in the close'):.0f}% of the "
-                 "pre-traded value still finished in the auction.")
+        # Every order here printed in the close, so this is not "how many
+        # reached the auction" - it is how the pre-traded value divides
+        # between the auction and the session before it.
+        in_close = num(pre, "% of notional in the close")
+        b.append(f"Pre-traded orders executed {in_close:.0f}% of their value in "
+                 f"the close, {100 - in_close:.0f}% before.")
     mostly_co = (flow is not None and "Close-only" in flow.index
                  and num(flow.loc["Close-only"], "% of notional") > 50)
     S.append(dict(title=("Most of the flow went straight into the auction"
