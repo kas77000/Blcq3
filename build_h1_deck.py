@@ -519,6 +519,61 @@ def story(run: Run, period: str) -> list[dict]:
         "start and then gave it back overnight - the clearest case for "
         "changing how that flow is worked.")))
 
+    # --- 7b. pre-traded against PVWAP, by market --------------------------
+    b, src = [], []
+    pv_all = run.row("73d_pre_pvwap_side_spr", "All")
+    if pv_all is not None:
+        verb = "beat" if num(pv_all, "spreads") > 0 else "lagged"
+        tail = "" if holds(pv_all) else " Not a clear signal."
+        b.append(f"Pre-traded orders {verb} PVWAP by "
+                 f"{sp(num(pv_all, 'spreads'))} spreads overall.{tail}")
+        src.append(cite("73d_pre_pvwap_side_spr", "All", pv_all))
+    pv = run.rows("78_pre_pvwap_mkt_spreads")
+    if pv:
+        ahead = sum(num(r, "spreads") > 0 for _, r in pv)
+        b.append("They beat PVWAP in every market." if ahead == len(pv) else
+                 f"They beat PVWAP in {ahead} of {len(pv)} markets.")
+        lag = sorted([(k, r) for k, r in pv if holds(r)
+                      and num(r, "spreads") < 0 and not thin(r)],
+                     key=lambda kr: num(kr[1], "spreads"))
+        if lag:
+            k, r = lag[0]
+            b.append(f"{k} lagged it most clearly: {sp(num(r, 'spreads'))} "
+                     f"spreads, {about_bps(r)}.")
+        src += [cite("78_pre_pvwap_mkt_spreads", k, r) for k, r in pv]
+    S.append(dict(title="Pre-traded orders against PVWAP, by market",
+                  bullets=b, charts=["32_pretraded_pvwap_market.png"],
+                  src=src, notes=(
+        "PVWAP is the market VWAP over the time each order was working. The "
+        "close says where the order ended up; PVWAP says whether the trading "
+        "on the way was good for the window it ran in.\n\n"
+        "If an order beats PVWAP but its first fills lag the close, the algo "
+        "traded well - it was the timing of the start that cost.")))
+
+    # --- 7c. pre-traded against PVWAP, by market and side -----------------
+    b, src = [], []
+    pv2 = {k: r for k, r in run.rows("79_pre_pvwap_mkt_side_spr", 2)}
+    for side in ("Buy", "Sell"):
+        one = run.row("73d_pre_pvwap_side_spr", side)
+        if one is not None:
+            src.append(cite("73d_pre_pvwap_side_spr", side, one))
+        worst = sorted([(k, r) for k, r in pv2.items() if k[1] == side
+                        and holds(r) and num(r, "spreads") < 0 and not thin(r)],
+                       key=lambda kr: num(kr[1], "spreads"))
+        if worst:
+            (m, _), r = worst[0]
+            b.append(f"{side}s lagged PVWAP most in {m}: "
+                     f"{sp(num(r, 'spreads'))} spreads, {about_bps(r)}.")
+            src.append(cite("79_pre_pvwap_mkt_side_spr", f"{m}, {side}", r))
+    if not b:
+        b.append("Against PVWAP, neither side fell behind by a clear margin "
+                 "anywhere.")
+    S.append(dict(title="Pre-traded against PVWAP, buys against sells",
+                  bullets=b, charts=["33_pretraded_pvwap_market_side.png"],
+                  src=src, notes=(
+        "Same measure as the previous slide, buys on the left and sells on "
+        "the right, on one scale.")))
+
     # --- 8. pre-traded by ADV% --------------------------------------------
     b, src = [], []
     psize = run.table("53_pre_adv_profile")

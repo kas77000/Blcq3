@@ -3063,6 +3063,9 @@ CO_NOTE = ("close-only: 99.5% or more of the order printed in the auction, so "
            "next open.")
 PRE_NOTE = ("pre-traded: part of the order traded before the auction. Negative "
             "reversion means the price came back against us by the next open.")
+PVWAP_NOTE = ("pre-traded: part of the order traded before the auction. PVWAP is "
+              "the market's VWAP while each order was working, so it judges the "
+              "trading itself, not when the order started.")
 
 
 def _spread_label(key, sprd, spreads: bool) -> str:
@@ -3681,6 +3684,14 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["76_pre_reversion_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], "reversion_bps")
     t["77_pre_close_mkt_spreads"] = t_in_spreads(pre, "market", "slip_close")
+    # Against PVWAP: the close says where the order ended up, PVWAP says
+    # whether the trading along the way was good for the window it ran in.
+    t["73d_pre_pvwap_side_spr"] = pd.concat([
+        t_in_spreads(pre.assign(buy_sell="All"), "buy_sell", "slip_pvwap"),
+        t_in_spreads(pre, "buy_sell", "slip_pvwap", order=BUY_SELL_ORDER)])
+    t["78_pre_pvwap_mkt_spreads"] = t_in_spreads(pre, "market", "slip_pvwap")
+    t["79_pre_pvwap_mkt_side_spr"] = t_in_spreads(
+        pre, ["market", "buy_sell"], "slip_pvwap")
 
     t["_close_df"] = df
     t["_auction_df"] = auc
@@ -4062,6 +4073,14 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           "30_pretraded_reversion_market_side.png",
                           "Pre-traded reversion", "next open vs close",
                           note=PRE_NOTE)
+    chart_spreads(t.get("78_pre_pvwap_mkt_spreads", E), charts,
+                  "32_pretraded_pvwap_market.png",
+                  "Pre-traded orders: against PVWAP, by market",
+                  "vs PVWAP", by_notional=True, note=PVWAP_NOTE)
+    chart_spreads_by_side(t.get("79_pre_pvwap_mkt_side_spr", E), charts,
+                          "33_pretraded_pvwap_market_side.png",
+                          "Pre-traded, against PVWAP", "vs PVWAP",
+                          note=PVWAP_NOTE)
     chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
                       "31_pretraded_adv_profile.png",
                       "Pre-traded orders by ADV%", with_orders=True)

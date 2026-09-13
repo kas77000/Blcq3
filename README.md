@@ -569,7 +569,9 @@ Same opening as the Q1 deck, then the two populations taken separately:
 | `27_pretraded_close_market` | pre-traded vs close, by market |
 | `21_reversion_pretraded` | pre-traded reversion, by market |
 | `28`/`29`/`30_pretraded_*_market_side` | first exec, close, reversion - by market and side |
-| `31_pretraded_adv_profile` | pre-traded orders and value by size |
+| `32_pretraded_pvwap_market` | pre-traded vs PVWAP, by market |
+| `33_pretraded_pvwap_market_side` | pre-traded vs PVWAP, by market and side |
+| `31_pretraded_adv_profile` | pre-traded orders and value by ADV% |
 
 Close-only includes India's 17:30-17:45 orders (counted as close). India cannot
 be pre-traded. The run log's `H1 NARRATIVE` block prints the summary, the
