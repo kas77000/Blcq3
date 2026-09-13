@@ -2696,13 +2696,76 @@ def _style(ax, xlabel="", ylabel="", title="", horizontal=False):
 _WRITTEN_CHARTS: set = set()
 
 
+# Every chart is also written bare into charts_deck/ for the PowerPoint: no
+# title, no footnotes, bigger type. Shrunk to half a slide, an 11-inch figure
+# with 8pt labels reads at about 4pt, and the title and notes take room the
+# plot needs. The deck puts the title above the picture as slide text and the
+# footnotes in the speaker notes; DECK_TITLES carries both across.
+DECK_CHARTS_DIR = "charts_deck"
+DECK_FONT_SCALE = 1.45
+DECK_TITLES: dict = {}
+
+
 def _save(fig, out_dir: Path, name: str, bottom: float = 0.0) -> None:
     path = out_dir / name
     _WRITTEN_CHARTS.add(name)
     fig.tight_layout(rect=(0, bottom, 1, 1) if bottom else None)
     fig.savefig(path, facecolor=SURFACE, dpi=DPI, bbox_inches="tight")
+    try:
+        _save_bare(fig, out_dir.parent / DECK_CHARTS_DIR, name)
+    except Exception as exc:                          # pragma: no cover
+        warn(f"deck copy of {name} not written: {exc}")
     plt.close(fig)
     log(f"    chart  {name}")
+
+
+def _save_bare(fig, out_dir: Path, name: str) -> None:
+    """The same figure with its title and footnotes lifted off, type enlarged.
+
+    A multi-panel chart keeps a short label per panel (Buy, Sell) - set as
+    ax._panel by the chart - because without it the panels are anonymous.
+    """
+    from matplotlib.text import Text
+    out_dir.mkdir(parents=True, exist_ok=True)
+    axes = fig.get_axes()
+    titles = [ax.get_title(loc="left").strip() for ax in axes]
+    title = getattr(fig, "_deck_title", None) or next((t for t in titles if t), "")
+    # One note per line, so a caveat shared by two charts can be printed once.
+    notes = [line.strip() for t in fig.texts
+             for line in t.get_text().split(chr(10)) if line.strip()]
+    for t in list(fig.texts):
+        t.remove()
+    for ax in axes:
+        ax.set_title(getattr(ax, "_panel", ""), loc="left")
+        # Axis-relative footnotes sit inside the axes' own text list.
+        for t in list(ax.texts):
+            if t.get_transform() == ax.transAxes and t.get_position()[1] < 0:
+                notes += [x.strip() for x in t.get_text().split(chr(10))
+                          if x.strip()]
+                t.remove()
+    # Panels stacked one above the other stand side by side instead: on a
+    # widescreen slide a tall chart is the one that ends up smallest.
+    # A chart whose labels are stacked by fixed offsets opts out: bigger type
+    # there collides instead of reading better.
+    scale = getattr(fig, "_deck_scale", DECK_FONT_SCALE)
+    if len(axes) > 1 and len({round(ax.get_position().x0, 2)
+                              for ax in axes}) == 1:
+        from matplotlib.gridspec import GridSpec
+        grid = GridSpec(1, len(axes), figure=fig)
+        for i, ax in enumerate(axes):
+            ax.set_subplotspec(grid[0, i])
+            # A dozen market names under a half-width panel collide at 30
+            # degrees; steeper, and a touch smaller, they do not.
+            for lab in ax.get_xticklabels():
+                lab.set_rotation(45)
+        fig.set_size_inches(9.0 * len(axes), 5.8)
+        scale = min(scale, 1.3)
+    for t in fig.findobj(Text):
+        t.set_fontsize(t.get_fontsize() * scale)
+    fig.tight_layout()
+    fig.savefig(out_dir / name, facecolor=SURFACE, dpi=DPI, bbox_inches="tight")
+    DECK_TITLES[name] = {"title": title.replace(chr(10), " ").strip(),
+                         "notes": notes}
 
 
 def _fmt_bps(v) -> str:
@@ -2892,6 +2955,7 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
         ax.text(0.0, -0.30, "cash and swap split by client account; the "
                 "percentage is the market's share of the value traded",
                 transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
+    fig._deck_scale = 1.0
     _save(fig, out, name)
 
 
@@ -2974,7 +3038,7 @@ def chart_algo_choice(t: pd.DataFrame, out: Path,
     ax.invert_yaxis()
     ax.legend(frameon=False, loc="lower right", fontsize=8.5)
     _style(ax, xlabel="vs Arrival, notional-weighted (bps)",
-           title="Same market, same order size - what each algo cost",
+           title="Same market, same ADV% band - what each algo cost",
            horizontal=True)
     ax.text(0.0, -0.09, "colour is the algo on this chart, not the direction - "
             "left of the line is still a cost",
@@ -3115,6 +3179,8 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                         unit="spreads" if spreads else "bps")
         _style(ax, ylabel=measure + (", in spreads" if spreads else ", bps"),
                title=f"{title}: {side}")
+        ax._panel = side
+    fig._deck_title = title
     _share_ylim(axes)
     room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
     _save(fig, out, name, bottom=room / len(sides))
@@ -3158,6 +3224,8 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
         head = all_label if p == "All" else p
         _style(ax, ylabel=("in spreads" if spreads else "bps") if i == 0 else "",
                title=(title + chr(10) + head) if i == 0 else chr(10) + head)
+        ax._panel = head
+    fig._deck_title = title
     _share_ylim(axes)
     room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
     _save(fig, out, name, bottom=room)
@@ -3224,7 +3292,7 @@ def chart_adv_profile(t: pd.DataFrame, out: Path, name: str, title: str,
                     ha="center", va="bottom", fontsize=8.5, color=INK, zorder=5)
         ax.set_xticks(x)
         ax.set_xticklabels([str(k) for k in d.index])
-        _style(ax, xlabel="order size, % of daily volume", ylabel=ylabel,
+        _style(ax, xlabel="ADV%", ylabel=ylabel,
                title=title if i == 0 else "")
     _save(fig, out, name)
 
@@ -3911,14 +3979,14 @@ def build_charts(t: dict, out_dir: Path) -> None:
                        "market with a big number is still a small market")
     for key, name, title, measure in [
         ("63_close_adv_spreads", "17_close_by_adv.png",
-         "Close performance by order size", "vs Close"),
+         "Close performance by ADV%", "vs Close"),
         ("65_close_sprdq_spreads", "18_close_by_spread.png",
          "Close performance by spread quartile", "vs Close"),
     ]:
         chart_spreads(t.get(key, E), charts, name, title, measure)
     for key, name, title in [
         ("66_pre_firstexec_adv_spreads", "19_first_exec_by_adv.png",
-         "First execution vs the close, by order size"),
+         "First execution vs the close, by ADV%"),
         ("67_pre_firstexec_sprdq_spreads", "20_first_exec_by_spread.png",
          "First execution vs the close, by spread quartile"),
     ]:
@@ -3950,7 +4018,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # Opens the way Q1 did: where the flow went and how big it was.
     chart_flow_split(t.get("51_flow_split", E), charts)
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
-                      "Value traded by order size")
+                      "Value traded by ADV%")
 
     # Close-only. Its close slippage is zero by construction, so the question
     # is whether the price held after the auction: reversion, by market, and
@@ -3996,12 +4064,23 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           note=PRE_NOTE)
     chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
                       "31_pretraded_adv_profile.png",
-                      "Pre-traded orders by size", with_orders=True)
+                      "Pre-traded orders by ADV%", with_orders=True)
 
     # Anything this run did not write is left over from an older version of
     # the analysis. A retired chart that stays in the folder looks exactly
     # like a current one and is the easiest way for a wrong number to reach a
     # client, so it goes - and it is named, never removed quietly.
+    import json
+    deck = out_dir / DECK_CHARTS_DIR
+    if deck.exists():
+        for p in deck.glob("*.png"):
+            if p.name not in _WRITTEN_CHARTS:
+                p.unlink(missing_ok=True)
+        (deck / "titles.json").write_text(
+            json.dumps({k: DECK_TITLES[k] for k in sorted(DECK_TITLES)},
+                       indent=2), encoding="utf-8")
+        log(f"  deck charts (no titles, larger type) -> {deck}")
+
     stale = sorted(before - _WRITTEN_CHARTS)
     if stale:
         warn(f"{len(stale)} chart(s) in {charts} are from an earlier run and")

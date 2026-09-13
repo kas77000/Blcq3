@@ -16,9 +16,9 @@ The story follows the Q1 deck, then pushes on the two populations:
   3  Close-only                 reversion: did the price hold after the print
   4  Pre-traded                 the start against the finish, by market
   5  Pre-traded by side         buys against sells
-  6  Pre-traded by size         the case for sending small orders to the close
+  6  Pre-traded by ADV%         the case for sending small orders to the close
   7  What we will change
-  +  Appendix                   monthly, by size and spread, by market
+  +  Appendix                   monthly, by ADV% and spread, by market
 
 Writes <deck>.pptx and <deck>.evidence.md: each bullet with the table row it
 rests on, so any number can be defended on the call.
@@ -56,8 +56,8 @@ def _rgb(h: str) -> RGBColor:
 
 
 SLIDE_W, SLIDE_H = Inches(13.333), Inches(7.5)
-MARGIN = Inches(0.6)
-GAP = Inches(0.3)
+MARGIN = Inches(0.4)
+GAP = Inches(0.25)
 INK, INK_SOFT = _rgb(tca.INK), _rgb(tca.INK_SECOND)
 ACCENT, RULE, SURFACE = _rgb(tca.POS), _rgb(tca.BASELINE), _rgb(tca.SURFACE)
 FONT = "Arial"
@@ -93,7 +93,10 @@ def bullet_box(slide, top, items, size):
             run.font.name = FONT
 
 
-def charts_row(slide, paths: list, top, box_h):
+CAPTION_H = Inches(0.34)
+
+
+def charts_row(slide, paths: list, top, box_h, titles: dict | None = None):
     """Charts side by side at one height, the row centred on the slide.
 
     Equal-width boxes shrink a wide chart to a strip beside a square one.
@@ -108,6 +111,10 @@ def charts_row(slide, paths: list, top, box_h):
                 ratios.append(im.width / im.height)
         else:
             ratios.append(None)
+    titles = titles or {}
+    captions = any(titles.get(p.name, {}).get("title") for p in paths)
+    if captions:
+        box_h = box_h - CAPTION_H
     avail = SLIDE_W - 2 * MARGIN - GAP * (len(paths) - 1)
     known = [r for r in ratios if r] or [1.6]
     h = min(box_h, int(avail / sum(r or sum(known) / len(known)
@@ -116,11 +123,16 @@ def charts_row(slide, paths: list, top, box_h):
     left = int((SLIDE_W - sum(widths) - GAP * (len(paths) - 1)) / 2)
     top = Emu(int(top + (box_h - h) / 2))       # centred in the space left
     for p, r, w in zip(paths, ratios, widths):
+        cap = titles.get(p.name, {}).get("title", "")
+        if captions:
+            textbox(slide, Emu(left), top, Emu(max(w, Inches(3))), CAPTION_H,
+                    cap, 14, bold=True, color=INK)
+        img_top = Emu(int(top + (CAPTION_H if captions else 0)))
         if r:
-            slide.shapes.add_picture(str(p), Emu(left), top, width=Emu(w),
+            slide.shapes.add_picture(str(p), Emu(left), img_top, width=Emu(w),
                                      height=Emu(int(h)))
         else:
-            textbox(slide, Emu(left), top, Emu(w), Inches(0.5),
+            textbox(slide, Emu(left), img_top, Emu(w), Inches(0.5),
                     f"[chart not found: {p.name}]", 12, color=INK_SOFT)
         left += w + GAP
 
@@ -151,7 +163,14 @@ class Run:
 
     def __init__(self, folder: Path):
         self.folder = folder
-        self.charts = folder / "charts"
+        # The bare deck copies when the run wrote them, with their titles.
+        bare = folder / tca.DECK_CHARTS_DIR
+        self.charts = bare if (bare / "titles.json").exists() else folder / "charts"
+        self.titles = {}
+        if self.charts == bare:
+            import json
+            self.titles = json.loads((bare / "titles.json").read_text(
+                encoding="utf-8"))
         path = folder / "tables.xlsx"
         if not path.exists():
             raise SystemExit(f"ERROR: {path} not found - run moc_tca.py first.")
@@ -235,18 +254,19 @@ def story(run: Run, period: str) -> list[dict]:
     prof = run.rows("34_market_profile")
     ncol = "notional (USDm)"
     size = run.table("52_adv_profile")
+    flow = run.table("51_flow_split")
     b, src = [], []
     if prof:
         tot = sum(num(r, ncol) for _, r in prof)
         ranked = sorted(prof, key=lambda kr: -num(kr[1], ncol))
         top5 = 100 * sum(num(r, ncol) for _, r in ranked[:5]) / tot
         b.append(f"${tot:,.0f}m traded on the close across {len(prof)} markets.")
-        a, c = ranked[0], ranked[1]
-        b.append(f"{a[0]} and {c[0]} led. The top five were {top5:.0f}% of "
+        a_, c_ = ranked[0], ranked[1]
+        b.append(f"{a_[0]} and {c_[0]} led. The top five were {top5:.0f}% of "
                  "the value.")
-        src += [f"`34_market_profile`: total {tot:,.1f}m, "
-                + ", ".join(f"{k} {num(r, '% of notional'):.1f}%"
-                            for k, r in ranked[:5])]
+        src.append(f"`34_market_profile`: total {tot:,.1f}m, "
+                   + ", ".join(f"{k} {num(r, '% of notional'):.1f}%"
+                               for k, r in ranked[:5]))
     es = run.table("50_exec_summary")
     fill = math.nan
     if es is not None:
@@ -254,7 +274,7 @@ def story(run: Run, period: str) -> list[dict]:
         fill = float(hit["value"].iloc[0]) if len(hit) else math.nan
     if size is not None and "0-1%" in size.index:
         u1 = num(size.loc["0-1%"], "% of notional")
-        b.append(f"{u1:.0f}% of the value was under 1% of daily volume."
+        b.append(f"{u1:.0f}% of the value was under 1% ADV."
                  + (f" Fill was {fill:.1f}%." if math.isfinite(fill) else ""))
         src.append(f"`52_adv_profile` [0-1%]: {u1:.1f}% of notional; "
                    f"`50_exec_summary` fill ratio {fill:.2f}%")
@@ -262,14 +282,11 @@ def story(run: Run, period: str) -> list[dict]:
                   charts=["13_market_notional.png", "24_adv_profile.png"],
                   src=src, notes=(
         "Scope: CLOSE strategy. The left chart splits each market into cash "
-        "and swap by client account. The right chart is order size against "
-        "daily volume. No judgement on this slide - let the client recognise "
-        "their own book first.")))
+        "and swap by client account. The right chart is value by ADV%. "
+        "No judgement on this slide - let the client recognise their own "
+        "book first.")))
 
-    # --- 2. close-only vs pre-traded --------------------------------------
-    flow = run.table("51_flow_split")
-    first = run.row("73a_pre_firstexec_side_spr", "All")
-    finish = run.row("73b_pre_close_side_spr", "All")
+    # --- 1b. close-only against pre-traded ----------------------------------
     b, src = [], []
     if flow is not None and {"Close-only", "Pre-traded"} <= set(flow.index):
         co, pre = flow.loc["Close-only"], flow.loc["Pre-traded"]
@@ -280,7 +297,7 @@ def story(run: Run, period: str) -> list[dict]:
                   > num(co, "%ADV (notional-weighted)") else "smaller")
         b.append(f"The other {num(pre, '% of notional'):.0f}% started early. "
                  f"Those orders were {bigger}, at "
-                 f"{num(pre, '%ADV (notional-weighted)'):.1f}% of volume.")
+                 f"{num(pre, '%ADV (notional-weighted)'):.1f}% ADV.")
         src.append("`51_flow_split`: " + "; ".join(
             f"{k} {num(r, 'notional (USDm)'):,.0f}m "
             f"({num(r, '% of notional'):.1f}%), {int(num(r, 'orders')):,} "
@@ -288,32 +305,22 @@ def story(run: Run, period: str) -> list[dict]:
             f"{num(r, '%ADV (notional-weighted)'):.2f}% ADV, "
             f"{num(r, '% of notional in the close'):.0f}% in the close"
             for k, r in flow.iterrows()))
-    if first is not None and finish is not None:
-        verb = "beat" if num(finish, "spreads") > 0 else "lagged"
-        cost = "cost" if num(first, "spreads") < 0 else "gained"
-        b.append(f"They {verb} the close by {sp(num(finish, 'spreads'))} "
-                 f"spreads. Their first fills {cost} "
-                 f"{sp(num(first, 'spreads'))}.")
-        src += [cite("73b_pre_close_side_spr", "All", finish),
-                cite("73a_pre_firstexec_side_spr", "All", first)]
+        b.append(f"{num(pre, '% of notional in the close'):.0f}% of the "
+                 "pre-traded value still finished in the auction.")
     mostly_co = (flow is not None and "Close-only" in flow.index
                  and num(flow.loc["Close-only"], "% of notional") > 50)
     S.append(dict(title=("Most of the flow went straight into the auction"
-                         if mostly_co else
-                         "Close-only and pre-traded orders"),
-                  bullets=b, charts=["23_flow_split.png",
-                                     "26_pretraded_by_side.png"],
+                         if mostly_co else "Close-only and pre-traded orders"),
+                  bullets=b, charts=["23_flow_split.png"],
                   src=src, notes=(
         "Close-only: 99.5% or more of the order printed in the auction. "
         "Pre-traded: part of it traded before. India's 17:30-17:45 orders "
         "count as close-only; India cannot be pre-traded.\n\n"
-        "Everything is in spreads: the result divided by the average spread "
-        "([x bps] under each bar). Multiply the two to get bps.\n\n"
-        "The right chart is the pre-traded story in one picture: first fill "
-        "against the close, the whole execution against the close, and the "
-        "next open against the close.")))
+        "Everything after this slide is in spreads: the result divided by the "
+        "average spread, the [x bps] under each bar. Multiply the two to get "
+        "bps.")))
 
-    # --- 3. close-only: reversion -----------------------------------------
+    # --- 2. close-only: reversion by market -------------------------------
     b, src = ["A close-only order trades at the close, so reversion is the test."], []
     allc = run.row("71b_co_reversion_side_spr", "All")
     if allc is not None:
@@ -322,23 +329,19 @@ def story(run: Run, period: str) -> list[dict]:
         b.append(f"By the next open, prices moved {sp(num(allc, 'spreads'))} "
                  f"spreads {way} on average.{tail}")
         src.append(cite("71b_co_reversion_side_spr", "All", allc))
-    bad = sorted([(k, r) for k, r in run.rows("72_co_reversion_mkt_side_spr", 2)
-                  if holds(r) and num(r, "spreads") < 0 and not thin(r)],
-                 key=lambda kr: num(kr[1], "spreads"))
-    worst_co = bad[0] if bad else None
-    if worst_co:
-        (m, side), r = worst_co
-        b.append(f"{m} {side.lower()}s came back hardest: "
-                 f"{sp(num(r, 'spreads'))} spreads, {about_bps(r)}.")
-        src.append(cite("72_co_reversion_mkt_side_spr", f"{m}, {side}", r))
-    else:
-        b.append("No market and side came back against us by a clear margin.")
-    for k, r in run.rows("71_co_reversion_mkt_spreads"):
-        if holds(r):
-            src.append(cite("71_co_reversion_mkt_spreads", k, r))
+    co_mkt = run.rows("71_co_reversion_mkt_spreads")
+    bad_m = sorted([(k, r) for k, r in co_mkt if holds(r)
+                    and num(r, "spreads") < 0 and not thin(r)],
+                   key=lambda kr: num(kr[1], "spreads"))
+    good_m = [k for k, r in co_mkt if holds(r) and num(r, "spreads") > 0]
+    if bad_m:
+        names = " and ".join(str(k) for k, _ in bad_m[:2])
+        b.append(f"The price came back clearly only in {names}.")
+    elif good_m:
+        b.append("No market came back against us by a clear margin.")
+    src += [cite("71_co_reversion_mkt_spreads", k, r) for k, r in co_mkt]
     S.append(dict(title="Close-only: did the price hold after the auction?",
-                  bullets=b, charts=["22_reversion_close_only.png",
-                                     "25_close_only_reversion_market_side.png"],
+                  bullets=b, charts=["22_reversion_close_only.png"],
                   src=src, notes=(
         "Reversion is the next open against the close, side-adjusted. "
         "Negative means the price came back against us overnight.\n\n"
@@ -348,9 +351,85 @@ def story(run: Run, period: str) -> list[dict]:
         "Bars without whiskers had too few orders for an interval. Do not "
         "lead with them.")))
 
-    # --- 4. pre-traded: start against finish ------------------------------
-    fe = [(k, r) for k, r in run.rows("68_pre_firstexec_mkt_spreads")]
-    fin = [(k, r) for k, r in run.rows("77_pre_close_mkt_spreads")]
+    # --- 3. close-only: by side -------------------------------------------
+    b, src = [], []
+    co_side = run.rows("72_co_reversion_mkt_side_spr", 2)
+    bad = sorted([(k, r) for k, r in co_side
+                  if holds(r) and num(r, "spreads") < 0 and not thin(r)],
+                 key=lambda kr: num(kr[1], "spreads"))
+    worst_co = bad[0] if bad else None
+    if worst_co:
+        (m, side), r = worst_co
+        b.append(f"{m} {side.lower()}s came back hardest: "
+                 f"{sp(num(r, 'spreads'))} spreads, {about_bps(r)}.")
+        opp = next((rr for kk, rr in co_side
+                    if kk[0] == m and kk[1] != side), None)
+        if opp is not None:
+            way = "held" if num(opp, "spreads") >= 0 else "also came back"
+            b.append(f"{m} {'buys' if side == 'Sell' else 'sells'} {way}: "
+                     f"{num(opp, 'spreads'):+.2f} spreads.")
+            src.append(cite("72_co_reversion_mkt_side_spr",
+                            f"{m}, {'Buy' if side == 'Sell' else 'Sell'}", opp))
+        src.append(cite("72_co_reversion_mkt_side_spr", f"{m}, {side}", r))
+        if len(bad) > 1:
+            b.append(f"{len(bad) - 1} other market and side pairs came back "
+                     "by a clear margin.")
+        else:
+            b.append("No other market and side came back by a clear margin.")
+        src += [cite("72_co_reversion_mkt_side_spr", f"{k[0]}, {k[1]}", rr)
+                for k, rr in bad[1:]]
+    else:
+        b.append("Nothing came back against us by a clear margin, on either side.")
+    S.append(dict(title="Close-only reversion, buys against sells",
+                  bullets=b,
+                  charts=["25_close_only_reversion_market_side.png"],
+                  src=src, notes=(
+        "Same measure as the previous slide, split by side. A side that comes "
+        "back while the other holds points at how that side is sent, not at "
+        "the market.")))
+
+    # --- 4. pre-traded: start, finish, next open --------------------------
+    first = run.row("73a_pre_firstexec_side_spr", "All")
+    finish = run.row("73b_pre_close_side_spr", "All")
+    b, src = [], []
+    if first is not None and finish is not None:
+        verb = "beat" if num(finish, "spreads") > 0 else "lagged"
+        cost = "cost" if num(first, "spreads") < 0 else "gained"
+        b.append(f"Pre-traded orders {verb} the close by "
+                 f"{sp(num(finish, 'spreads'))} spreads. First fills {cost} "
+                 f"{sp(num(first, 'spreads'))}.")
+        src += [cite("73b_pre_close_side_spr", "All", finish),
+                cite("73a_pre_firstexec_side_spr", "All", first)]
+    for side in ("Buy", "Sell"):
+        trio = [run.row(t, side) for t in ("73a_pre_firstexec_side_spr",
+                                           "73b_pre_close_side_spr",
+                                           "73c_pre_reversion_side_spr")]
+        if any(t is None for t in trio):
+            continue
+        n_clear = sum(holds(t) for t in trio)
+        verdict = {3: "All three are clear.", 0: "None is clear."}.get(
+            n_clear, f"{n_clear} of 3 are clear.")
+        b.append(f"{side}s: start {num(trio[0], 'spreads'):+.2f}, finish "
+                 f"{num(trio[1], 'spreads'):+.2f}, next open "
+                 f"{num(trio[2], 'spreads'):+.2f}. {verdict}")
+        src += [cite(t, side, r) for t, r in zip(
+            ("73a_pre_firstexec_side_spr", "73b_pre_close_side_spr",
+             "73c_pre_reversion_side_spr"), trio)]
+    starts_cost = first is not None and num(first, "spreads") < 0
+    S.append(dict(title=("Pre-traded orders: the start is where it costs"
+                         if starts_cost else
+                         "Pre-traded orders: start, finish and next open"),
+                  bullets=b, charts=["26_pretraded_by_side.png"],
+                  src=src, notes=(
+        "Start = first fill against the close. Finish = the whole execution "
+        "against the close. Next open = reversion. Positive is good.\n\n"
+        "The orders finish ahead of the close, so the algo recovers - but it "
+        "pays for the first fills to get there. Starting later or more "
+        "passively keeps the finish without the start.")))
+
+    # --- 5. pre-traded: by market -----------------------------------------
+    fe = run.rows("68_pre_firstexec_mkt_spreads")
+    fin = run.rows("77_pre_close_mkt_spreads")
     b, src = [], []
     if fe:
         neg = sum(num(r, "spreads") < 0 for _, r in fe)
@@ -373,72 +452,78 @@ def story(run: Run, period: str) -> list[dict]:
                  f"By the finish, {pos} of {len(fin)} markets still beat the "
                  "close.")
         src += [cite("77_pre_close_mkt_spreads", k, r) for k, r in fin]
-    starts_cost = first is not None and num(first, "spreads") < 0
-    S.append(dict(title=("Pre-traded orders: the start is where it costs"
-                         if starts_cost else
-                         "Pre-traded orders: the start and the finish"),
+    S.append(dict(title="Pre-traded orders, market by market",
                   bullets=b, charts=["10b_first_exec_market.png",
                                      "27_pretraded_close_market.png"],
                   src=src, notes=(
         "Left: the first fill against the close, weighted by the part of "
         "each order that traded before the auction. Right: the whole "
-        "execution against the close.\n\n"
-        "Read them together. The orders finish ahead of the close, so the "
-        "algo recovers - but it pays for the first fills to get there. "
-        "Starting later or more passively keeps the finish without the "
-        "start.")))
+        "execution against the close.")))
 
-    # --- 5. pre-traded by side --------------------------------------------
+    # --- 6. pre-traded: first fills by market and side --------------------
     b, src = [], []
-    for side in ("Buy", "Sell"):
-        trio = [run.row(t, side) for t in ("73a_pre_firstexec_side_spr",
-                                           "73b_pre_close_side_spr",
-                                           "73c_pre_reversion_side_spr")]
-        if any(t is None for t in trio):
-            continue
-        n_clear = sum(holds(t) for t in trio)
-        verdict = {3: "All three are clear.", 0: "None is clear."}.get(
-            n_clear, f"{n_clear} of 3 are clear.")
-        b.append(f"{side}s: start {num(trio[0], 'spreads'):+.2f}, finish "
-                 f"{num(trio[1], 'spreads'):+.2f}, next open "
-                 f"{num(trio[2], 'spreads'):+.2f}. {verdict}")
-        src += [cite(t, side, r) for t, r in zip(
-            ("73a_pre_firstexec_side_spr", "73b_pre_close_side_spr",
-             "73c_pre_reversion_side_spr"), trio)]
     fe2 = {k: r for k, r in run.rows("74_pre_firstexec_mkt_side_spr", 2)}
+    for side in ("Buy", "Sell"):
+        worst = sorted([(k, r) for k, r in fe2.items() if k[1] == side
+                        and holds(r) and num(r, "spreads") < 0 and not thin(r)],
+                       key=lambda kr: num(kr[1], "spreads"))
+        if worst:
+            (m, _), r = worst[0]
+            b.append(f"{side}s started worst in {m}: "
+                     f"{sp(num(r, 'spreads'))} spreads, {about_bps(r)}.")
+            src.append(cite("74_pre_firstexec_mkt_side_spr", f"{m}, {side}", r))
+    if not b:
+        b.append("Neither side started badly by a clear margin in any market.")
+    S.append(dict(title="Pre-traded first fills, buys against sells",
+                  bullets=b,
+                  charts=["28_pretraded_first_exec_market_side.png"],
+                  src=src, notes=(
+        "First fill against the close, by market, buys on the left and sells "
+        "on the right, on one scale.")))
+
+    # --- 7. pre-traded: reversion by market and side ----------------------
+    b, src = [], []
     rv2 = {k: r for k, r in run.rows("76_pre_reversion_mkt_side_spr", 2)}
     both = sorted([k for k in fe2 if k in rv2
                    and holds(fe2[k]) and num(fe2[k], "spreads") < 0
                    and holds(rv2[k]) and num(rv2[k], "spreads") < 0],
                   key=lambda k: num(rv2[k], "spreads"))
-    if both:
-        m, side = both[0]
-        b.append(f"{m} {side.lower()}s started {sp(num(fe2[both[0]], 'spreads'))} "
-                 f"spreads worse and came back {sp(num(rv2[both[0]], 'spreads'))} "
-                 "overnight.")
-        src += [cite("74_pre_firstexec_mkt_side_spr", f"{m}, {side}", fe2[both[0]]),
-                cite("76_pre_reversion_mkt_side_spr", f"{m}, {side}", rv2[both[0]])]
     worst_pair = both[0] if both else None
-    S.append(dict(title="Buys and sells did not behave the same",
+    if worst_pair:
+        m, side = worst_pair
+        b.append(f"{m} {side.lower()}s started "
+                 f"{sp(num(fe2[worst_pair], 'spreads'))} spreads worse and came "
+                 f"back {sp(num(rv2[worst_pair], 'spreads'))} overnight.")
+        src += [cite("74_pre_firstexec_mkt_side_spr", f"{m}, {side}",
+                     fe2[worst_pair]),
+                cite("76_pre_reversion_mkt_side_spr", f"{m}, {side}",
+                     rv2[worst_pair])]
+    rv_bad = sorted([(k, r) for k, r in rv2.items() if holds(r)
+                     and num(r, "spreads") < 0 and not thin(r)
+                     and k != worst_pair],
+                    key=lambda kr: num(kr[1], "spreads"))
+    b.append(f"{len(rv_bad)} other market and side pairs came back by a clear "
+             "margin." if rv_bad else
+             "Beyond that, nothing came back by a clear margin.")
+    src += [cite("76_pre_reversion_mkt_side_spr", f"{k[0]}, {k[1]}", r)
+            for k, r in rv_bad]
+    S.append(dict(title="Pre-traded reversion, buys against sells",
                   bullets=b,
-                  charts=["28_pretraded_first_exec_market_side.png",
-                          "30_pretraded_reversion_market_side.png"],
+                  charts=["30_pretraded_reversion_market_side.png"],
                   src=src, notes=(
-        "Start = first fill vs close. Finish = whole execution vs close. "
-        "Next open = reversion. All in spreads, positive is good.\n\n"
-        "Left: first fills by market, buys over sells. Right: reversion by "
-        "market, buys over sells. A market that is red on both charts for "
-        "the same side paid to start and then gave it back overnight - the "
-        "clearest case for changing how that flow is worked.")))
+        "A market and side that is red here and on the previous slide paid to "
+        "start and then gave it back overnight - the clearest case for "
+        "changing how that flow is worked.")))
 
-    # --- 6. pre-traded by size --------------------------------------------
+    # --- 8. pre-traded by ADV% --------------------------------------------
     b, src = [], []
     psize = run.table("53_pre_adv_profile")
     small = run.row("66_pre_firstexec_adv_spreads", "0-1%")
     if psize is not None and "0-1%" in psize.index:
         r = psize.loc["0-1%"]
         b.append(f"{num(r, '% of orders'):.0f}% of pre-traded orders were "
-                 f"under 1% of volume: {num(r, '% of notional'):.0f}% of value.")
+                 f"under 1% ADV, but only {num(r, '% of notional'):.0f}% of "
+                 "the value.")
         src.append(f"`53_pre_adv_profile` [0-1%]: {int(num(r, 'orders')):,} "
                    f"orders ({num(r, '% of orders'):.1f}%), "
                    f"{num(r, 'notional (USDm)'):,.1f}m "
@@ -455,10 +540,11 @@ def story(run: Run, period: str) -> list[dict]:
         src.append(cite("66_pre_firstexec_adv_spreads", "0-1%", small))
     if flow is not None and "Close-only" in flow.index:
         co = flow.loc["Close-only"]
-        b.append(f"Close-only orders, at {num(co, '%ADV (notional-weighted)'):.1f}% "
-                 f"of volume, filled {num(co, 'fill ratio %'):.1f}%.")
+        b.append(f"Close-only orders, at "
+                 f"{num(co, '%ADV (notional-weighted)'):.1f}% ADV, filled "
+                 f"{num(co, 'fill ratio %'):.1f}%.")
     S.append(dict(title=("Small pre-traded orders could go straight to the close"
-                         if small_costs else "Pre-traded orders by size"),
+                         if small_costs else "Pre-traded orders by ADV%"),
                   bullets=b, charts=["31_pretraded_adv_profile.png",
                                      "19_first_exec_by_adv.png"],
                   src=src, notes=(
@@ -468,11 +554,10 @@ def story(run: Run, period: str) -> list[dict]:
         "fill almost completely - and starting them early still cost money "
         "on the first fill.")))
 
-    # --- 7. what we will change -------------------------------------------
+    # --- 9. what we will change -------------------------------------------
     b, src = [], []
     if small_costs:
-        b.append("Send pre-traded orders under 1% of volume straight to the "
-                 "auction.")
+        b.append("Send pre-traded orders under 1% ADV straight to the auction.")
     clear_fe = sorted([(k, r) for k, r in fe if holds(r)
                        and num(r, "spreads") < 0 and not thin(r)],
                       key=lambda kr: -num(kr[1], "notional (USDm)"))[:2]
@@ -490,19 +575,22 @@ def story(run: Run, period: str) -> list[dict]:
     S.append(dict(title="What we will change", bullets=b, charts=[], src=src,
                   notes=(
         "Each action comes from a result that holds at 95%: the small-order "
-        "first-fill cost (slide 6), the markets with the clearest early-start "
-        "cost (slide 4), and the market and side where the price came back "
-        "(slides 3 and 5). Agree the order of these with the desk before the "
-        "meeting.")))
+        "first-fill cost, the markets with the clearest early-start cost, and "
+        "the market and side where the price came back. Agree the order of "
+        "these with the desk before the meeting.")))
 
     # --- appendix -----------------------------------------------------------
     for title, charts in [
         ("Appendix: close performance by month",
          ["12_monthly.png", "12b_monthly_india.png"]),
-        ("Appendix: close performance by size and spread",
+        ("Appendix: close performance by ADV% and spread",
          ["17_close_by_adv.png", "18_close_by_spread.png"]),
-        ("Appendix: close by market, first fills by spread",
-         ["15_market_vs_close.png", "20_first_exec_by_spread.png"]),
+        ("Appendix: value by ADV%, close by market",
+         ["24_adv_profile.png", "15_market_vs_close.png"]),
+        ("Appendix: first fills by spread",
+         ["20_first_exec_by_spread.png"]),
+        ("Appendix: pre-traded against the close, buys and sells",
+         ["29_pretraded_close_market_side.png"]),
     ]:
         S.append(dict(title=title, bullets=[], charts=charts, src=[],
                       notes="Backup. Show only if asked.", appendix=True))
@@ -540,27 +628,48 @@ def build(run: Run, out: Path, client: str, period: str, cover: bool) -> list:
 
     for i, spec in enumerate(slides, start=1):
         s = new()
-        textbox(s, MARGIN, Inches(0.35), SLIDE_W - 2 * MARGIN, Inches(0.8),
-                spec["title"], 26, bold=True)
-        rule = s.shapes.add_shape(1, MARGIN, Inches(1.12),
+        textbox(s, MARGIN, Inches(0.22), SLIDE_W - 2 * MARGIN, Inches(0.7),
+                spec["title"], 24, bold=True)
+        rule = s.shapes.add_shape(1, MARGIN, Inches(0.88),
                                   SLIDE_W - 2 * MARGIN, Emu(9525))
         rule.fill.solid(); rule.fill.fore_color.rgb = RULE
         rule.line.fill.background(); rule.shadow.inherit = False
 
         text_only = not spec["charts"]
-        if spec["bullets"]:
-            bullet_box(s, Inches(1.95 if text_only else 1.25), spec["bullets"],
-                       24 if text_only else 16)
+        n_b = len(spec["bullets"])
+        if n_b:
+            bullet_box(s, Inches(1.7 if text_only else 0.95), spec["bullets"],
+                       24 if text_only else 15)
         if spec["charts"]:
-            top = Inches(2.55) if spec["bullets"] else Inches(1.35)
+            top = Inches(1.0 + 0.36 * n_b + (0.08 if n_b else 0))
+            # The charts' footnotes, once per slide: the same caveat printed
+            # under two pictures is read once and ignored the second time.
+            foot = []
+            for c in spec["charts"]:
+                for note in run.titles.get(c, {}).get("notes", []):
+                    if note not in foot:
+                        foot.append(note)
+            rows = sum(max(1, math.ceil(len(x) / 190)) for x in foot)
+            foot_h = Inches(0.035 + 0.135 * rows) if foot else Emu(0)
+            bottom = SLIDE_H - Inches(0.3)
             charts_row(s, [run.charts / c for c in spec["charts"]], top,
-                       SLIDE_H - top - Inches(0.45))
-        textbox(s, MARGIN, SLIDE_H - Inches(0.38), SLIDE_W - 2 * MARGIN,
-                Inches(0.3), f"{client}  |  MOC TCA {period}  |  {i}", 9,
+                       bottom - top - foot_h - Inches(0.05), run.titles)
+            if foot:
+                textbox(s, MARGIN, bottom - foot_h, SLIDE_W - 2 * MARGIN,
+                        foot_h, chr(10).join(foot), 8, color=INK_SOFT)
+        textbox(s, MARGIN, SLIDE_H - Inches(0.3), SLIDE_W - 2 * MARGIN,
+                Inches(0.25), f"{client}  |  MOC TCA {period}  |  {i}", 8,
                 color=INK_SOFT)
+        chart_notes = [f"{run.titles[c]['title']}: " + " ".join(
+                           run.titles[c]["notes"])
+                       for c in spec["charts"]
+                       if run.titles.get(c, {}).get("notes")]
         s.notes_slide.notes_text_frame.text = (
-            spec["notes"] + ("\n\nSources:\n" + "\n".join(spec["src"])
-                             if spec["src"] else ""))
+            spec["notes"]
+            + ("\n\nOn the charts:\n" + "\n".join(chart_notes)
+               if chart_notes else "")
+            + ("\n\nSources:\n" + "\n".join(spec["src"])
+               if spec["src"] else ""))
 
     out.parent.mkdir(parents=True, exist_ok=True)
     prs.save(out)

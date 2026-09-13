@@ -591,6 +591,8 @@ and the 95% interval of that number. Slides: executive summary, close-only vs
 pre-traded, close-only reversion, pre-traded start vs finish, by side, by size,
 what we will change, then appendix.
 
+Charts come from `charts_deck/`, which `moc_tca.py` writes beside `charts/`: the same figures with no title, no footnotes and larger type, Buy|Sell panels side by side. The deck prints each title above its chart and the footnotes once along the bottom of the slide. `charts/` keeps the full versions for reading on their own.
+
 It also writes `<deck>.evidence.md` (each bullet with the rows behind it,
 checked against the saved deck) and runs the skill's plain-language check on
 the wording.
