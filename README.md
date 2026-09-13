@@ -575,3 +575,22 @@ Close-only includes India's 17:30-17:45 orders (counted as close). India cannot
 be pre-traded. The run log's `H1 NARRATIVE` block prints the summary, the
 weakest markets and the widest Buy/Sell gaps, each marked "holds" only when its
 95% interval stays on one side of zero.
+
+## The H1 client deck
+
+```bash
+python moc_tca.py --data orders.csv --out output_h1
+python build_h1_deck.py --results output_h1 --cover
+```
+
+`build_h1_deck.py` builds the deck in the shape of the Q1 one from a run's
+`tables.xlsx` and `charts/`, and nothing else. No figure is typed into the
+script: each number is looked up at build time, and every sentence that takes
+a side - beat or lagged, cost or gained, clear or not - is picked from the sign
+and the 95% interval of that number. Slides: executive summary, close-only vs
+pre-traded, close-only reversion, pre-traded start vs finish, by side, by size,
+what we will change, then appendix.
+
+It also writes `<deck>.evidence.md` (each bullet with the rows behind it,
+checked against the saved deck) and runs the skill's plain-language check on
+the wording.
