@@ -82,6 +82,21 @@ AUCTION_ONLY_MIN_PCT = 99.5
 # against the execution price instead, and it will be differenced again.
 NEXTOPEN_IS_VS_CLOSE = True
 
+# Performance charts are drawn in SPREADS: a group's notional-weighted result
+# divided by its notional-weighted spread, with that spread printed under the
+# bar as [x bps]. Basis points do not compare across markets - a wide name
+# costs more of them whatever the algo does - and a client shown eleven
+# markets side by side will compare them. Set "bps" to go back; every spread
+# table carries the bps figures beside the spreads.
+CHART_UNIT = "spreads"
+
+# By-side charts split Buy against Sell. A short sell is a sell here; the
+# 33_by_side table still separates it.
+BUY_SELL_ORDER = ["Buy", "Sell"]
+
+# The Q1 summary quoted the share of notional under this %ADV.
+SUMMARY_ADV_CUT = 2.0
+
 # Which strategies the MISS TAXONOMY applies to. A VWAP order was never meant
 # to reach the auction, so calling its low %CLOSE an unexplained miss would be
 # nonsense. Clearance, capacity, cohorts and the first-execution tables run on
@@ -851,6 +866,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["side_label"] = np.where(
             df["is_buy"], "Buy",
             np.where(df["is_short"], "Short sell", "Sell"))
+        df["buy_sell"] = np.where(df["is_buy"], "Buy", "Sell")
 
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
     df["close_regime"] = close_regime(df["market"], df.get("date"))
@@ -2317,6 +2333,190 @@ def t_early_start_waste(df: pd.DataFrame) -> pd.DataFrame:
 # IMPACT AND VENUE CHOICE
 # ===========================================================================
 
+def t_in_spreads(df: pd.DataFrame, by, value: str, weight: str = "notional",
+                 order=None, ci: bool = True) -> pd.DataFrame:
+    """A result in bps AND in spreads, per group, with a CI on each.
+
+    Spreads are the ratio of two weighted averages - the group's result over
+    the group's spread - never the average of per-order ratios. One name with
+    a 0.5bp spread would otherwise produce a ratio in the hundreds, and the
+    group mean would report that one name. Both averages run over the SAME
+    orders (a result and a positive spread) with the SAME weights, so
+    spreads x [spread bps] = bps holds on every row: the bracket on a chart
+    is the number to multiply by, and a sales trader can do it on the call.
+
+    The CI resamples orders and recomputes the ratio, so it carries the
+    uncertainty in the spread as well as in the result.
+    """
+    keys = [by] if isinstance(by, str) else list(by)
+    need = [value, "spread_bps", "notional"] + keys
+    if df is None or df.empty or any(c not in df.columns for c in need):
+        return pd.DataFrame()
+    wcol = "notional" if weight == "notional" else weight_column(df, weight)
+    rows = []
+    for key, g in df.groupby(keys, dropna=False, observed=True):
+        key = key if isinstance(key, tuple) else (key,)
+        v = pd.to_numeric(g[value], errors="coerce").to_numpy(float)
+        sp = pd.to_numeric(g["spread_bps"], errors="coerce").to_numpy(float)
+        w = pd.to_numeric(g[wcol], errors="coerce").to_numpy(float)
+        ok = ~np.isnan(v) & ~np.isnan(sp) & (sp > 0) & ~np.isnan(w) & (w > 0)
+        n = int(ok.sum())
+        if n == 0:
+            continue
+        vv, ss, ww = winsorize(v[ok]), winsorize(sp[ok]), w[ok]
+        bps = float(np.sum(vv * ww) / np.sum(ww))
+        sprd = float(np.sum(ss * ww) / np.sum(ww))
+        lo = hi = lo_b = hi_b = np.nan
+        if ci and n >= MIN_N_FOR_CI:
+            rng = np.random.default_rng(SEED)
+            ratio, level = [], []
+            # In chunks. A 12,000-order market times 2,000 draws is a
+            # 24-million-cell index, three arrays deep, if done in one go.
+            step = max(1, min(BOOTSTRAP_N, 4_000_000 // n))
+            done = 0
+            while done < BOOTSTRAP_N:
+                k = min(step, BOOTSTRAP_N - done)
+                idx = rng.integers(0, n, size=(k, n))
+                wb = ww[idx]
+                num = (vv[idx] * wb).sum(axis=1)
+                ratio.append(num / (ss[idx] * wb).sum(axis=1))
+                level.append(num / wb.sum(axis=1))
+                done += k
+            lo, hi = np.percentile(np.concatenate(ratio), [2.5, 97.5])
+            lo_b, hi_b = np.percentile(np.concatenate(level), [2.5, 97.5])
+        row = dict(zip(keys, key))
+        row.update({
+            "orders": n,
+            "notional (" + CURRENCY + "m)":
+                float(g["notional"].to_numpy(float)[ok].sum()) / 1e6,
+            "spread bps (wtd)": sprd,
+            "wtd mean bps": bps,
+            "CI low bps": lo_b,
+            "CI high bps": hi_b,
+            "spreads": bps / sprd if sprd > 0 else np.nan,
+            "CI low": lo,
+            "CI high": hi,
+            "saved (" + CURRENCY + "k)": to_money_k(bps, float(ww.sum()) / 1e6),
+            "hit rate % (per order)": hit_rate(v[ok]),
+            "small sample": n < MIN_N_FOR_CI,
+        })
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows).set_index(keys if len(keys) > 1 else keys[0])
+    if order and len(keys) == 1:
+        keep = [o for o in order if o in out.index]
+        rest = [i for i in out.index if i not in set(order)]
+        out = out.loc[keep + rest]
+    return out.round(3)
+
+
+def _flag(df: pd.DataFrame, col: str) -> pd.Series:
+    """A True/False column that may hold gaps, as a clean mask."""
+    if col not in df:
+        return pd.Series(False, index=df.index)
+    return df[col].fillna(False).astype(bool)
+
+
+def t_flow_split(df: pd.DataFrame) -> pd.DataFrame:
+    """Close-only against pre-traded: how much of each, and how each filled.
+
+    Shares are of the two together - the orders that reached the close - so
+    they add to 100, the way the Q1 slide did. An order that never printed in
+    the close is in neither.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    pops = [("Close-only", df[_flag(df, "close_only")]),
+            ("Pre-traded", df[_flag(df, "pretraded")])]
+    base = sum(float(p["notional"].sum()) for _, p in pops)
+    rows = []
+    for name, p in pops:
+        if p.empty:
+            continue
+        n = float(p["notional"].sum())
+        row = {"flow": name, "orders": len(p),
+               "notional (" + CURRENCY + "m)": n / 1e6,
+               "% of notional": 100 * n / base if base else np.nan}
+        if "fill_rate" in p:
+            row["fill ratio %"] = wmean(p["fill_rate"], p["notional"],
+                                        winsor=False)
+        if "adv_pct" in p:
+            row["%ADV (notional-weighted)"] = wmean(p["adv_pct"], p["notional"],
+                                                   winsor=False)
+            row["%ADV (median)"] = p["adv_pct"].median()
+        if "pct_close" in p:
+            row["% of notional in the close"] = wmean(
+                p["pct_close"], p["notional"], winsor=False)
+        if "spread_bps" in p:
+            row["spread bps (wtd)"] = wmean(p["spread_bps"], p["notional"])
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("flow").round(2) if rows else pd.DataFrame()
+
+
+def t_adv_profile(df: pd.DataFrame) -> pd.DataFrame:
+    """Orders and value by size against daily volume."""
+    if df is None or df.empty or "adv_bucket" not in df:
+        return pd.DataFrame()
+    ncol = "notional (" + CURRENCY + "m)"
+    g = df.groupby("adv_bucket", observed=True)
+    out = pd.DataFrame({"orders": g.size(), ncol: g["notional"].sum() / 1e6})
+    tot = float(df["notional"].sum())
+    out["% of orders"] = 100 * out["orders"] / max(len(df), 1)
+    out["% of notional"] = (100 * out[ncol] * 1e6 / tot) if tot else np.nan
+    return out.round(2)
+
+
+def t_exec_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """The Q1 executive summary, recomputed for this window.
+
+    The same facts the Q1 deck opened on - where the value went, how small
+    the orders were against volume, fill, spread, and the close-only against
+    pre-traded split - so the two reviews read side by side.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    rows = []
+
+    def add(section, metric, value, unit=""):
+        rows.append({"section": section, "metric": metric,
+                     "value": value, "unit": unit})
+
+    tot = float(df["notional"].sum())
+    add("Book", "orders", len(df))
+    add("Book", "executed notional", tot / 1e6, CURRENCY + "m")
+    if "market" in df and tot > 0:
+        by_mkt = drop_unattributable(
+            df.groupby("market", observed=True)["notional"].sum()
+              .sort_values(ascending=False).to_frame())["notional"]
+        if len(by_mkt):
+            top = by_mkt.head(5)
+            add("Book", "top 5 markets, share of notional",
+                100 * top.sum() / tot, "%")
+            add("Book", "top 5 markets", ", ".join(str(m) for m in top.index))
+            add("Book", "lead market", str(top.index[0]))
+            add("Book", "lead market, share of notional",
+                100 * top.iloc[0] / tot, "%")
+    if "adv_pct" in df:
+        known = df["adv_pct"].notna()
+        base = float(df.loc[known, "notional"].sum())
+        if base > 0:
+            under = known & (df["adv_pct"] < SUMMARY_ADV_CUT)
+            add("Book", f"share of notional under {SUMMARY_ADV_CUT:g}% ADV",
+                100 * float(df.loc[under, "notional"].sum()) / base, "%")
+    if "fill_rate" in df:
+        add("Book", "fill ratio",
+            wmean(df["fill_rate"], df["notional"], winsor=False),
+            "%, notional-weighted")
+    if "spread_bps" in df:
+        add("Book", "average spread", wmean(df["spread_bps"], df["notional"]),
+            "bps, notional-weighted")
+    for flow, r in t_flow_split(df).iterrows():
+        for col, val in r.items():
+            add(flow, col, val)
+    return pd.DataFrame(rows)
+
+
 def t_reversion(df: pd.DataFrame, by: str) -> pd.DataFrame:
     """NextOpen - Close: the side-adjusted move from the close to the open.
 
@@ -2512,8 +2712,7 @@ def _fmt_bps(v) -> str:
 def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps"):
     """Diverging bars standing up: categories along the bottom, value up.
 
-    The horizontal twin of this is _diverging_barh. Same colours, same
-    convention - blue above zero is a saving, red below it is a cost - and
+    Blue above zero is a saving, red below it is a cost - and
     the same rule that every bar carries its own number, so colour is never
     the only encoding.
     """
@@ -2560,93 +2759,6 @@ def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps"):
                 zorder=6,
                 bbox=dict(boxstyle="round,pad=0.16", facecolor=SURFACE,
                           edgecolor="none", alpha=0.85))
-
-
-def _diverging_barh(ax, labels, values, ci=None, small=None, unit="bps"):
-    """unit only changes how the value labels are formatted, never the data."""
-    """Horizontal diverging bars: blue = savings, red = cost, zero baseline.
-
-    Every bar carries its own number, so colour is never the only encoding.
-    """
-    y = np.arange(len(labels))
-    colors = [POS if (v is not None and not math.isnan(v) and v >= 0) else NEG
-              for v in values]
-    ax.barh(y, values, color=colors, height=0.6, zorder=3)
-    if ci is not None:
-        for i, (lo, hi) in enumerate(ci):
-            if lo is None or math.isnan(lo):
-                continue
-            ax.plot([lo, hi], [i, i], color=INK_SECOND, linewidth=1.4, zorder=4)
-            ax.plot([lo, lo], [i - .1, i + .1], color=INK_SECOND, lw=1.4, zorder=4)
-            ax.plot([hi, hi], [i - .1, i + .1], color=INK_SECOND, lw=1.4, zorder=4)
-    ax.axvline(0, color=BASELINE, linewidth=1.0, zorder=2)
-    ax.set_yticks(y)
-    ax.set_yticklabels([str(l) for l in labels])
-    # Bar height is in data units, so with one category it fills the axis.
-    # Widen the y-range instead of thinning the bar: the bar keeps the same
-    # weight it has on a chart with six of them.
-    pad = 0.5 if len(labels) == 1 else (0.25 if len(labels) == 2 else 0.1)
-    ax.set_ylim(-0.5 - pad, len(labels) - 0.5 + pad)
-    ax.invert_yaxis()
-    # The whiskers reach past the bar ends, so the axis has to allow for them
-    # and the label has to clear them. A CI line drawn through a value label
-    # hides the minus sign, and a cost of 73bps then reads as a saving of 73.
-    reach = [abs(v) for v in values if v is not None and not math.isnan(v)]
-    if ci is not None:
-        reach += [abs(b) for lo, hi in ci for b in (lo, hi)
-                  if b is not None and not math.isnan(b)]
-    span = max(reach or [1.0])
-    pad = span * 0.30
-    ax.set_xlim(-span - pad, span + pad)
-    for i, v in enumerate(values):
-        if v is None or math.isnan(v):
-            continue
-        edge = v
-        if ci is not None and i < len(ci):
-            lo, hi = ci[i]
-            if (lo is not None and hi is not None
-                    and not math.isnan(lo) and not math.isnan(hi)):
-                edge = max(v, hi) if v >= 0 else min(v, lo)
-        off = span * 0.03
-        label = f"{v:+.2f}" if unit == "spreads" else _fmt_bps(v)
-        ax.text(edge + (off if v >= 0 else -off), i, label,
-                va="center", ha="left" if v >= 0 else "right",
-                color=INK, fontsize=8.5, zorder=6,
-                bbox=dict(boxstyle="round,pad=0.16", facecolor=SURFACE,
-                          edgecolor="none", alpha=0.85))
-
-
-def chart_headline(t: pd.DataFrame, out: Path, value_label: str,
-                   name: str, title: str, vertical: bool = False,
-                   note: str = "") -> None:
-    if t.empty:
-        return
-    # A NaN category is a bucket of orders whose grouping value was missing -
-    # a cleared quote error, say. It is never a finding, and on a client slide
-    # a bar labelled "nan" is worse than one bar fewer.
-    t = t[[str(i).lower() not in ("nan", "none", "nat") for i in t.index]]
-    if t.empty:
-        return
-    fig, (ax,) = _fig((FIGSIZE[0], 5.4 if vertical else _rows_high(len(t))))
-    ci = list(zip(t["CI low"], t["CI high"])) if "CI low" in t else None
-    small = list(t["small sample"]) if "small sample" in t else None
-    draw = _diverging_barv if vertical else _diverging_barh
-    draw(ax, list(t.index), list(t["wtd mean bps"]), ci=ci, small=small)
-    if vertical:
-        _style(ax, ylabel=f"{value_label}, notional-weighted (bps)",
-               title=title)
-    else:
-        _style(ax, xlabel=f"{value_label}, notional-weighted (bps)",
-               title=title, horizontal=True)
-    # Anchored to the FIGURE. On a short panel an axes-relative offset is a
-    # small absolute distance and the note lands on the tick labels.
-    tail = ("whiskers are 95% bootstrap CIs; a CI crossing zero is not "
-            "distinguishable from zero")
-    if note:
-        tail = note + chr(10) + tail
-    fig.text(0.01, 0.01, tail, fontsize=7.5, color=INK_MUTED,
-             ha="left", va="bottom")
-    _save(fig, out, name, bottom=0.20 if note else 0.14)
 
 
 NON_CATEGORIES = {"nan", "none", "nat", ""}
@@ -2783,48 +2895,6 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     _save(fig, out, name)
 
 
-def chart_market_slippage(t: pd.DataFrame, out: Path,
-                          name: str = "14_market_slippage.png",
-                          value: str = "vs Arrival bps",
-                          title: str = None,
-                          vertical: bool = True) -> None:
-    """Cost by market, ordered by how much was traded there, not by cost.
-
-    Ordering by cost would put a 61-order market at the top of the slide.
-    Ordering by value keeps the reader looking at the markets that can move
-    the number, and each bar carries its own share so nobody has to guess.
-    """
-    if t.empty or value not in t:
-        return
-    d = drop_unattributable(t).head(12)
-    if d.empty:
-        return
-    fig, (ax,) = _fig((11.0, 6.0))
-    # Market names only. The share used to sit beside each one; it made the
-    # axis long and asked the reader to hold two numbers per bar. The bars
-    # are still ORDERED by value, and the note below says so, which is the
-    # part that actually changes how the chart should be read.
-    labels = [str(m) for m in d.index]
-    small = [bool(x) for x in d["small sample"]] if "small sample" in d else None
-    vals = [float(v) for v in d[value]]
-    draw = _diverging_barv if vertical else _diverging_barh
-    draw(ax, labels, vals, small=small)
-    if vertical:
-        _style(ax, ylabel=f"{value}, notional-weighted",
-               title=title or "Arrival slippage (IS) by market, "
-                              "biggest by value first")
-    else:
-        _style(ax, xlabel=f"{value}, notional-weighted",
-               title=title or "Arrival slippage (IS) by market, "
-                              "biggest by value first",
-               horizontal=True)
-    ax.text(0.0, -0.30 if vertical else -0.14,
-            "ordered by share of value traded, not by cost - a "
-            "small market with a big number is still a small market",
-            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
-    _save(fig, out, name)
-
-
 def chart_spread_relative(t: pd.DataFrame, out: Path,
                           name: str = "16_spread_relative.png",
                           value: str = "vs Close spreads") -> None:
@@ -2918,8 +2988,250 @@ def chart_algo_choice(t: pd.DataFrame, out: Path,
     _save(fig, out, name)
 
 
+SPREAD_NOTE = ("in spreads: the result divided by the average spread, which "
+               "is the [x bps] under each bar - multiply the two to get bps")
+CI_NOTE = ("whiskers are 95% bootstrap CIs; a CI crossing zero is not "
+           "distinguishable from zero")
+REV_NOTE = "negative means the price came back against us by the next open"
+CO_NOTE = ("close-only: 99.5% or more of the order printed in the auction, so "
+           "its close slippage is zero by design and reversion is the "
+           "measure. Negative means the price came back against us by the "
+           "next open.")
+PRE_NOTE = ("pre-traded: part of the order traded before the auction. Negative "
+            "reversion means the price came back against us by the next open.")
+
+
+def _spread_label(key, sprd, spreads: bool) -> str:
+    """The group name, with its spread underneath when the chart is in spreads."""
+    if spreads and sprd is not None and np.isfinite(sprd):
+        return str(key) + chr(10) + f"[{sprd:.1f} bps]"
+    return str(key)
+
+
+def _unit_cols(unit: str):
+    """The value column and its CI, in the unit the chart is drawn in."""
+    if unit == "spreads":
+        return "spreads", "CI low", "CI high"
+    return "wtd mean bps", "CI low bps", "CI high bps"
+
+
+def _chartable(d: pd.DataFrame) -> pd.DataFrame:
+    """Rows a client chart can show: no Unknown market, no missing category."""
+    if d is None or d.empty:
+        return pd.DataFrame()
+    first = pd.Index(d.index.get_level_values(0))
+    text = first.astype(str).str.strip().str.lower()
+    gone = (np.asarray(first.isin(list(EXCLUDE_MARKETS_FROM_CHARTS)))
+            | np.asarray(text.isin(list(NON_CATEGORIES))))
+    return d[~gone]
+
+
+def _share_ylim(axes) -> None:
+    """One scale across panels, so bars in different panels compare by eye.
+
+    Each panel sized itself to its own bars; the widest one wins.
+    """
+    top = max(max(abs(a) for a in ax.get_ylim()) for ax in axes)
+    for ax in axes:
+        ax.set_ylim(-top, top)
+
+
+def _notes(fig, notes: list) -> float:
+    """Write the notes under a chart; returns the space they need."""
+    lines = [x for x in notes if x]
+    fig.text(0.01, 0.005, chr(10).join(lines), fontsize=7.5, color=INK_MUTED,
+             ha="left", va="bottom")
+    return 0.04 + 0.03 * len(lines)
+
+
+def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
+                  measure: str, note: str = "", by_notional: bool = False,
+                  limit: int = 12, unit: str = None) -> None:
+    """One result per group, with the group's spread under each bar."""
+    unit = unit or CHART_UNIT
+    d = _chartable(t)
+    if d.empty:
+        return
+    if by_notional:
+        d = d.sort_values("notional (" + CURRENCY + "m)", ascending=False)
+    d = d.head(limit)
+    spreads = unit == "spreads"
+    vcol, lo, hi = _unit_cols(unit)
+    labels = [_spread_label(k, float(sp), spreads)
+              for k, sp in zip(d.index, d["spread bps (wtd)"])]
+    fig, (ax,) = _fig((11.0, 6.0))
+    _diverging_barv(ax, labels, [float(v) for v in d[vcol]],
+                    ci=list(zip(d[lo].astype(float), d[hi].astype(float))),
+                    unit="spreads" if spreads else "bps")
+    _style(ax, ylabel=measure + (", in spreads" if spreads
+                                 else ", bps, notional-weighted"),
+           title=title)
+    room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
+    _save(fig, out, name, bottom=room)
+
+
+def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
+                          measure: str, note: str = "", limit: int = 12,
+                          unit: str = None) -> None:
+    """Markets along the bottom, a Buy panel over a Sell panel, one scale.
+
+    Two panels rather than paired bars in one: colour already means saving
+    against cost on these charts, so it cannot also mean Buy against Sell.
+    Markets run in the same order in both, biggest by value first.
+    """
+    unit = unit or CHART_UNIT
+    d = _chartable(t)
+    if d.empty or d.index.nlevels < 2:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    markets = (d.groupby(level=0, observed=True)[ncol].sum()
+                 .sort_values(ascending=False).head(limit).index.tolist())
+    present = set(d.index.get_level_values(1))
+    sides = [x for x in BUY_SELL_ORDER if x in present]
+    if not markets or not sides:
+        return
+    spreads = unit == "spreads"
+    vcol, lo, hi = _unit_cols(unit)
+    fig, axes = plt.subplots(len(sides), 1, dpi=DPI,
+                             figsize=(11.0, 4.7 * len(sides)))
+    axes = np.atleast_1d(axes)
+    fig.patch.set_facecolor(SURFACE)
+    nan = float("nan")
+    for ax, side in zip(axes, sides):
+        ax.set_facecolor(SURFACE)
+        labels, vals, ci = [], [], []
+        for m in markets:
+            if (m, side) in d.index:
+                r = d.loc[(m, side)]
+                labels.append(_spread_label(m, float(r["spread bps (wtd)"]),
+                                            spreads))
+                vals.append(float(r[vcol]))
+                ci.append((float(r[lo]), float(r[hi])))
+            else:
+                labels.append(str(m) + chr(10) + "no orders")
+                vals.append(nan)
+                ci.append((nan, nan))
+        _diverging_barv(ax, labels, vals, ci=ci,
+                        unit="spreads" if spreads else "bps")
+        _style(ax, ylabel=measure + (", in spreads" if spreads else ", bps"),
+               title=f"{title}: {side}")
+    _share_ylim(axes)
+    room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
+    _save(fig, out, name, bottom=room / len(sides))
+
+
+def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
+                           note: str = "", all_label: str = "All",
+                           unit: str = None) -> None:
+    """Several measures on one population: an All panel, then Buy, then Sell.
+
+    specs is [(measure label, table indexed All / Buy / Sell), ...]. Each bar
+    carries its own spread because the measures are not weighted alike -
+    first execution is weighted by the part of the order that traded before
+    the auction - so they do not share one denominator.
+    """
+    unit = unit or CHART_UNIT
+    spreads = unit == "spreads"
+    vcol, lo, hi = _unit_cols(unit)
+    panels = [p for p in ["All"] + BUY_SELL_ORDER
+              if any(tb is not None and not tb.empty and p in tb.index
+                     for _, tb in specs)]
+    if not panels:
+        return
+    fig, axes = _fig((12.5, 5.6), ncols=len(panels))
+    nan = float("nan")
+    for i, (ax, p) in enumerate(zip(axes, panels)):
+        labels, vals, ci = [], [], []
+        for label, tb in specs:
+            if tb is None or tb.empty or p not in tb.index:
+                labels.append(label)
+                vals.append(nan)
+                ci.append((nan, nan))
+                continue
+            r = tb.loc[p]
+            labels.append(_spread_label(label, float(r["spread bps (wtd)"]),
+                                        spreads))
+            vals.append(float(r[vcol]))
+            ci.append((float(r[lo]), float(r[hi])))
+        _diverging_barv(ax, labels, vals, ci=ci,
+                        unit="spreads" if spreads else "bps")
+        head = all_label if p == "All" else p
+        _style(ax, ylabel=("in spreads" if spreads else "bps") if i == 0 else "",
+               title=(title + chr(10) + head) if i == 0 else chr(10) + head)
+    _share_ylim(axes)
+    room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
+    _save(fig, out, name, bottom=room)
+
+
+def chart_flow_split(t: pd.DataFrame, out: Path,
+                     name: str = "23_flow_split.png") -> None:
+    """Close-only against pre-traded: the value in each and how it filled."""
+    if t is None or t.empty:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    vals = [float(v) for v in t[ncol]]
+    x = np.arange(len(vals))
+    fig, (ax,) = _fig((9.0, 5.2))
+    ax.bar(x, vals, width=0.55, color=SERIES[:len(vals)], zorder=3)
+    top = max(vals or [1.0]) or 1.0
+    ax.set_ylim(0, top * 1.25)
+    ticks = []
+    for i, (flow, r) in enumerate(t.iterrows()):
+        ax.text(i, vals[i] + top * 0.02,
+                f"{vals[i]:,.0f}m  ({r['% of notional']:.0f}%)",
+                ha="center", va="bottom", fontsize=10, color=INK, zorder=5)
+        bits = [str(flow), f"{int(r['orders']):,} orders"]
+        if "fill ratio %" in t.columns:
+            bits.append(f"fill {r['fill ratio %']:.1f}%")
+        if "%ADV (notional-weighted)" in t.columns:
+            bits.append(f"{r['%ADV (notional-weighted)']:.2f}% ADV")
+        if "% of notional in the close" in t.columns:
+            bits.append(f"{r['% of notional in the close']:.0f}% of it in the close")
+        ticks.append(chr(10).join(bits))
+    ax.set_xticks(x)
+    ax.set_xticklabels(ticks)
+    _style(ax, ylabel=f"executed notional ({CURRENCY}m)",
+           title="Close-only and pre-traded flow")
+    room = _notes(fig, ["close-only: 99.5% or more of the order printed in the "
+                        "auction. Pre-traded: part of it traded before. "
+                        "Shares are of the two together; %ADV is "
+                        "notional-weighted."])
+    _save(fig, out, name, bottom=room)
+
+
+def chart_adv_profile(t: pd.DataFrame, out: Path, name: str, title: str,
+                      with_orders: bool = False) -> None:
+    """How big the orders were against daily volume: value, and count."""
+    if t is None or t.empty:
+        return
+    d = t[[str(i).strip().lower() not in NON_CATEGORIES for i in t.index]]
+    if d.empty:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    panels = ([("orders", "orders", "% of orders", "{:,.0f}")]
+              if with_orders else [])
+    panels.append((ncol, f"executed notional ({CURRENCY}m)", "% of notional",
+                   "{:,.0f}m"))
+    fig, axes = _fig((11.0 if with_orders else 9.0, 5.0), ncols=len(panels))
+    for i, (ax, (col, ylabel, share, fmt)) in enumerate(zip(axes, panels)):
+        vals = [float(v) for v in d[col]]
+        x = np.arange(len(vals))
+        ax.bar(x, vals, width=0.62, color=SERIES[0], zorder=3)
+        top = max(vals or [1.0]) or 1.0
+        ax.set_ylim(0, top * 1.3)
+        for j, (v, sh) in enumerate(zip(vals, d[share])):
+            ax.text(j, v + top * 0.02, fmt.format(v) + chr(10) + f"({sh:.0f}%)",
+                    ha="center", va="bottom", fontsize=8.5, color=INK, zorder=5)
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(k) for k in d.index])
+        _style(ax, xlabel="order size, % of daily volume", ylabel=ylabel,
+               title=title if i == 0 else "")
+    _save(fig, out, name)
+
+
 def chart_monthly(df: pd.DataFrame, out: Path,
-                  name: str = "12_monthly.png", subtitle: str = "") -> None:
+                  name: str = "12_monthly.png", subtitle: str = "",
+                  unit: str = None) -> None:
     """Close performance, month by month.
 
     One panel. The auction-share line that used to sit beside it came off at
@@ -2928,36 +3240,48 @@ def chart_monthly(df: pd.DataFrame, out: Path,
     month-by-month view is good at: did the result hold up across the
     period, or does it rest on one month.
     """
+    unit = unit or CHART_UNIT
     if "month" not in df or df.empty or "slip_close" not in df:
         return
-    g = df.groupby("month", observed=True)
-    months = list(g.groups.keys())
+    months = sorted(df["month"].dropna().astype(str).unique())
     if len(months) < 2:
         return
-    # Month labels are plain. The partial-month marking was dropped at the
-    # desk's request - it is still in the 30_monthly table, where an analyst
-    # reads it, rather than on a slide a client reads.
-    labels = [str(m) for m in months]
-    fig, (ax,) = _fig((11.0, 5.4))
-    sc = [wmean(x["slip_close"], x["notional"]) for _, x in g]
-    colors = [POS if v >= 0 else NEG for v in sc]
+    spreads = unit == "spreads"
+    if spreads:
+        tb = t_in_spreads(df.assign(month=df["month"].astype(str)), "month",
+                          "slip_close", ci=False)
+        if tb.empty:
+            return
+        tb = tb.reindex(months)
+        sc = [float(v) for v in tb["spreads"]]
+        labels = [_spread_label(m, float(sp), True)
+                  for m, sp in zip(months, tb["spread bps (wtd)"])]
+    else:
+        g = df.groupby(df["month"].astype(str))
+        sc = [wmean(g.get_group(m)["slip_close"], g.get_group(m)["notional"])
+              for m in months]
+        labels = list(months)
+    fig, (ax,) = _fig((11.0, 5.6))
+    colors = [POS if (np.isfinite(v) and v >= 0) else NEG for v in sc]
     ax.bar(range(len(months)), sc, color=colors, width=0.62, zorder=3)
     ax.axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
-    reach = [abs(v) for v in sc if v is not None and not math.isnan(v)]
+    reach = [abs(v) for v in sc if np.isfinite(v)]
     span = max(reach or [1.0])
     ax.set_ylim(-span * 1.32, span * 1.32)
     for i, v in enumerate(sc):
-        if v is None or math.isnan(v):
+        if not np.isfinite(v):
             continue
-        ax.text(i, v + (span * 0.04 if v >= 0 else -span * 0.04), _fmt_bps(v),
+        ax.text(i, v + (span * 0.04 if v >= 0 else -span * 0.04),
+                f"{v:+.2f}" if spreads else _fmt_bps(v),
                 ha="center", va="bottom" if v >= 0 else "top", fontsize=8.5,
                 color=INK, zorder=5)
     ax.set_xticks(range(len(months)))
     ax.set_xticklabels(labels, rotation=30, ha="right")
-    _style(ax, ylabel="vs Close, bps",
+    _style(ax, ylabel="vs Close, " + ("in spreads" if spreads else "bps"),
            title="Close performance by month"
-                 + (f" — {subtitle}" if subtitle else ""))
-    _save(fig, out, name)
+                 + (f" \u2014 {subtitle}" if subtitle else ""))
+    room = _notes(fig, [SPREAD_NOTE if spreads else ""]) if spreads else 0.0
+    _save(fig, out, name, bottom=room)
 
 
 # ===========================================================================
@@ -3239,6 +3563,61 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     if not noauc.empty:
         t["31_no_auction_markets"] = t_venue_mix(noauc, "market")
         t["32_close_regimes"] = t_venue_mix(all_df, "close_regime")
+    # --- the H1 narrative: close-only against pre-traded ---------------------
+    # Close-only takes the auction markets plus India's 17:30-17:45 orders,
+    # which the desk counts as close. India cannot be pre-traded - outside
+    # that window its close share is zero - and after the CAS date its
+    # segment is unknown, so pre-traded is the auction markets alone.
+    reach = df["has_auction"] | _flag(df, "pct_close_imputed")
+    co = df[reach & _flag(df, "close_only")]
+    pre = df[df["has_auction"] & _flag(df, "pretraded")]
+    FE, CW = "first_exec_vs_close", "cont_notional"
+    t["50_exec_summary"] = t_exec_summary(df[reach])
+    t["51_flow_split"] = t_flow_split(df[reach])
+    t["52_adv_profile"] = t_adv_profile(df)
+    t["53_pre_adv_profile"] = t_adv_profile(pre)
+    # Every performance chart reads one of these. "co" is close-only and
+    # "pre" is pre-traded; sprdq is the spread quartile.
+    t["60_arrival_mkt_spreads"] = t_in_spreads(df, "market", "slip_arrival")
+    t["61_close_mkt_spreads"] = t_in_spreads(df, "market", "slip_close")
+    t["62_arrival_adv_spreads"] = t_in_spreads(auc, "adv_bucket", "slip_arrival")
+    t["63_close_adv_spreads"] = t_in_spreads(auc, "adv_bucket", "slip_close")
+    if "spread_bucket" in auc:
+        t["64_arrival_sprdq_spreads"] = t_in_spreads(auc, "spread_bucket",
+                                                     "slip_arrival")
+        t["65_close_sprdq_spreads"] = t_in_spreads(auc, "spread_bucket",
+                                                   "slip_close")
+    t["66_pre_firstexec_adv_spreads"] = t_in_spreads(pre, "adv_bucket", FE, CW)
+    if "spread_bucket" in pre:
+        t["67_pre_firstexec_sprdq_spreads"] = t_in_spreads(
+            pre, "spread_bucket", FE, CW)
+    t["68_pre_firstexec_mkt_spreads"] = t_in_spreads(pre, "market", FE, CW)
+    t["69_reversion_strat_spreads"] = t_in_spreads(df, "strategy",
+                                                   "reversion_bps")
+    t["70_pre_reversion_mkt_spreads"] = t_in_spreads(pre, "market",
+                                                     "reversion_bps")
+    t["71_co_reversion_mkt_spreads"] = t_in_spreads(co, "market",
+                                                    "reversion_bps")
+    t["71b_co_reversion_side_spr"] = pd.concat([
+        t_in_spreads(co.assign(buy_sell="All"), "buy_sell", "reversion_bps"),
+        t_in_spreads(co, "buy_sell", "reversion_bps", order=BUY_SELL_ORDER)])
+    t["72_co_reversion_mkt_side_spr"] = t_in_spreads(
+        co, ["market", "buy_sell"], "reversion_bps")
+    for key, value, w in [("73a_pre_firstexec_side_spr", FE, CW),
+                          ("73b_pre_close_side_spr", "slip_close", "notional"),
+                          ("73c_pre_reversion_side_spr", "reversion_bps",
+                           "notional")]:
+        t[key] = pd.concat([
+            t_in_spreads(pre.assign(buy_sell="All"), "buy_sell", value, w),
+            t_in_spreads(pre, "buy_sell", value, w, order=BUY_SELL_ORDER)])
+    t["74_pre_firstexec_mkt_side_spr"] = t_in_spreads(
+        pre, ["market", "buy_sell"], FE, CW)
+    t["75_pre_close_mkt_side_spr"] = t_in_spreads(
+        pre, ["market", "buy_sell"], "slip_close")
+    t["76_pre_reversion_mkt_side_spr"] = t_in_spreads(
+        pre, ["market", "buy_sell"], "reversion_bps")
+    t["77_pre_close_mkt_spreads"] = t_in_spreads(pre, "market", "slip_close")
+
     t["_close_df"] = df
     t["_auction_df"] = auc
     return t
@@ -3520,87 +3899,50 @@ def build_charts(t: dict, out_dir: Path) -> None:
     close_df = t.get("_close_df")
     if close_df is not None:
         chart_market_notional(close_df, charts)
-    chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts)
-    # The same by-market view against the CLOSE. A single summary bar says the
-    # least of any chart in the deck; per market it shows where the result
-    # comes from and whether it rests on one place.
-    chart_market_slippage(t.get("34_market_profile", pd.DataFrame()), charts,
-                          name="15_market_vs_close.png", value="vs Close bps",
-                          title="Against the closing price, by market")
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
 
-    rev_note = ("orders that printed in the close only; negative means the "
-                "price came back against us the next morning")
-    chart_headline(t.get("44_reversion_pretraded", pd.DataFrame()), charts,
-                   "next open vs close", "21_reversion_pretraded.png",
-                   "Reversion by market - orders that traded before the close",
-                   vertical=True,
-                   note="these orders worked in continuous before the "
-                        "auction, so they had a chance to move the price. "
-                        + rev_note)
-    chart_headline(t.get("45_reversion_close_only", pd.DataFrame()), charts,
-                   "next open vs close", "22_reversion_close_only.png",
-                   "Reversion by market - orders that only traded in the close",
-                   vertical=True,
-                   note="these orders never worked before the auction, so any "
-                        "move here is the market's, not ours. " + rev_note)
-
-    # Close performance and the early start, each by size and by spread.
-    # Vertical, to match the by-market charts.
-    for key, name, label, title in [
-        ("41_close_by_adv", "17_close_by_adv.png", "vs Close",
-         "Close performance by order size"),
-        ("42_close_by_spread", "18_close_by_spread.png", "vs Close",
-         "Close performance by spread quartile"),
+    # Every performance chart below reads a spread table (60-77), so the
+    # figure on the chart and the figure in the workbook are the same number.
+    E = pd.DataFrame()
+    chart_spreads(t.get("60_arrival_mkt_spreads", E), charts,
+                  "14_market_slippage.png",
+                  "Arrival slippage (IS) by market, biggest by value first",
+                  "vs Arrival (IS)", by_notional=True,
+                  note="ordered by value traded, not by result - a small "
+                       "market with a big number is still a small market")
+    chart_spreads(t.get("61_close_mkt_spreads", E), charts,
+                  "15_market_vs_close.png",
+                  "Against the closing price, by market", "vs Close",
+                  by_notional=True)
+    for key, name, title, measure in [
+        ("63_close_adv_spreads", "17_close_by_adv.png",
+         "Close performance by order size", "vs Close"),
+        ("62_arrival_adv_spreads", "17b_arrival_by_adv.png",
+         "Arrival slippage (IS) by order size", "vs Arrival (IS)"),
+        ("65_close_sprdq_spreads", "18_close_by_spread.png",
+         "Close performance by spread quartile", "vs Close"),
+        ("64_arrival_sprdq_spreads", "18b_arrival_by_spread.png",
+         "Arrival slippage (IS) by spread quartile", "vs Arrival (IS)"),
     ]:
-        chart_headline(t.get(key, pd.DataFrame()), charts, label, name, title,
-                       vertical=True)
-    # The same two cuts against ARRIVAL. Each sits beside its close twin so
-    # the pair can be read together: the close chart is the auction print,
-    # the arrival chart is the whole order, and where they disagree the
-    # difference is what the order paid on the way to the auction.
+        chart_spreads(t.get(key, E), charts, name, title, measure)
     for key, name, title in [
-        ("28_by_adv", "17b_arrival_by_adv.png",
-         "Arrival slippage (IS) by order size"),
-        ("28b_by_spread", "18b_arrival_by_spread.png",
-         "Arrival slippage (IS) by spread quartile"),
-    ]:
-        chart_headline(t.get(key, pd.DataFrame()), charts, "vs Arrival (IS)",
-                       name, title, vertical=True)
-    for key, name, title in [
-        ("17_first_exec_by_adv", "19_first_exec_by_adv.png",
+        ("66_pre_firstexec_adv_spreads", "19_first_exec_by_adv.png",
          "First execution vs the close, by order size"),
-        ("43_first_exec_by_spread", "20_first_exec_by_spread.png",
+        ("67_pre_firstexec_sprdq_spreads", "20_first_exec_by_spread.png",
          "First execution vs the close, by spread quartile"),
     ]:
-        fe = t.get(key, pd.DataFrame())
-        if not fe.empty:
-            chart_headline(
-                fe.rename(columns={"first exec vs Close bps (wtd)":
-                                   "wtd mean bps"}),
-                charts, "first execution vs Close", name, title,
-                vertical=True, note=PRE_TRADED_NOTE)
-    # The same measure per market. Size says whether starting early was ever
-    # justified; market says where it actually goes wrong, which is the one
-    # the desk can act on.
-    fx = t.get("18_first_exec_by_market", pd.DataFrame())
-    if not fx.empty:
-        fx = drop_unattributable(fx.rename(
-            columns={"first exec vs Close bps (wtd)": "wtd mean bps"}))
-        ncol = "continuous notional (" + CURRENCY + "m)"
-        if ncol in fx.columns:
-            fx = fx.sort_values(ncol, ascending=False)
-        fx = fx.rename(columns={"wtd mean bps": "vs first-exec bps"})
-        fx["market"] = fx.index if "market" not in fx.columns else fx["market"]
-        chart_market_slippage(fx, charts, "10b_first_exec_market.png",
-                              value="vs first-exec bps",
-                              title="Was starting before the close right? "
-                                    "By market, orders that traded "
-                                    "before the close")
-    chart_headline(t.get("20_reversion_strategy", pd.DataFrame()), charts,
-                   "next open vs close", "11_reversion.png",
-                   "Reversion - did the auction print come back?")
+        chart_spreads(t.get(key, E), charts, name, title,
+                      "first execution vs Close", note=PRE_TRADED_NOTE)
+    chart_spreads(t.get("68_pre_firstexec_mkt_spreads", E), charts,
+                  "10b_first_exec_market.png",
+                  "Was starting before the close right? By market",
+                  "first execution vs Close", by_notional=True,
+                  note=PRE_TRADED_NOTE)
+    chart_spreads(t.get("69_reversion_strat_spreads", E), charts,
+                  "11_reversion.png",
+                  "Reversion - did the auction print come back?",
+                  "next open vs close", note=REV_NOTE)
     df = t.get("_close_df")
     if df is not None:
         # Two charts, because India's close share is imputed rather than
@@ -3613,6 +3955,58 @@ def build_charts(t: dict, out_dir: Path) -> None:
             chart_monthly(ind, charts, "12b_monthly_india.png", "India only")
         else:
             chart_monthly(df, charts)
+
+    # --- the H1 narrative -------------------------------------------------
+    # Opens the way Q1 did: where the flow went and how big it was.
+    chart_flow_split(t.get("51_flow_split", E), charts)
+    chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
+                      "Value traded by order size")
+
+    # Close-only. Its close slippage is zero by construction, so the question
+    # is whether the price held after the auction: reversion, by market, and
+    # by market and side.
+    chart_spreads(t.get("71_co_reversion_mkt_spreads", E), charts,
+                  "22_reversion_close_only.png",
+                  "Close-only orders: reversion by market",
+                  "next open vs close", by_notional=True, note=CO_NOTE)
+    chart_spreads_by_side(t.get("72_co_reversion_mkt_side_spr", E), charts,
+                          "25_close_only_reversion_market_side.png",
+                          "Close-only reversion", "next open vs close",
+                          note=CO_NOTE)
+
+    # Pre-traded. Three prices tell its story: where it started (first
+    # execution against the close), where it finished (against the close),
+    # and whether that held overnight (reversion).
+    chart_measures_by_side(
+        [("First execution vs close", t.get("73a_pre_firstexec_side_spr", E)),
+         ("Execution vs close", t.get("73b_pre_close_side_spr", E)),
+         ("Next open vs close", t.get("73c_pre_reversion_side_spr", E))],
+        charts, "26_pretraded_by_side.png",
+        "Pre-traded orders: start, finish and reversion",
+        note=PRE_NOTE, all_label="All pre-traded")
+    chart_spreads(t.get("77_pre_close_mkt_spreads", E), charts,
+                  "27_pretraded_close_market.png",
+                  "Pre-traded orders: against the closing price, by market",
+                  "vs Close", by_notional=True, note=PRE_NOTE)
+    chart_spreads(t.get("70_pre_reversion_mkt_spreads", E), charts,
+                  "21_reversion_pretraded.png",
+                  "Pre-traded orders: reversion by market",
+                  "next open vs close", by_notional=True, note=PRE_NOTE)
+    chart_spreads_by_side(t.get("74_pre_firstexec_mkt_side_spr", E), charts,
+                          "28_pretraded_first_exec_market_side.png",
+                          "Pre-traded, first execution vs close",
+                          "first execution vs Close", note=PRE_TRADED_NOTE)
+    chart_spreads_by_side(t.get("75_pre_close_mkt_side_spr", E), charts,
+                          "29_pretraded_close_market_side.png",
+                          "Pre-traded, execution vs close", "vs Close",
+                          note=PRE_NOTE)
+    chart_spreads_by_side(t.get("76_pre_reversion_mkt_side_spr", E), charts,
+                          "30_pretraded_reversion_market_side.png",
+                          "Pre-traded reversion", "next open vs close",
+                          note=PRE_NOTE)
+    chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
+                      "31_pretraded_adv_profile.png",
+                      "Pre-traded orders by size", with_orders=True)
 
     # Anything this run did not write is left over from an older version of
     # the analysis. A retired chart that stays in the folder looks exactly
@@ -3706,6 +4100,111 @@ def write_excel_unified(t: dict, out_dir: Path) -> None:
 # ===========================================================================
 # FINDINGS - what the numbers say, with the caveats attached
 # ===========================================================================
+
+def narrative(t: dict) -> None:
+    """The H1 story in the order the Q1 deck told it, with its numbers.
+
+    Written for whoever builds the slides. Every figure is in one of the
+    50-77 tables, and a result is marked "holds" only when its 95% interval
+    stays on one side of zero.
+    """
+    section("H1 NARRATIVE - CLOSE-ONLY AND PRE-TRADED")
+    E = pd.DataFrame()
+    ncol = "notional (" + CURRENCY + "m)"
+    es = t.get("50_exec_summary", E)
+    if es is None or es.empty:
+        log("  nothing to summarise.")
+        return
+
+    log("  Executive summary - the Q1 opening page, for this window:")
+    for _, r in es.iterrows():
+        val = r["value"]
+        if isinstance(val, (int, float, np.integer, np.floating)) \
+                and not isinstance(val, bool):
+            txt = f"{val:,.0f}" if float(val).is_integer() else f"{val:,.2f}"
+        else:
+            txt = str(val)
+        log(f"    {r['section']:<11} {r['metric']:<36} {txt} {r['unit']}".rstrip())
+
+    def verdict(r) -> str:
+        lo, hi = float(r.get("CI low", np.nan)), float(r.get("CI high", np.nan))
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            return "too few orders to call"
+        return "holds" if (hi < 0 or lo > 0) else "not distinguishable from zero"
+
+    def line(label, r) -> str:
+        return (f"    {str(label):<16}{r['spreads']:+6.2f} spreads  "
+                f"[{r['spread bps (wtd)']:.1f} bps] = {r['wtd mean bps']:+7.1f} bps  "
+                f"{int(r['orders']):>6,} orders  {CURRENCY} {r[ncol]:>8,.1f}m  "
+                f"{verdict(r)}")
+
+    def sides(key, title):
+        d = t.get(key, E)
+        if d is None or d.empty:
+            return
+        log(f"  {title}")
+        for k, r in d.iterrows():
+            log(line(k, r))
+
+    def weakest(key, title, k=3):
+        d = _chartable(t.get(key, E))
+        if d.empty:
+            return
+        d = d[~d["small sample"].astype(bool)].sort_values("spreads").head(k)
+        if d.empty:
+            return
+        log(f"  {title} - weakest markets (at least {MIN_N_FOR_CI} orders):")
+        for m, r in d.iterrows():
+            log(line(m, r))
+
+    def side_gaps(key, title, k=3):
+        d = _chartable(t.get(key, E))
+        if d.empty or d.index.nlevels < 2:
+            return
+        piv = d[~d["small sample"].astype(bool)]["spreads"].unstack(1)
+        if not {"Buy", "Sell"} <= set(piv.columns):
+            return
+        piv = piv.dropna(subset=["Buy", "Sell"])
+        if piv.empty:
+            return
+        gap = (piv["Buy"] - piv["Sell"]).abs().sort_values(ascending=False)
+        log(f"  {title} - widest gaps between Buy and Sell, in spreads:")
+        for m in gap.head(k).index:
+            log(f"    {str(m):<16}Buy {piv.loc[m, 'Buy']:+.2f}   "
+                f"Sell {piv.loc[m, 'Sell']:+.2f}")
+
+    log("")
+    log("  CLOSE-ONLY. The close slippage is zero by design, so the measure is")
+    log("  reversion: did the price hold after the auction, or come back?")
+    sides("71b_co_reversion_side_spr", "Reversion, all close-only and by side:")
+    weakest("71_co_reversion_mkt_spreads", "Reversion")
+    side_gaps("72_co_reversion_mkt_side_spr", "Reversion")
+
+    log("")
+    log("  PRE-TRADED. Three prices: where the order started (first execution")
+    log("  against the close), where it finished (execution against the close),")
+    log("  and whether that held overnight (reversion).")
+    sides("73a_pre_firstexec_side_spr", "First execution vs close, all and by side:")
+    sides("73b_pre_close_side_spr", "Execution vs close, all and by side:")
+    sides("73c_pre_reversion_side_spr", "Reversion, all and by side:")
+    weakest("68_pre_firstexec_mkt_spreads", "First execution vs close")
+    weakest("77_pre_close_mkt_spreads", "Execution vs close")
+    weakest("70_pre_reversion_mkt_spreads", "Reversion")
+    side_gaps("75_pre_close_mkt_side_spr", "Execution vs close")
+    side_gaps("76_pre_reversion_mkt_side_spr", "Reversion")
+
+    pa = t.get("53_pre_adv_profile", E)
+    if pa is not None and not pa.empty and "0-1%" in pa.index:
+        log("")
+        log(f"  Pre-traded size: {pa.loc['0-1%', '% of orders']:.0f}% of the "
+            f"orders and {pa.loc['0-1%', '% of notional']:.0f}% of the value "
+            "were under 1% ADV.")
+        log("  That was the Q1 case for moving small orders into the auction.")
+        log("  Check it against the execution-vs-close lines above first.")
+    log("")
+    log("  'holds' means the 95% interval stays on one side of zero. Anything")
+    log("  else is not a finding yet, however large the number looks.")
+
 
 def findings(t: dict) -> None:
     section("FINDINGS")
@@ -4101,6 +4600,22 @@ def self_test() -> int:
           if NEXTOPEN_IS_VS_CLOSE else
           np.allclose(df["reversion_bps"],
                       df["slip_nextopen"] - df["slip_close"]))
+    toy = pd.DataFrame({"g": ["a"] * 10, "v": [2.0] * 10,
+                        "spread_bps": [4.0] * 10, "notional": [1.0] * 10})
+    tt = t_in_spreads(toy, "g", "v")
+    check("2bps on a 4bps spread is half a spread, CI included",
+          not tt.empty and abs(tt["spreads"].iloc[0] - 0.5) < 1e-9
+          and abs(tt["CI low"].iloc[0] - 0.5) < 1e-9
+          and abs(tt["CI high"].iloc[0] - 0.5) < 1e-9, tt.to_dict())
+    if "spread_bps" in df:
+        st = t_in_spreads(df.assign(_g="all"), "_g", "slip_close", ci=False)
+        r = st.iloc[0] if not st.empty else None
+        check("spreads x [spread bps] = bps, to rounding",
+              r is not None and abs(r["spreads"] * r["spread bps (wtd)"]
+                                    - r["wtd mean bps"])
+              < 1e-3 * abs(r["spread bps (wtd)"]) + 1e-3,
+              None if r is None else (r["spreads"], r["spread bps (wtd)"],
+                                      r["wtd mean bps"]))
     check("decomposition is exact: waiting + execution = vs Arrival",
           np.allclose(df["wait_cost_bps"] + df["slip_close"], df["slip_arrival"]))
 
@@ -4295,6 +4810,7 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
             log("  " + line)
 
     findings(tables)
+    narrative(tables)
 
 
 def main(argv=None) -> int:

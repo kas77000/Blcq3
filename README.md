@@ -544,3 +544,34 @@ sub-3:1 contrast relief band, so those charts carry direct labels rather than
 relying on colour alone. The ordinal ramp is evenly spaced in OKLab at ΔL≈0.087.
 One axis per panel — two measures of different scale get two panels, never two
 y-scales.
+
+### In spreads, not bps
+
+`CHART_UNIT = "spreads"`. Every performance chart shows a group's
+notional-weighted result divided by its notional-weighted spread, with that
+spread under the bar as `[x bps]`. Multiply the two and you get the bps figure
+back, exactly: both averages run over the same orders with the same weights
+(`t_in_spreads`). The CI resamples orders and recomputes the ratio, so it
+carries the spread's uncertainty too. Set `"bps"` to go back; every `6x`/`7x`
+table carries both.
+
+### The H1 narrative (charts 21-31)
+
+Same opening as the Q1 deck, then the two populations taken separately:
+
+| Chart | What it answers |
+|---|---|
+| `23_flow_split` | close-only vs pre-traded: value, fill, %ADV, share in the close |
+| `24_adv_profile` | value by order size |
+| `22_reversion_close_only` | close-only reversion by market (its close slippage is 0 by design) |
+| `25_close_only_reversion_market_side` | the same, Buy panel over Sell panel |
+| `26_pretraded_by_side` | pre-traded: first exec vs close, exec vs close, reversion - All, Buy, Sell |
+| `27_pretraded_close_market` | pre-traded vs close, by market |
+| `21_reversion_pretraded` | pre-traded reversion, by market |
+| `28`/`29`/`30_pretraded_*_market_side` | first exec, close, reversion - by market and side |
+| `31_pretraded_adv_profile` | pre-traded orders and value by size |
+
+Close-only includes India's 17:30-17:45 orders (counted as close). India cannot
+be pre-traded. The run log's `H1 NARRATIVE` block prints the summary, the
+weakest markets and the widest Buy/Sell gaps, each marked "holds" only when its
+95% interval stays on one side of zero.
