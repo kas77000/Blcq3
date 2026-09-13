@@ -3578,13 +3578,9 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["53_pre_adv_profile"] = t_adv_profile(pre)
     # Every performance chart reads one of these. "co" is close-only and
     # "pre" is pre-traded; sprdq is the spread quartile.
-    t["60_arrival_mkt_spreads"] = t_in_spreads(df, "market", "slip_arrival")
     t["61_close_mkt_spreads"] = t_in_spreads(df, "market", "slip_close")
-    t["62_arrival_adv_spreads"] = t_in_spreads(auc, "adv_bucket", "slip_arrival")
     t["63_close_adv_spreads"] = t_in_spreads(auc, "adv_bucket", "slip_close")
     if "spread_bucket" in auc:
-        t["64_arrival_sprdq_spreads"] = t_in_spreads(auc, "spread_bucket",
-                                                     "slip_arrival")
         t["65_close_sprdq_spreads"] = t_in_spreads(auc, "spread_bucket",
                                                    "slip_close")
     t["66_pre_firstexec_adv_spreads"] = t_in_spreads(pre, "adv_bucket", FE, CW)
@@ -3902,28 +3898,22 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
 
-    # Every performance chart below reads a spread table (60-77), so the
+    # Every performance chart below reads a spread table (61-77), so the
     # figure on the chart and the figure in the workbook are the same number.
+    # The arrival charts (14, 17b, 18b) were retired at the desk's request;
+    # arrival stays in the bps tables and the findings.
     E = pd.DataFrame()
-    chart_spreads(t.get("60_arrival_mkt_spreads", E), charts,
-                  "14_market_slippage.png",
-                  "Arrival slippage (IS) by market, biggest by value first",
-                  "vs Arrival (IS)", by_notional=True,
-                  note="ordered by value traded, not by result - a small "
-                       "market with a big number is still a small market")
     chart_spreads(t.get("61_close_mkt_spreads", E), charts,
                   "15_market_vs_close.png",
                   "Against the closing price, by market", "vs Close",
-                  by_notional=True)
+                  by_notional=True,
+                  note="ordered by value traded, not by result - a small "
+                       "market with a big number is still a small market")
     for key, name, title, measure in [
         ("63_close_adv_spreads", "17_close_by_adv.png",
          "Close performance by order size", "vs Close"),
-        ("62_arrival_adv_spreads", "17b_arrival_by_adv.png",
-         "Arrival slippage (IS) by order size", "vs Arrival (IS)"),
         ("65_close_sprdq_spreads", "18_close_by_spread.png",
          "Close performance by spread quartile", "vs Close"),
-        ("64_arrival_sprdq_spreads", "18b_arrival_by_spread.png",
-         "Arrival slippage (IS) by spread quartile", "vs Arrival (IS)"),
     ]:
         chart_spreads(t.get(key, E), charts, name, title, measure)
     for key, name, title in [

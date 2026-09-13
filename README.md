@@ -486,8 +486,8 @@ Stated on every run, so the gaps are explicit rather than discovered late:
 value traded: orders, share of orders, notional, share of notional, the
 weighted spread, auction share, slippage against arrival, PVWAP and the close
 in both bps and spreads, fill rate and median size. Two charts come off it —
-`13_market_notional` for where the value went, `14_market_slippage` for what
-it cost.
+`13_market_notional` for where the value went, `15_market_vs_close` for how
+it did against the close.
 
 Both are **ordered by share of value, never by cost**. Ordering by cost puts a
 sixty-order market at the top of the slide, and each bar carries its own share
