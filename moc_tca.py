@@ -2683,6 +2683,10 @@ def t_close_pr_market(df: pd.DataFrame) -> pd.DataFrame:
             "market": m,
             "orders": int(ok.sum()),
             "notional (" + CURRENCY + "m)": float(g.loc[ok, "notional"].sum()) / 1e6,
+            # The chart shows the plain mean: each order counts once, so a
+            # few large orders cannot carry a market's bar. The weighted
+            # figure stays beside it for anyone who wants the value view.
+            "close PR % (mean)": float(v[ok].mean()),
             "close PR % (wtd)": wmean(v[ok], g.loc[ok, "notional"], winsor=False),
             "close PR % (median)": float(v[ok].median()),
             "close PR % (max)": float(v[ok].max()),
@@ -3455,7 +3459,7 @@ def chart_close_pr(tables: list, out: Path) -> None:
     One scale across the three, so a market's bar can be compared between
     them by eye. Magnitude, not saving or cost, so one hue.
     """
-    col = "close PR % (wtd)"
+    col = "close PR % (mean)"
     usable = [(t, name, title) for t, name, title in tables
               if t is not None and not t.empty and col in t]
     if not usable:
@@ -3476,11 +3480,12 @@ def chart_close_pr(tables: list, out: Path) -> None:
                     va="bottom", fontsize=8.5, color=INK, zorder=5)
         ax.set_xticks(x)
         ax.set_xticklabels([str(k) for k in d.index], rotation=30, ha="right")
-        _style(ax, ylabel="Close participation, notional weighted (%)",
+        _style(ax, ylabel="Close participation, mean per order (%)",
                title=title)
         room = _notes(fig, ["ClosePR: our executed quantity as a share of the "
-                            "closing auction's volume. Auction markets only; "
-                            "markets ordered by value traded."])
+                            "closing auction's volume, averaged per order, not "
+                            "weighted by value. Auction markets only; markets "
+                            "ordered by value traded."])
         _save(fig, out, name, bottom=room)
 
 

@@ -572,7 +572,7 @@ Same opening as the Q1 deck, then the two populations taken separately:
 | `32_pretraded_pvwap_market` | pre-traded vs PVWAP, by market |
 | `33_pretraded_pvwap_market_side` | pre-traded vs PVWAP, by market and side |
 | `31_pretraded_adv_profile` | pre-traded orders and value by ADV% |
-| `34`/`35`/`36_close_pr_*` | close participation (ClosePR), notional weighted, by market - all, close-only, pre-traded; auction markets only, one scale |
+| `34`/`35`/`36_close_pr_*` | close participation (ClosePR), simple mean per order, by market - all, close-only, pre-traded; auction markets only, one scale |
 
 Close-only includes India's 17:30-17:45 orders (counted as close). India cannot
 be pre-traded. The run log's `H1 NARRATIVE` block prints the summary, the
