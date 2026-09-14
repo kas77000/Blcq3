@@ -330,8 +330,8 @@ def story(run: Run, period: str) -> list[dict]:
     if allc is not None:
         way = "our way" if num(allc, "spreads") > 0 else "against us"
         tail = "" if holds(allc) else " Not a clear signal."
-        b.append(f"By the next open, prices moved {sp(num(allc, 'spreads'))} "
-                 f"spreads {way} on average.{tail}")
+        b.append(f"Overnight, prices moved {sp(num(allc, 'spreads'))} "
+                 f"spreads {way}.{tail}")
         src.append(cite("71b_co_reversion_side_spr", "All", allc))
     co_mkt = run.rows("71_co_reversion_mkt_spreads")
     bad_m = sorted([(k, r) for k, r in co_mkt if holds(r)
@@ -439,8 +439,16 @@ def story(run: Run, period: str) -> list[dict]:
         neg = sum(num(r, "spreads") < 0 for _, r in fe)
         b.append("First fills were worse than the close in every market."
                  if neg == len(fe) else
+                 "First fills beat the close in every market." if neg == 0 else
                  f"First fills were worse than the close in {neg} of "
                  f"{len(fe)} markets.")
+        gains = sorted([(k, r) for k, r in fe if holds(r)
+                        and num(r, "spreads") > 0 and not thin(r)],
+                       key=lambda kr: -num(kr[1], "spreads"))
+        if gains and neg < len(fe) / 2:
+            k, r = gains[0]
+            b.append(f"Starting early paid most in {k}: "
+                     f"{sp(num(r, 'spreads'))} spreads, {about_bps(r)}.")
         clear = sorted([(k, r) for k, r in fe if holds(r)
                         and num(r, "spreads") < 0 and not thin(r)],
                        key=lambda kr: num(kr[1], "spreads"))

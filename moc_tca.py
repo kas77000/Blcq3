@@ -292,6 +292,13 @@ CSV_KWARGS = {"encoding": "utf-8-sig"}
 # shouts on a mismatch; flip only if your export uses the opposite sign.
 POSITIVE_IS_SAVING = True
 SIDE_ALREADY_ADJUSTED = True
+
+# first_exec_vs_close arrives the OTHER way round from the slippage columns:
+# negative means the first fill beat the close. Confirmed on a real order -
+# a buy first filled at 87,300 against a close of 91,600 is in the export as
+# -480.81 (4,300 over the midpoint 89,450). It is negated on load so that,
+# like every other measure here, positive is a saving.
+FIRST_EXEC_POSITIVE_IS_COST = True
 BUY_VALUES = {"B", "BUY", "BOT", "1", "BUYS"}
 # Anything not in BUY_VALUES is labelled Sell, so a blank or an unexpected
 # code would silently become a sell order. SELL_VALUES exists to catch that:
@@ -861,6 +868,26 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
             df[f] = -df[f]
         if "first_exec_vs_close" in df:
             df["first_exec_vs_close"] = -df["first_exec_vs_close"]
+    if FIRST_EXEC_POSITIVE_IS_COST and "first_exec_vs_close" in df:
+        df["first_exec_vs_close"] = -df["first_exec_vs_close"]
+
+    # --- does first execution agree with the close result? -----------------
+    # On an order that traded before the auction, the first fill and the
+    # continuous part it belongs to move with the day's trend, so the two
+    # should mostly carry the same sign. If they mostly disagree, the column
+    # is the wrong way round - which is exactly how it was found.
+    if {"first_exec_vs_close", "slip_close", "pct_close"} <= set(df.columns):
+        fe = pd.to_numeric(df["first_exec_vs_close"], errors="coerce")
+        sc = pd.to_numeric(df["slip_close"], errors="coerce")
+        pre = (df["pct_close"] < 50) & fe.notna() & sc.notna()             & (fe.abs() > 5) & (sc.abs() > 5)
+        if pre.sum() >= 30:
+            agree = float((np.sign(fe[pre]) == np.sign(sc[pre])).mean())
+            log(f"  first execution and execution vs close share a sign on "
+                f"{100 * agree:.0f}% of {int(pre.sum()):,} mostly-continuous orders")
+            if agree < 0.5:
+                warn("first_exec_vs_close disagrees with vs Close on most orders -")
+                log("    its sign looks inverted. Check one order's first fill against")
+                log("    the close and set FIRST_EXEC_POSITIVE_IS_COST accordingly.")
 
     # --- identity ---------------------------------------------------------
     if "side" in df:
@@ -3566,6 +3593,8 @@ def make_sample(n: int = 2400, seed: int = SEED) -> pd.DataFrame:
     first_exec = np.round(np.where(miss > 0.02,
                                    cont_vs_close + rng.normal(0, 9, n),
                                    np.nan), 3)
+    if FIRST_EXEC_POSITIVE_IS_COST:
+        first_exec = -first_exec          # as the export writes it
 
     exec_shares = order_shares_k * 1000 * fr / 100.0
     notional_mln = np.round(exec_shares * price / 1e6, 4)
@@ -4840,6 +4869,11 @@ def self_test() -> int:
     check("same per-cell result, different mix: expected equals actual",
           abs(a_ - 5.0) < 1e-9 and abs(e_ - 5.0) < 1e-9 and abs(cov_ - 1) < 1e-9,
           (a_, e_, cov_))
+    fe_ok = df["first_exec_vs_close"].notna() & (df["pct_close"] < 50)
+    check("first execution loads as positive = saving, like vs Close",
+          np.corrcoef(df.loc[fe_ok, "first_exec_vs_close"],
+                      df.loc[fe_ok, "slip_close"])[0, 1] > 0.3
+          if fe_ok.sum() > 10 else True)
     check("decomposition is exact: waiting + execution = vs Arrival",
           np.allclose(df["wait_cost_bps"] + df["slip_close"], df["slip_arrival"]))
 
