@@ -626,3 +626,20 @@ line per test:
 Output in `focus_<market>/`: `focus.xlsx` (every test table), four charts, and
 `worst_orders.csv` - the orders that cost the most, for the desk to pull the
 child fills on. The drill-down narrows the cause; the tape confirms it.
+
+## Slippage checked against prices
+
+The sanity report rebuilds each slippage column from prices and compares it
+with the file, side-adjusted, positive = saving:
+
+| Column | Rebuilt as | Prices |
+|---|---|---|
+| `Close` | side x (close - average price) | `endprice`, `avgprice` |
+| `first_exec_vs_close` | side x (close - first execution price) | `endprice`, first price if the extract has one |
+| `NextOpen` | side x (next open - close) | `nxt_open`, `endprice` |
+
+Each is tried over the close, the order's own price and their midpoint, and
+reported as **matches**, **SIGN INVERTED** or **DOES NOT MATCH**, with the sign
+agreement and median gap. The close is `endprice` from the AWS extract —
+`PX_LAST` is not that day's close and is no longer used. A price in another
+currency than the close is detected and not compared.

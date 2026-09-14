@@ -252,7 +252,18 @@ COLUMNS = {
     # A limit and a close price, to ask whether the limit was ever going to
     # cross. market_limit says "Limit" on every order and explains nothing.
     "limit_price":   ["ordprice", "OrdPrice", "strike"],
-    "close_price":   ["PX_LAST", "PxLast", "LastEndTrade"],
+    # The day's closing price comes from the AWS extract's endprice. PX_LAST
+    # is NOT it - on a checked order it read 91,000 against a 14 May close
+    # of 91,600 - so it is no longer a fallback: a wrong close is worse than
+    # none, because every check built on it would pass or fail for nothing.
+    "close_price":   ["endprice", "EndPrice", "end_price"],
+    # T+1 opening price, to rebuild reversion from prices.
+    "next_open_price": ["nxt_open", "NxtOpen", "next_open_price"],
+    # Average executed price, local currency ($Mln is built from it).
+    "avg_price":     ["avgprice", "AvgPrice", "avg_px", "AvgPx"],
+    # First execution price, if the extract carries one under any of these.
+    "first_exec_price": ["first_exec_price", "firstExecPrice", "first_px",
+                         "firstPx", "fexec_price"],
     # capacity and behaviour
     "adv_pct":       ["%Adv", "% Adv", "PctAdv"],
     "adv":           ["Adv", "ADV"],
@@ -279,7 +290,8 @@ REQUIRED = ["strategy", "date", "symbol", "side", "notional", "order_shares",
 # because a missing one costs nothing.
 OPTIONAL = ["sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap",
             "first_start_time", "fill_close_size", "market_close_size",
-            "limit_price", "close_price"]
+            "limit_price", "close_price", "next_open_price", "avg_price",
+            "first_exec_price"]
 
 # The export writes a banner on row 1 and the real header on row 2 in some
 # formats. 0 = header on the first row.
@@ -795,7 +807,8 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
                "slip_nextopen", "slip_open",
                "sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap",
                "fill_close_size", "market_close_size",
-               "limit_price", "close_price"]
+               "limit_price", "close_price", "next_open_price", "avg_price",
+               "first_exec_price"]
     for logical in numeric:
         if logical in cols:
             df[logical] = _to_num(raw[cols[logical]])
@@ -1778,6 +1791,110 @@ def sanity_report(df: pd.DataFrame, cols: dict, raw_cols) -> None:
             if extra:
                 log("    {}: values outside the expected set, kept and "
                     "shown: {}".format(field, ", ".join(map(str, extra))))
+
+    verify_slippage(df)
+
+
+SLIPPAGE_SIGN_MIN = 0.80      # share of orders whose sign must agree
+SLIPPAGE_BPS_TOL = 5.0        # median |file - rebuilt| to call it a match
+
+
+def verify_slippage(df: pd.DataFrame, quiet: bool = False) -> pd.DataFrame:
+    """Rebuild the slippage columns from prices and compare with the file.
+
+    Side-adjusted, positive = saving, like the columns themselves:
+        vs Close          side x (close - avg price)
+        first exec        side x (close - first execution price)
+        close to T+1      side x (next open - close)
+    Each is tried over three denominators - the close, the order's own
+    price, and the midpoint of the two - because the export does not say
+    which it uses, and the one that matches is itself worth knowing. A
+    match needs the sign to agree on most orders AND the size to agree.
+    """
+    need = {"close_price", "is_buy"}
+    if not need <= set(df.columns):
+        if not quiet:
+            log("  slippage check: no endprice (or no side) - cannot rebuild "
+                "any slippage from prices.")
+        return pd.DataFrame()
+    side = np.where(df["is_buy"], 1.0, -1.0)
+    cls = pd.to_numeric(df["close_price"], errors="coerce")
+    checks = []
+    if "avg_price" in df and "slip_close" in df:
+        checks.append(("vs Close", "slip_close", "avg_price", cls, "avg"))
+    if "first_exec_price" in df and "first_exec_vs_close" in df:
+        checks.append(("first exec vs close", "first_exec_vs_close",
+                       "first_exec_price", cls, "first"))
+    if "next_open_price" in df and "slip_nextopen" in df:
+        checks.append(("close to T+1 (NextOpen)", "slip_nextopen",
+                       "next_open_price", cls, "open"))
+    rows = []
+    for label, col, pcol, close, kind in checks:
+        px = pd.to_numeric(df[pcol], errors="coerce")
+        file_bps = pd.to_numeric(df[col], errors="coerce")
+        ok = (close > 0) & (px > 0) & file_bps.notna() & \
+            (file_bps.abs() < MAX_ABS_BPS)
+        if ok.sum() < 5:
+            continue
+        ratio = float((px[ok] / close[ok]).median())
+        if not 0.5 < ratio < 2.0:
+            rows.append({"check": label, "orders": int(ok.sum()),
+                         "verdict": f"price is not in the close's currency "
+                                    f"(median ratio {ratio:.2f}) - not compared"})
+            continue
+        # the move, side-adjusted, positive = saving
+        if kind == "open":
+            move = (px - close) * side
+        else:
+            move = (close - px) * side
+        best = None
+        row = {"check": label, "column": col, "orders": int(ok.sum())}
+        for name, den in (("close", close), ("own price", px),
+                          ("midpoint", (close + px) / 2)):
+            rebuilt = 1e4 * move / den
+            diff = float((file_bps[ok] - rebuilt[ok]).abs().median())
+            agree = float((np.sign(file_bps[ok]) == np.sign(rebuilt[ok]))[
+                rebuilt[ok].abs() > 1].mean())
+            row[f"median |diff| bps, / {name}"] = round(diff, 2)
+            if best is None or diff < best[1]:
+                best = (name, diff, agree)
+        row["sign agrees %"] = round(100 * best[2], 1)
+        row["best denominator"] = best[0]
+        flipped = 1e4 * -move / ((close + px) / 2)
+        flip_diff = float((file_bps[ok] - flipped[ok]).abs().median())
+        if best[2] < SLIPPAGE_SIGN_MIN and flip_diff < best[1]:
+            row["verdict"] = ("SIGN INVERTED - the file is the other way round "
+                              "from positive = saving")
+        elif best[1] <= SLIPPAGE_BPS_TOL and best[2] >= SLIPPAGE_SIGN_MIN:
+            row["verdict"] = "matches the prices"
+        else:
+            row["verdict"] = ("DOES NOT MATCH - different price, benchmark or "
+                              "adjustment")
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if quiet:
+        return out
+    log("")
+    log("  slippage rebuilt from prices (endprice, nxt_open, avgprice)")
+    if out.empty:
+        missing = [c for c in ("avg_price", "first_exec_price",
+                               "next_open_price") if c not in df]
+        log("    nothing to compare - price columns not found: "
+            + ", ".join(missing))
+        return out
+    for _, r in out.iterrows():
+        log(f"    {r['check']:<26}{int(r['orders']):>8,} orders   {r['verdict']}")
+        if "best denominator" in r and isinstance(r.get("best denominator"), str):
+            diffs = "  ".join(f"{k.split('/ ')[1]} {r[k]:.1f}" for k in r.index
+                              if str(k).startswith("median |diff|"))
+            log(f"      sign agrees {r['sign agrees %']:.0f}%, median gap bps: "
+                f"{diffs}  (best: {r['best denominator']})")
+        if not str(r["verdict"]).startswith("matches"):
+            warn(f"{r['check']} does not agree with the prices - read the line above")
+    for c in ("avg_price", "first_exec_price", "next_open_price"):
+        if c not in df:
+            log(f"    {c} not found - that check did not run")
+    return out
 
 
 def strategy_profile(df: pd.DataFrame) -> pd.DataFrame:
@@ -4874,6 +4991,25 @@ def self_test() -> int:
           np.corrcoef(df.loc[fe_ok, "first_exec_vs_close"],
                       df.loc[fe_ok, "slip_close"])[0, 1] > 0.3
           if fe_ok.sum() > 10 else True)
+    px = pd.DataFrame({
+        "is_buy":           [True, True, False, False, True, False],
+        "close_price":      [100.0, 200.0, 50.0, 80.0, 10.0, 40.0],
+        "avg_price":        [99.0, 202.0, 51.0, 79.0, 9.9, 40.4],
+        "next_open_price":  [101.0, 198.0, 49.0, 81.0, 10.2, 39.0],
+        "first_exec_price": [98.0, 204.0, 52.0, 78.0, 9.8, 40.8]})
+    side = np.where(px["is_buy"], 1, -1)
+    px["slip_close"] = 1e4 * side * (px["close_price"] - px["avg_price"]) / px["close_price"]
+    px["first_exec_vs_close"] = 1e4 * side * (px["close_price"] - px["first_exec_price"]) / px["close_price"]
+    px["slip_nextopen"] = 1e4 * side * (px["next_open_price"] - px["close_price"]) / px["close_price"]
+    vr = verify_slippage(px, quiet=True)
+    check("slippage rebuilt from prices matches when it should",
+          len(vr) == 3 and (vr["verdict"] == "matches the prices").all(),
+          vr.get("verdict", pd.Series()).tolist())
+    px["first_exec_vs_close"] = -px["first_exec_vs_close"]
+    vr = verify_slippage(px, quiet=True)
+    check("an inverted column is called inverted",
+          vr.loc[vr["check"] == "first exec vs close", "verdict"]
+          .str.startswith("SIGN INVERTED").all(), vr["verdict"].tolist())
     check("decomposition is exact: waiting + execution = vs Arrival",
           np.allclose(df["wait_cost_bps"] + df["slip_close"], df["slip_arrival"]))
 
