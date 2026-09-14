@@ -3521,7 +3521,7 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
 
 
 def chart_adv_profile(t: pd.DataFrame, out: Path, name: str, title: str,
-                      with_orders: bool = False) -> None:
+                      with_orders: bool = False, color: str = None) -> None:
     """How big the orders were against daily volume: value, and count."""
     if t is None or t.empty:
         return
@@ -3537,7 +3537,7 @@ def chart_adv_profile(t: pd.DataFrame, out: Path, name: str, title: str,
     for i, (ax, (col, ylabel, share, fmt)) in enumerate(zip(axes, panels)):
         vals = [float(v) for v in d[col]]
         x = np.arange(len(vals))
-        ax.bar(x, vals, width=0.62, color=SERIES[0], zorder=3)
+        ax.bar(x, vals, width=0.62, color=color or SERIES[0], zorder=3)
         top = max(vals or [1.0]) or 1.0
         ax.set_ylim(0, top * 1.3)
         for j, (v, sh) in enumerate(zip(vals, d[share])):
@@ -4291,7 +4291,10 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # --- the H1 narrative -------------------------------------------------
     # Opens the way Q1 did: where the flow went and how big it was.
     chart_flow_split(t.get("51_flow_split", E), charts)
+    # Green, at the desk's request - it sits beside the blue-and-red value
+    # chart on the summary slide and should not read as a saving.
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
+                      color=SERIES[2], title=
                       "Value traded by ADV%")
 
     # Close-only. Its close slippage is zero by construction, so the question
