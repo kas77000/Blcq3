@@ -257,6 +257,9 @@ COLUMNS = {
     "adv_pct":       ["%Adv", "% Adv", "PctAdv"],
     "adv":           ["Adv", "ADV"],
     "pr_cont":       ["fPR_cont", "fPRcont", "PR_cont"],
+    # Participation in the closing auction: executed close quantity over the
+    # auction's volume. Read as a percentage; a fraction is caught below.
+    "close_pr":      ["ClosePR", "Close PR", "ClosePct PR", "close_pr"],
     "first_exec_vs_close": ["first_exec_vs_close", "firstexecvsclose",
                             "FirstExecVsClose"],
     "participation": ["PR"],
@@ -328,7 +331,7 @@ PCT_FIELDS_ARE_FRACTIONS = False
 # unsafe for one that never exceeds 1% legitimately - %COND could plausibly be
 # either. A column named here is scaled because it is known to need it.
 FRACTION_COLUMNS = {"pct_other", "pct_cond"}
-PCT_FIELDS = ["fill_rate", "adv_pct", "participation", "pr_cont",
+PCT_FIELDS = ["fill_rate", "adv_pct", "participation", "pr_cont", "close_pr",
               "pct_close", "pct_open", "pct_post", "pct_take", "pct_dark",
               "pct_other", "pct_cond"]
 
@@ -778,7 +781,8 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     # what happened to the spread-normalised columns: the log said "read from
     # the file" while the values were being derived behind it.
     numeric = ["notional", "order_shares", "fill_rate", "adv", "adv_pct",
-               "participation", "pr_cont", "spread_bps", "volatility",
+               "participation", "pr_cont", "close_pr", "spread_bps",
+               "volatility",
                "first_exec_vs_close"] + VENUE_FIELDS + [
                "slip_close", "slip_arrival", "slip_pvwap", "slip_vwap",
                "slip_nextopen", "slip_open",
@@ -2517,6 +2521,37 @@ def t_exec_summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def t_close_pr_market(df: pd.DataFrame) -> pd.DataFrame:
+    """Close participation (ClosePR) by market, notional-weighted.
+
+    How much of each market's closing auction our orders were. Not
+    winsorised: it is a share, bounded by construction, and the high end is
+    exactly the thing being looked for.
+    """
+    if df is None or df.empty or "close_pr" not in df:
+        return pd.DataFrame()
+    rows = []
+    for m, g in df.groupby("market", observed=True):
+        v = pd.to_numeric(g["close_pr"], errors="coerce")
+        ok = v.notna() & (g["notional"] > 0)
+        if not ok.any():
+            continue
+        rows.append({
+            "market": m,
+            "orders": int(ok.sum()),
+            "notional (" + CURRENCY + "m)": float(g.loc[ok, "notional"].sum()) / 1e6,
+            "close PR % (wtd)": wmean(v[ok], g.loc[ok, "notional"], winsor=False),
+            "close PR % (median)": float(v[ok].median()),
+            "close PR % (max)": float(v[ok].max()),
+            "small sample": int(ok.sum()) < MIN_N_FOR_CI,
+        })
+    if not rows:
+        return pd.DataFrame()
+    return (pd.DataFrame(rows).set_index("market")
+            .sort_values("notional (" + CURRENCY + "m)", ascending=False)
+            .round(2))
+
+
 def t_reversion(df: pd.DataFrame, by: str) -> pd.DataFrame:
     """NextOpen - Close: the side-adjusted move from the close to the open.
 
@@ -2772,7 +2807,8 @@ def _fmt_bps(v) -> str:
     return "-" if (v is None or (isinstance(v, float) and math.isnan(v))) else f"{v:+.1f}"
 
 
-def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps"):
+def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps",
+                    tight=False):
     """Diverging bars standing up: categories along the bottom, value up.
 
     Blue above zero is a saving, red below it is a cost - and
@@ -2799,13 +2835,32 @@ def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps"):
     # thin categories, so the caveat survives where an analyst will meet it.
     ax.set_xticklabels([str(l) for l in labels], rotation=30, ha="right")
 
-    reach = [abs(v) for v in values if v is not None and not math.isnan(v)]
-    if ci is not None:
-        reach += [abs(b) for lo, hi in ci for b in (lo, hi)
-                  if b is not None and not math.isnan(b)]
-    span = max(reach or [1.0])
-    pad = span * 0.30
-    ax.set_ylim(-span - pad, span + pad)
+    finite = [v for v in values if v is not None and not math.isnan(v)]
+    if tight and finite:
+        # Fitted to the bars, not the widest whisker. One thin market with a
+        # huge interval otherwise sets the scale and every other bar on the
+        # chart shrinks to a sliver. Whiskers may stretch the axis by up to
+        # 30% of the bar range; beyond that they run off the edge, uncapped.
+        top, bot = max(max(finite), 0.0), min(min(finite), 0.0)
+        room = 0.3 * max(top - bot, 1e-9)
+        if ci is not None:
+            ends = [b for lo, hi in ci for b in (lo, hi)
+                    if b is not None and not math.isnan(b)]
+            top = max([top] + [min(b, top + room) for b in ends])
+            bot = min([bot] + [max(b, bot - room) for b in ends])
+        pad = 0.14 * max(top - bot, 1e-9)
+        ax.set_ylim(bot - pad, top + pad)
+        span = (top - bot) / 2 or 1.0
+        cap_hi, cap_lo = top, bot
+    else:
+        reach = [abs(v) for v in finite]
+        if ci is not None:
+            reach += [abs(b) for lo, hi in ci for b in (lo, hi)
+                      if b is not None and not math.isnan(b)]
+        span = max(reach or [1.0])
+        pad = span * 0.30
+        ax.set_ylim(-span - pad, span + pad)
+        cap_hi, cap_lo = span, -span
     for i, v in enumerate(values):
         if v is None or math.isnan(v):
             continue
@@ -2815,13 +2870,18 @@ def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps"):
             if (lo is not None and hi is not None
                     and not math.isnan(lo) and not math.isnan(hi)):
                 edge = max(v, hi) if v >= 0 else min(v, lo)
+        # A whisker cut at the edge keeps running under its label, so that
+        # label gets a solid box: the number interrupts the line instead of
+        # sitting on top of it.
+        cut = edge > cap_hi if v >= 0 else edge < cap_lo
+        edge = min(edge, cap_hi) if v >= 0 else max(edge, cap_lo)
         off = span * 0.03
         label = f"{v:+.2f}" if unit == "spreads" else _fmt_bps(v)
         ax.text(i, edge + (off if v >= 0 else -off), label, ha="center",
                 va="bottom" if v >= 0 else "top", color=INK, fontsize=8.5,
                 zorder=6,
                 bbox=dict(boxstyle="round,pad=0.16", facecolor=SURFACE,
-                          edgecolor="none", alpha=0.85))
+                          edgecolor="none", alpha=1.0 if cut else 0.85))
 
 
 NON_CATEGORIES = {"nan", "none", "nat", ""}
@@ -3057,6 +3117,8 @@ SPREAD_NOTE = ("in spreads: the result divided by the average spread, which "
 CI_NOTE = ("whiskers are 95% bootstrap CIs; a CI crossing zero is not "
            "distinguishable from zero")
 REV_NOTE = "negative means the price came back against us by the next open"
+# The desk's name for the reversion axis. {unit} is spreads or bps.
+REV_YLABEL = "Close to T+1 notional weighted in {unit}"
 CO_NOTE = ("close-only: 99.5% or more of the order printed in the auction, so "
            "its close slippage is zero by design and reversion is the "
            "measure. Negative means the price came back against us by the "
@@ -3096,11 +3158,12 @@ def _chartable(d: pd.DataFrame) -> pd.DataFrame:
 def _share_ylim(axes) -> None:
     """One scale across panels, so bars in different panels compare by eye.
 
-    Each panel sized itself to its own bars; the widest one wins.
+    Each panel sized itself to its own bars; the union of their ranges wins.
     """
-    top = max(max(abs(a) for a in ax.get_ylim()) for ax in axes)
+    lo = min(ax.get_ylim()[0] for ax in axes)
+    hi = max(ax.get_ylim()[1] for ax in axes)
     for ax in axes:
-        ax.set_ylim(-top, top)
+        ax.set_ylim(lo, hi)
 
 
 def _notes(fig, notes: list) -> float:
@@ -3113,7 +3176,8 @@ def _notes(fig, notes: list) -> float:
 
 def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
                   measure: str, note: str = "", by_notional: bool = False,
-                  limit: int = 12, unit: str = None) -> None:
+                  limit: int = 12, unit: str = None, ylabel: str = None,
+                  tight: bool = None) -> None:
     """One result per group, with the group's spread under each bar."""
     unit = unit or CHART_UNIT
     d = _chartable(t)
@@ -3129,9 +3193,12 @@ def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
     fig, (ax,) = _fig((11.0, 6.0))
     _diverging_barv(ax, labels, [float(v) for v in d[vcol]],
                     ci=list(zip(d[lo].astype(float), d[hi].astype(float))),
-                    unit="spreads" if spreads else "bps")
-    _style(ax, ylabel=measure + (", in spreads" if spreads
-                                 else ", bps, notional-weighted"),
+                    unit="spreads" if spreads else "bps",
+                    tight=by_notional if tight is None else tight)
+    _style(ax, ylabel=(ylabel.format(unit="spreads" if spreads else "bps")
+                       if ylabel else
+                       measure + (", in spreads" if spreads
+                                  else ", bps, notional-weighted")),
            title=title)
     room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
     _save(fig, out, name, bottom=room)
@@ -3139,7 +3206,7 @@ def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
 
 def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                           measure: str, note: str = "", limit: int = 12,
-                          unit: str = None) -> None:
+                          unit: str = None, ylabel: str = None) -> None:
     """Markets along the bottom, a Buy panel over a Sell panel, one scale.
 
     Two panels rather than paired bars in one: colour already means saving
@@ -3179,8 +3246,10 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                 vals.append(nan)
                 ci.append((nan, nan))
         _diverging_barv(ax, labels, vals, ci=ci,
-                        unit="spreads" if spreads else "bps")
-        _style(ax, ylabel=measure + (", in spreads" if spreads else ", bps"),
+                        unit="spreads" if spreads else "bps", tight=True)
+        _style(ax, ylabel=(ylabel.format(unit="spreads" if spreads else "bps")
+                           if ylabel else
+                           measure + (", in spreads" if spreads else ", bps")),
                title=f"{title}: {side}")
         ax._panel = side
     fig._deck_title = title
@@ -3232,6 +3301,41 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
     _share_ylim(axes)
     room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
     _save(fig, out, name, bottom=room)
+
+
+def chart_close_pr(tables: list, out: Path) -> None:
+    """Close participation by market: all, close-only, pre-traded.
+
+    One scale across the three, so a market's bar can be compared between
+    them by eye. Magnitude, not saving or cost, so one hue.
+    """
+    col = "close PR % (wtd)"
+    usable = [(t, name, title) for t, name, title in tables
+              if t is not None and not t.empty and col in t]
+    if not usable:
+        return
+    top = max(float(_chartable(t)[col].max()) for t, _, _ in usable
+              if not _chartable(t).empty) if usable else 1.0
+    for t, name, title in usable:
+        d = _chartable(t).head(12)
+        if d.empty:
+            continue
+        vals = [float(v) for v in d[col]]
+        x = np.arange(len(vals))
+        fig, (ax,) = _fig((11.0, 5.6))
+        ax.bar(x, vals, width=0.62, color=SERIES[0], zorder=3)
+        ax.set_ylim(0, top * 1.18 if top > 0 else 1.0)
+        for i, v in enumerate(vals):
+            ax.text(i, v + top * 0.015, f"{v:.1f}%", ha="center",
+                    va="bottom", fontsize=8.5, color=INK, zorder=5)
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(k) for k in d.index], rotation=30, ha="right")
+        _style(ax, ylabel="Close participation, notional weighted (%)",
+               title=title)
+        room = _notes(fig, ["ClosePR: our executed quantity as a share of the "
+                            "closing auction's volume. Auction markets only; "
+                            "markets ordered by value traded."])
+        _save(fig, out, name, bottom=room)
 
 
 def chart_flow_split(t: pd.DataFrame, out: Path,
@@ -3692,6 +3796,17 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["78_pre_pvwap_mkt_spreads"] = t_in_spreads(pre, "market", "slip_pvwap")
     t["79_pre_pvwap_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], "slip_pvwap")
+    # Close participation needs an auction to participate in, so these run
+    # on auction markets only. India's window orders are close by the desk's
+    # definition but there is no auction volume behind their ClosePR.
+    if "close_pr" in df:
+        t["80_close_pr_mkt_all"] = t_close_pr_market(auc)
+        t["81_close_pr_mkt_close_only"] = t_close_pr_market(
+            auc[_flag(auc, "close_only")])
+        t["82_close_pr_mkt_pretraded"] = t_close_pr_market(pre)
+    else:
+        log("  no ClosePR column in the file - close participation charts "
+            "skipped.")
 
     t["_close_df"] = df
     t["_auction_df"] = auc
@@ -4011,7 +4126,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_spreads(t.get("69_reversion_strat_spreads", E), charts,
                   "11_reversion.png",
                   "Reversion - did the auction print come back?",
-                  "next open vs close", note=REV_NOTE)
+                  "next open vs close", note=REV_NOTE, ylabel=REV_YLABEL)
     df = t.get("_close_df")
     if df is not None:
         # Two charts, because India's close share is imputed rather than
@@ -4037,11 +4152,12 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_spreads(t.get("71_co_reversion_mkt_spreads", E), charts,
                   "22_reversion_close_only.png",
                   "Close-only orders: reversion by market",
-                  "next open vs close", by_notional=True, note=CO_NOTE)
+                  "next open vs close", by_notional=True, note=CO_NOTE,
+                  ylabel=REV_YLABEL)
     chart_spreads_by_side(t.get("72_co_reversion_mkt_side_spr", E), charts,
                           "25_close_only_reversion_market_side.png",
                           "Close-only reversion", "next open vs close",
-                          note=CO_NOTE)
+                          note=CO_NOTE, ylabel=REV_YLABEL)
 
     # Pre-traded. Three prices tell its story: where it started (first
     # execution against the close), where it finished (against the close),
@@ -4060,7 +4176,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_spreads(t.get("70_pre_reversion_mkt_spreads", E), charts,
                   "21_reversion_pretraded.png",
                   "Pre-traded orders: reversion by market",
-                  "next open vs close", by_notional=True, note=PRE_NOTE)
+                  "next open vs close", by_notional=True, note=PRE_NOTE,
+                  ylabel=REV_YLABEL)
     chart_spreads_by_side(t.get("74_pre_firstexec_mkt_side_spr", E), charts,
                           "28_pretraded_first_exec_market_side.png",
                           "Pre-traded, first execution vs close",
@@ -4072,7 +4189,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_spreads_by_side(t.get("76_pre_reversion_mkt_side_spr", E), charts,
                           "30_pretraded_reversion_market_side.png",
                           "Pre-traded reversion", "next open vs close",
-                          note=PRE_NOTE)
+                          note=PRE_NOTE, ylabel=REV_YLABEL)
     chart_spreads(t.get("78_pre_pvwap_mkt_spreads", E), charts,
                   "32_pretraded_pvwap_market.png",
                   "Pre-traded orders: against PVWAP, by market",
@@ -4081,6 +4198,14 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           "33_pretraded_pvwap_market_side.png",
                           "Pre-traded, against PVWAP", "vs PVWAP",
                           note=PVWAP_NOTE)
+    chart_close_pr([
+        (t.get("80_close_pr_mkt_all"), "34_close_pr_all.png",
+         "Close participation by market: all orders"),
+        (t.get("81_close_pr_mkt_close_only"), "35_close_pr_close_only.png",
+         "Close participation by market: close-only orders"),
+        (t.get("82_close_pr_mkt_pretraded"), "36_close_pr_pretraded.png",
+         "Close participation by market: pre-traded orders"),
+    ], charts)
     chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
                       "31_pretraded_adv_profile.png",
                       "Pre-traded orders by ADV%", with_orders=True)
