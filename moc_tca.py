@@ -799,6 +799,24 @@ def continuous_end_min(market: pd.Series, date: pd.Series) -> pd.Series:
     return out
 
 
+def india_close_pr_proxy(df: pd.DataFrame, in_window: pd.Series) -> pd.Series:
+    """India's close participation: its order participation (PR), not ClosePR.
+
+    India runs no closing auction in H1, so ClosePR is zero there by
+    construction. Its close is the last half hour, and a window order trades
+    inside it - so the order's own participation rate over its life is the
+    nearest honest measure of how much of that close we were. Only the
+    window orders are touched; the measured ClosePR is kept beside it.
+    """
+    if "close_pr" not in df or "participation" not in df:
+        return pd.Series(False, index=df.index)
+    use = in_window & df["participation"].notna()
+    if use.any():
+        df["close_pr_measured"] = df["close_pr"]
+        df.loc[use, "close_pr"] = df.loc[use, "participation"]
+    return use
+
+
 def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     """Build the working frame: logical names, base units, derived fields."""
     df = pd.DataFrame(index=raw.index)
@@ -948,6 +966,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
             for f in VENUE_FIELDS:
                 if f != "pct_close" and f in df:
                     df.loc[in_window, f] = 0.0
+        df["close_pr_from_pr"] = india_close_pr_proxy(df, in_window)
     df["has_auction"] = df["close_regime"].eq(REGIME_AUCTION)
 
     if "cap" in df:
@@ -3495,13 +3514,18 @@ def chart_close_pr(tables: list, out: Path) -> None:
             ax.text(i, v + top * 0.015, f"{v:.1f}%", ha="center",
                     va="bottom", fontsize=8.5, color=INK, zorder=5)
         ax.set_xticks(x)
-        ax.set_xticklabels([str(k) for k in d.index], rotation=30, ha="right")
+        # India's bar is a different measure, so it says so where it is read.
+        ax.set_xticklabels([f"{k} (PR)" if str(k) == "India" else str(k)
+                            for k in d.index], rotation=30, ha="right")
         _style(ax, ylabel="Close participation, mean per order (%)",
                title=title)
+        india = "India" in set(map(str, d.index))
         room = _notes(fig, ["ClosePR: our executed quantity as a share of the "
                             "closing auction's volume, averaged per order, not "
-                            "weighted by value. Auction markets only; markets "
-                            "ordered by value traded."])
+                            "weighted by value. Markets ordered by value traded.",
+                            "India (PR): no closing auction in H1, so its bar is "
+                            "the participation rate (PR) of the orders started "
+                            "17:30-17:45 HKT." if india else ""])
         _save(fig, out, name, bottom=room)
 
 
@@ -3965,13 +3989,14 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["78_pre_pvwap_mkt_spreads"] = t_in_spreads(pre, "market", "slip_pvwap")
     t["79_pre_pvwap_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], "slip_pvwap")
-    # Close participation needs an auction to participate in, so these run
-    # on auction markets only. India's window orders are close by the desk's
-    # definition but there is no auction volume behind their ClosePR.
+    # Close participation: auction markets on ClosePR, plus India's window
+    # orders on their PR (see india_close_pr_proxy). India cannot be
+    # pre-traded, so 82 is unchanged.
     if "close_pr" in df:
-        t["80_close_pr_mkt_all"] = t_close_pr_market(auc)
+        with_india = df[reach]
+        t["80_close_pr_mkt_all"] = t_close_pr_market(with_india)
         t["81_close_pr_mkt_close_only"] = t_close_pr_market(
-            auc[_flag(auc, "close_only")])
+            with_india[_flag(with_india, "close_only")])
         t["82_close_pr_mkt_pretraded"] = t_close_pr_market(pre)
     else:
         log("  no ClosePR column in the file - close participation charts "
@@ -5033,6 +5058,12 @@ def self_test() -> int:
     check("an inverted column is called inverted",
           vr.loc[vr["check"] == "first exec vs close", "verdict"]
           .str.startswith("SIGN INVERTED").all(), vr["verdict"].tolist())
+    ip = pd.DataFrame({"close_pr": [0.0, 0.0, 3.0],
+                       "participation": [12.0, 8.0, 9.0]})
+    used = india_close_pr_proxy(ip, pd.Series([True, False, False]))
+    check("India window orders take PR as close participation, others keep ClosePR",
+          ip["close_pr"].tolist() == [12.0, 0.0, 3.0] and used.tolist() == [True, False, False],
+          ip["close_pr"].tolist())
     check("decomposition is exact: waiting + execution = vs Arrival",
           np.allclose(df["wait_cost_bps"] + df["slip_close"], df["slip_arrival"]))
 
