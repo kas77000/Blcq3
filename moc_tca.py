@@ -2741,15 +2741,18 @@ DECK_FONT_SCALE = 1.45
 DECK_TITLES: dict = {}
 
 
-def _save(fig, out_dir: Path, name: str, bottom: float = 0.0) -> None:
+def _save(fig, out_dir: Path, name: str, bottom: float = 0.0,
+          deck: bool = True) -> None:
     path = out_dir / name
-    _WRITTEN_CHARTS.add(name)
+    if deck:
+        _WRITTEN_CHARTS.add(name)
     fig.tight_layout(rect=(0, bottom, 1, 1) if bottom else None)
     fig.savefig(path, facecolor=SURFACE, dpi=DPI, bbox_inches="tight")
-    try:
-        _save_bare(fig, out_dir.parent / DECK_CHARTS_DIR, name)
-    except Exception as exc:                          # pragma: no cover
-        warn(f"deck copy of {name} not written: {exc}")
+    if deck:
+        try:
+            _save_bare(fig, out_dir.parent / DECK_CHARTS_DIR, name)
+        except Exception as exc:                      # pragma: no cover
+            warn(f"deck copy of {name} not written: {exc}")
     plt.close(fig)
     log(f"    chart  {name}")
 
@@ -4829,6 +4832,14 @@ def self_test() -> int:
               < 1e-3 * abs(r["spread bps (wtd)"]) + 1e-3,
               None if r is None else (r["spreads"], r["spread bps (wtd)"],
                                       r["wtd mean bps"]))
+    fo = pd.DataFrame({"c": ["a"] * 3 + ["b"], "v": [10.0] * 3 + [-10.0],
+                       "w": [1.0] * 4})
+    re_ = pd.DataFrame({"c": ["a"] + ["b"] * 3, "v": [10.0] + [-10.0] * 3,
+                        "w": [1.0] * 4})
+    a_, e_, cov_ = standardised_gap(fo, re_, ["c"], "v", "w")
+    check("same per-cell result, different mix: expected equals actual",
+          abs(a_ - 5.0) < 1e-9 and abs(e_ - 5.0) < 1e-9 and abs(cov_ - 1) < 1e-9,
+          (a_, e_, cov_))
     check("decomposition is exact: waiting + execution = vs Arrival",
           np.allclose(df["wait_cost_bps"] + df["slip_close"], df["slip_arrival"]))
 
@@ -4919,7 +4930,8 @@ def self_test() -> int:
 # CLI
 # ===========================================================================
 
-def run(path: Path, out_dir: Path, sample: bool = False) -> None:
+def run(path: Path, out_dir: Path, sample: bool = False,
+        focus: str = None) -> None:
     if sample:
         section("SAMPLE DATA")
         raw = make_sample()
@@ -5024,6 +5036,499 @@ def run(path: Path, out_dir: Path, sample: bool = False) -> None:
 
     findings(tables)
     narrative(tables)
+    if focus:
+        focus_market(tables, out_dir, focus)
+
+
+# ===========================================================================
+# FOCUS - one market taken apart: why is it worse?
+# ===========================================================================
+#
+#   python moc_tca.py --data orders.csv --out output_h1 --focus "South Korea"
+#
+# Runs on PRE-TRADED orders in auction markets, on the first execution against
+# the close - the measure where a market stands out - and sets the focus
+# market against every other auction market. Eight tests, each ending in one
+# line that says what it points to or rules out, then the orders that cost the
+# most, for the desk to pull the child fills on. It narrows the cause; the
+# child-order tape confirms it.
+
+FOCUS_TOP_ORDERS = 30
+FE, FE_W = "first_exec_vs_close", "cont_notional"
+
+
+def _slug(name) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+
+
+def _vs(foc: pd.DataFrame, rest: pd.DataFrame, by: str, value: str = FE,
+        weight: str = FE_W) -> pd.DataFrame:
+    """The focus market beside every other market, one row per group."""
+    if by not in foc or by not in rest:
+        return pd.DataFrame()
+    both = pd.concat([foc.assign(_who="focus"), rest.assign(_who="rest")])
+    t = t_in_spreads(both, [by, "_who"], value, weight)
+    if t.empty:
+        return t
+    col = both[by]
+    keys = (list(col.cat.categories) if hasattr(col, "cat")
+            else sorted(col.dropna().astype(str).unique()))
+    rows = []
+    for key in keys:
+        r = {by: key}
+        for who in ("focus", "rest"):
+            hit = (key, who) in t.index
+            x = t.loc[(key, who)] if hit else None
+            r[f"{who} spreads"] = float(x["spreads"]) if hit else np.nan
+            r[f"{who} CI low"] = float(x["CI low"]) if hit else np.nan
+            r[f"{who} CI high"] = float(x["CI high"]) if hit else np.nan
+            r[f"{who} bps"] = float(x["wtd mean bps"]) if hit else np.nan
+            r[f"{who} orders"] = int(x["orders"]) if hit else 0
+        if r["focus orders"] or r["rest orders"]:
+            r["gap (spreads)"] = r["focus spreads"] - r["rest spreads"]
+            rows.append(r)
+    return pd.DataFrame(rows).set_index(by).round(3) if rows else pd.DataFrame()
+
+
+def standardised_gap(foc: pd.DataFrame, rest: pd.DataFrame, cells: list,
+                     value: str = FE, weight: str = FE_W):
+    """What the other markets would have scored with the focus market's mix.
+
+    Each cell (e.g. ADV% band x spread band) takes the other markets' own
+    result, weighted by how much of the FOCUS market's flow sits in that cell.
+    If that expected figure is close to the focus market's actual one, its
+    orders were simply harder; if the actual is far worse, the orders do not
+    explain it. Returns (actual bps, expected bps, share of focus weight in
+    cells the other markets also trade).
+    """
+    need = cells + [value]
+    if foc.empty or rest.empty or any(c not in foc or c not in rest for c in need):
+        return np.nan, np.nan, 0.0
+    wf = weight_column(foc, weight)
+    wr = weight_column(rest, weight)
+    # Tails pulled in ONCE, across both populations. Clipping each cell at
+    # its own extremes would move the two sides by different amounts and put
+    # a gap into the comparison that is not in the data.
+    both = winsorize(pd.to_numeric(pd.concat([foc[value], rest[value]]),
+                                   errors="coerce").to_numpy(float))
+    foc = foc.assign(_v=both[:len(foc)])
+    rest = rest.assign(_v=both[len(foc):])
+    actual = wmean(foc["_v"], foc[wf], winsor=False)
+    rest_cell = {k: wmean(g["_v"], g[wr], winsor=False)
+                 for k, g in rest.groupby(cells, observed=True)}
+    num = den = total = 0.0
+    for k, g in foc.groupby(cells, observed=True):
+        w = float(pd.to_numeric(g[wf], errors="coerce").clip(lower=0).sum())
+        total += w
+        rv = rest_cell.get(k, np.nan)
+        if w > 0 and np.isfinite(rv):
+            num += w * rv
+            den += w
+    expected = num / den if den > 0 else np.nan
+    return actual, expected, (den / total if total > 0 else 0.0)
+
+
+def _cost_usd(d: pd.DataFrame) -> pd.Series:
+    """First execution vs close in dollars, per order (negative = cost)."""
+    w = pd.to_numeric(d[weight_column(d, FE_W)], errors="coerce").fillna(0)
+    return pd.to_numeric(d[FE], errors="coerce").fillna(0) * w / 1e4
+
+
+def _start_band(d: pd.DataFrame) -> pd.Series:
+    """When the order started: the arrival bucket, else the HKT start hour."""
+    if "arrival_time" in d and d["arrival_time"].notna().any():
+        return pd.Categorical(d["arrival_time"].astype(str),
+                              categories=[c for c in ARRIVAL_ORDER]
+                              + sorted(set(d["arrival_time"].astype(str))
+                                       - set(ARRIVAL_ORDER)))
+    for c in ("first_start_time_min", "start_time_min"):
+        if c in d and d[c].notna().any():
+            h = (d[c] // 60).astype("Int64")
+            return h.map(lambda x: f"{int(x):02d}:00 HKT" if pd.notna(x) else np.nan)
+    return pd.Series(np.nan, index=d.index)
+
+
+def _chart_pair(tab: pd.DataFrame, out: Path, name: str, title: str,
+                focus: str, xlabel: str, note: str = "") -> None:
+    """The focus market beside the rest, per group, in spreads."""
+    if not _HAS_MPL or tab is None or tab.empty:
+        return
+    d = tab[[str(i).strip().lower() not in NON_CATEGORIES for i in tab.index]]
+    d = d[d["focus orders"] > 0]          # nothing to compare where it has no orders
+    if d.empty:
+        return
+    x = np.arange(len(d))
+    fig, (ax,) = _fig((11.0, 5.6))
+    for off, who, color, label in ((-0.2, "focus", SERIES[1], focus),
+                                   (0.2, "rest", INK_MUTED, "other markets")):
+        vals = [float(v) for v in d[f"{who} spreads"]]
+        ax.bar(x + off, vals, width=0.38, color=color, zorder=3, label=label)
+        for i, v in enumerate(vals):
+            if np.isfinite(v):
+                ax.text(i + off, v, f"{v:+.2f}", ha="center",
+                        va="bottom" if v >= 0 else "top", fontsize=8,
+                        color=INK, zorder=5)
+    ax.axhline(0, color=BASELINE, linewidth=1.0, zorder=2)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{k}{chr(10)}{int(n)} orders" for k, n
+                        in zip(d.index, d["focus orders"])])
+    ax.legend(frameon=False, fontsize=8.5, loc="best")
+    _style(ax, xlabel=xlabel,
+           ylabel="first execution vs close, in spreads", title=title)
+    room = _notes(fig, [note, "order counts are the focus market's; "
+                              "negative = the first fill was worse than the "
+                              "close"])
+    _save(fig, out, name, bottom=room, deck=False)
+
+
+def _chart_concentration(cost: pd.Series, out: Path, name: str,
+                         focus: str) -> None:
+    """How much of the cost the worst orders carry."""
+    if not _HAS_MPL:
+        return
+    neg = -cost[cost < 0].sort_values()
+    if neg.empty:
+        return
+    share = 100 * neg.cumsum().to_numpy() / neg.sum()
+    fig, (ax,) = _fig((10.0, 5.0))
+    ax.plot(np.arange(1, len(share) + 1), share, color=SERIES[1], lw=2.2,
+            zorder=3)
+    for k in (10, 30):
+        if len(share) >= k:
+            ax.axvline(k, color=BASELINE, lw=1, zorder=2)
+            ax.text(k, share[k - 1], f"  top {k}: {share[k - 1]:.0f}%",
+                    va="bottom", fontsize=9, color=INK)
+    ax.set_ylim(0, 105)
+    _style(ax, xlabel="orders that cost money, worst first",
+           ylabel="share of the total first-execution cost (%)",
+           title=f"{focus}: how concentrated is the cost?")
+    _save(fig, out, name, deck=False)
+
+
+def focus_market(t: dict, out_dir: Path, focus: str) -> None:
+    df = t.get("_close_df")
+    section(f"FOCUS - {focus.upper()}")
+    if df is None or df.empty or "market" not in df:
+        log("  no close orders to take apart.")
+        return
+    markets = {str(m).lower(): m for m in df["market"].dropna().unique()}
+    if focus.lower() not in markets:
+        warn(f"no orders in market {focus!r}. Markets in the file: "
+             + ", ".join(sorted(map(str, markets.values()))))
+        return
+    focus = markets[focus.lower()]
+    auc_all = df[df["has_auction"]
+                 & ~df["market"].isin(EXCLUDE_MARKETS_FROM_CHARTS)].copy()
+    pre_all = auc_all[_flag(auc_all, "pretraded")].copy()
+    if FE not in pre_all:
+        log("  no first_exec_vs_close column - the drill-down needs it.")
+        return
+    foc = pre_all[pre_all["market"] == focus].copy()
+    rest = pre_all[pre_all["market"] != focus].copy()
+    if foc.empty:
+        log(f"  {focus} has no pre-traded orders in auction markets.")
+        return
+    folder = out_dir / f"focus_{_slug(focus)}"
+    folder.mkdir(parents=True, exist_ok=True)
+    T, verdicts = {}, []
+
+    log(f"  Pre-traded orders, auction markets. {focus}: {len(foc):,} orders; "
+        f"other markets: {len(rest):,}.")
+    log("  Measure: first execution vs close, in spreads, weighted by the part")
+    log("  of each order traded before the auction. Negative = a cost.")
+
+    # --- F0 where it stands ------------------------------------------------
+    rows = []
+    for label, value, w in (("first execution vs close", FE, FE_W),
+                            ("execution vs close", "slip_close", "notional"),
+                            ("vs PVWAP", "slip_pvwap", "notional"),
+                            ("close to T+1", "reversion_bps", "notional")):
+        if value not in pre_all:
+            continue
+        for side in ["All"] + BUY_SELL_ORDER:
+            f = foc if side == "All" else foc[foc.get("buy_sell") == side]
+            r_ = rest if side == "All" else rest[rest.get("buy_sell") == side]
+            v = _vs(f.assign(_s=side), r_.assign(_s=side), "_s", value, w)
+            if v.empty:
+                continue
+            row = v.iloc[0].to_dict()
+            row.update({"measure": label, "side": side})
+            rows.append(row)
+    T["F0_summary"] = (pd.DataFrame(rows).set_index(["measure", "side"])
+                       if rows else pd.DataFrame())
+    head = (T["F0_summary"].loc[("first execution vs close", "All")]
+            if not T["F0_summary"].empty
+            and ("first execution vs close", "All") in T["F0_summary"].index
+            else None)
+    worse = head is not None and head["focus spreads"] < head["rest spreads"]
+    if head is not None:
+        clear = (np.isfinite(head["focus CI high"])
+                 and head["focus CI high"] < head["rest spreads"])
+        verdicts.append(("0 Is it worse at all?",
+            (f"YES. First execution vs close: {focus} {head['focus spreads']:+.2f} "
+             f"spreads, other markets {head['rest spreads']:+.2f}"
+             + (", and the gap is clear at 95%." if clear else
+                ", but the gap is inside the 95% interval.")) if worse else
+            (f"NO. First execution vs close: {focus} {head['focus spreads']:+.2f} "
+             f"spreads, other markets {head['rest spreads']:+.2f}. The tests "
+             "below still describe the market, but there is no gap to explain.")))
+
+    # --- F1 is it the orders? -----------------------------------------------
+    T["F1a_by_adv"] = _vs(foc, rest, "adv_bucket")
+    T["F1b_by_spread"] = _vs(foc, rest, "spread_bucket")
+    cells = [c for c in ("adv_bucket", "spread_bucket") if c in pre_all]
+    act, exp, cover = standardised_gap(foc, rest, cells)
+    sprd = wmean(foc["spread_bps"], foc[weight_column(foc, FE_W)]) \
+        if "spread_bps" in foc else np.nan
+    T["F1c_same_mix"] = pd.DataFrame([{
+        "focus actual bps": act, "others with focus mix bps": exp,
+        "focus spread bps": sprd,
+        "focus actual spreads": act / sprd if sprd else np.nan,
+        "others with focus mix spreads": exp / sprd if sprd else np.nan,
+        "share of focus flow compared %": 100 * cover,
+        "cells": " x ".join(cells)}]).round(3)
+    if np.isfinite(act) and np.isfinite(exp):
+        a_s, e_s = act / sprd, exp / sprd
+        if act >= exp:
+            v = (f"NOT WORSE THAN ITS MIX. Other markets with {focus}'s mix of "
+                 f"ADV% and spread: {e_s:+.2f} spreads; {focus}: {a_s:+.2f}.")
+        elif (exp - act) > 0.5 * abs(act):
+            v = (f"ORDER MIX EXPLAINS LITTLE. With {focus}'s own mix of ADV% and "
+                 f"spread, other markets would have scored {e_s:+.2f} spreads; "
+                 f"{focus} scored {a_s:+.2f}. Points to the market or how the "
+                 "algo trades it, not to harder orders.")
+        elif abs(act - exp) <= 0.25 * abs(act):
+            v = (f"ORDER MIX EXPLAINS MOST OF IT. Other markets with the same "
+                 f"mix: {e_s:+.2f} spreads; {focus}: {a_s:+.2f}.")
+        else:
+            v = (f"ORDER MIX EXPLAINS PART OF IT. Other markets with the same "
+                 f"mix: {e_s:+.2f} spreads; {focus}: {a_s:+.2f}.")
+        verdicts.append(("1 Is it the orders (ADV%, spread)?",
+                         v + f" ({100 * cover:.0f}% of the flow had a match.)"))
+
+    # --- F2 when did it start? ----------------------------------------------
+    foc["_start"], rest["_start"] = _start_band(foc), _start_band(rest)
+    tab = _vs(foc, rest, "_start")
+    if not tab.empty:
+        cost = _cost_usd(foc)
+        band_cost = cost.groupby(foc["_start"], observed=True).sum()
+        total_neg = float(-cost[cost < 0].sum()) or np.nan
+        tab["focus cost USDk"] = [float(band_cost.get(k, 0)) / 1e3
+                                  for k in tab.index]
+        tab.index.name = "start"
+        T["F2_by_start"] = tab.round(3)
+        worst = tab["focus cost USDk"].idxmin()
+        net = float(tab.loc[worst, "focus cost USDk"])
+        if net < 0:
+            share = 100 * -net * 1e3 / total_neg
+            verdicts.append(("2 Does it start too early?",
+                f"{share:.0f}% of the cost came from orders starting in "
+                f"{worst}, the costliest start band. There {focus} "
+                f"scored {tab.loc[worst, 'focus spreads']:+.2f} spreads against "
+                f"{tab.loc[worst, 'rest spreads']:+.2f} elsewhere."))
+        else:
+            verdicts.append(("2 Does it start too early?",
+                "No start band ran at a net cost."))
+
+    # --- F3 how hard did it trade? -------------------------------------------
+    rows = []
+    for label, col, w in (("continuous participation % (fPR_cont)", "pr_cont", FE_W),
+                          ("overall participation %", "participation", "notional"),
+                          ("ADV% of the order", "adv_pct", "notional"),
+                          ("share executed in the close %", "pct_close", "notional"),
+                          ("spread bps", "spread_bps", "notional")):
+        if col in foc and foc[col].notna().any():
+            rows.append({"metric": label,
+                         "focus": wmean(foc[col], foc[weight_column(foc, w)], winsor=False),
+                         "rest": wmean(rest[col], rest[weight_column(rest, w)], winsor=False)})
+    T["F3_how_hard"] = pd.DataFrame(rows).set_index("metric").round(3) if rows else pd.DataFrame()
+    pv = _vs(foc.assign(_a="All"), rest.assign(_a="All"), "_a", "slip_pvwap", "notional") \
+        if "slip_pvwap" in foc else pd.DataFrame()
+    if not pv.empty:
+        T["F3b_vs_pvwap"] = pv
+        fpv, rpv = pv.iloc[0]["focus spreads"], pv.iloc[0]["rest spreads"]
+        line = f"Against PVWAP {focus} scored {fpv:+.2f} spreads, others {rpv:+.2f}. "
+        if worse:
+            line += ("The trading itself was in line, so the first-fill cost "
+                     "points to WHEN it started." if fpv >= rpv - 0.25 else
+                     "The trading itself was worse too, so the cost points to "
+                     "HOW it traded - aggression or size.")
+        if "continuous participation % (fPR_cont)" in T["F3_how_hard"].index:
+            pr = T["F3_how_hard"].loc["continuous participation % (fPR_cont)"]
+            if pr["rest"]:
+                line += (f" Continuous participation: {pr['focus']:.1f}% vs "
+                         f"{pr['rest']:.1f}% ({pr['focus'] / pr['rest']:.1f}x).")
+        verdicts.append(("3 Does it trade too hard?", line))
+
+    # --- F4 is the auction big enough? --------------------------------------
+    if "close_pr" in auc_all and "adv_bucket" in auc_all:
+        fa = auc_all[auc_all["market"] == focus]
+        ra = auc_all[auc_all["market"] != focus]
+        rows = []
+        for band in auc_all["adv_bucket"].cat.categories:
+            f_, r_ = fa[fa["adv_bucket"] == band], ra[ra["adv_bucket"] == band]
+            if f_.empty:
+                continue
+            rows.append({
+                "ADV%": band, "focus orders": len(f_),
+                "focus ClosePR %": wmean(f_["close_pr"], f_["notional"], winsor=False),
+                "rest ClosePR %": wmean(r_["close_pr"], r_["notional"], winsor=False),
+                "focus % pre-traded": 100 * _flag(f_, "pretraded").mean(),
+                "rest % pre-traded": 100 * _flag(r_, "pretraded").mean()
+                    if len(r_) else np.nan})
+        tab = pd.DataFrame(rows).set_index("ADV%").round(2) if rows else pd.DataFrame()
+        T["F4_auction_capacity"] = tab
+        if not tab.empty:
+            ok = tab.dropna(subset=["focus ClosePR %", "rest ClosePR %"])
+            higher = int((ok["focus ClosePR %"] > ok["rest ClosePR %"]).sum())
+            more_pre = int((ok["focus % pre-traded"] > ok["rest % pre-traded"]).sum())
+            verdicts.append(("4 Is the auction too small?",
+                (f"{focus} took a bigger share of the auction in {higher} of "
+                 f"{len(ok)} ADV% bands, and pre-traded more often in {more_pre}. ")
+                + ("Capacity may be pushing flow into the continuous session."
+                   if higher > len(ok) / 2 and more_pre > len(ok) / 2 else
+                   "Auction capacity does not look like the driver.")))
+
+    # --- F5 a few orders, or all of them? ------------------------------------
+    cost = _cost_usd(foc)
+    neg = -cost[cost < 0].sort_values()
+    if len(neg):
+        top10 = 100 * neg.head(10).sum() / neg.sum()
+        med = float(pd.to_numeric(foc[FE], errors="coerce").median())
+        T["F5_concentration"] = pd.DataFrame([{
+            "orders": len(foc), "orders that cost": int((cost < 0).sum()),
+            "total cost USDk": float(cost.sum()) / 1e3,
+            "top 10 share of cost %": top10,
+            "median order bps": med,
+            "weighted bps": wmean(foc[FE], foc[weight_column(foc, FE_W)])}]).round(2)
+        verdicts.append(("5 A few orders, or all of them?",
+            (f"CONCENTRATED: the worst 10 orders carry {top10:.0f}% of the cost. "
+             "Start with the order list." if top10 > 50 else
+             f"BROAD: the worst 10 orders carry only {top10:.0f}% of the cost. "
+             "It is systematic, not a few bad orders.")
+            + f" The median order scored {med:+.1f} bps."))
+        _chart_concentration(cost, folder, "focus_4_concentration.png", focus)
+
+    # --- F6 one month? ---------------------------------------------------------
+    if "month" in foc:
+        tab = _vs(foc, rest, "month")
+        if not tab.empty:
+            mcost = cost.groupby(foc["month"]).sum()
+            tab["focus cost USDk"] = [float(mcost.get(k, 0)) / 1e3 for k in tab.index]
+            T["F6_by_month"] = tab.round(3)
+            worst = tab["focus cost USDk"].idxmin()
+            share = 100 * -tab.loc[worst, "focus cost USDk"] * 1e3 / (neg.sum() or np.nan)
+            verdicts.append(("6 Is it one month?",
+                (f"ONE MONTH: {worst} carries {share:.0f}% of the cost."
+                 if share > 40 else
+                 f"NOT ONE MONTH: the worst, {worst}, carries {share:.0f}% of the "
+                 "cost.")))
+
+    # --- F7 limits ---------------------------------------------------------------
+    if "market_limit" in foc and foc["market_limit"].nunique() > 1:
+        T["F7_limit_vs_market"] = _vs(foc, rest, "market_limit")
+    if {"limit_price", "close_price"} <= set(foc.columns):
+        def away(d):
+            lim = pd.to_numeric(d["limit_price"], errors="coerce")
+            cls = pd.to_numeric(d["close_price"], errors="coerce")
+            return (1e4 * (lim - cls).abs() / cls).where(lim > 0)
+        fa_, ra_ = away(foc), away(rest)
+        if fa_.notna().any():
+            T["F7b_limit_distance"] = pd.DataFrame([{
+                "focus median limit distance from close bps": fa_.median(),
+                "rest median limit distance from close bps": ra_.median(),
+                "focus orders with a limit": int(fa_.notna().sum())}]).round(2)
+            verdicts.append(("7 Are limits in the way?",
+                f"Median limit sits {fa_.median():.0f} bps from the close in "
+                f"{focus}, {ra_.median():.0f} bps elsewhere. "
+                + ("Tighter limits may be shaping the start." if fa_.median()
+                   < 0.5 * ra_.median() else "Limits do not look like the driver.")))
+
+    # --- F8 volatility -------------------------------------------------------------
+    if "volatility" in foc and foc["volatility"].notna().any():
+        wf, wr = weight_column(foc, FE_W), weight_column(rest, FE_W)
+        fv, rv = wmean(foc["volatility"], foc[wf]), wmean(rest["volatility"], rest[wr])
+        fb, rb = wmean(foc[FE], foc[wf]), wmean(rest[FE], rest[wr])
+        T["F8_volatility"] = pd.DataFrame([{
+            "focus volatility": fv, "rest volatility": rv,
+            "focus bps per vol point": fb / fv if fv else np.nan,
+            "rest bps per vol point": rb / rv if rv else np.nan}]).round(3)
+        if fv and rv:
+            worse_after = (fb / fv) < (rb / rv)
+            tail = ("" if not worse else
+                    "Still worse per unit of volatility, so volatility does not "
+                    "explain it." if worse_after else
+                    "Per unit of volatility it is in line: volatility explains it.")
+            verdicts.append(("8 Is it just more volatile?",
+                f"Volatility {fv:.1f} in {focus} vs {rv:.1f} elsewhere. " + tail))
+
+    # --- the orders to pull ------------------------------------------------------------
+    keep = [c for c in ("order_id", "symbol", "date", "side_label", "strategy",
+                        "first_start_time_min", "arrival_time", "adv_pct",
+                        "spread_bps", "volatility", "pct_close", "pr_cont",
+                        "close_pr", FE, "slip_close", "slip_pvwap",
+                        "reversion_bps", "notional", "cont_notional",
+                        "market_limit", "limit_price", "close_price")
+            if c in foc]
+    worst = foc.assign(first_exec_cost_usd=cost).sort_values(
+        "first_exec_cost_usd").head(FOCUS_TOP_ORDERS)[keep + ["first_exec_cost_usd"]]
+    if "first_start_time_min" in worst:
+        m = worst["first_start_time_min"]
+        worst.insert(keep.index("first_start_time_min"), "start HKT",
+                     m.map(lambda x: f"{int(x // 60):02d}:{int(x % 60):02d}"
+                           if pd.notna(x) else ""))
+        worst = worst.drop(columns="first_start_time_min")
+    if "spread_bps" in worst:
+        worst["first exec vs close, spreads"] = (worst[FE] / worst["spread_bps"]).round(2)
+    for c in ("first_exec_cost_usd", "notional", "cont_notional"):
+        if c in worst:
+            worst[c] = worst[c].round(0)
+    worst.to_csv(folder / "worst_orders.csv", index=False)
+    T["F9_worst_orders"] = worst.reset_index(drop=True)
+
+    # --- charts, workbook, log ------------------------------------------------------
+    _chart_pair(T.get("F1a_by_adv"), folder, "focus_1_by_adv.png",
+                f"{focus} against other markets, same ADV% band", focus, "ADV%")
+    _chart_pair(T.get("F2_by_start"), folder, "focus_2_by_start.png",
+                f"{focus} against other markets, by when the order started",
+                focus, "start")
+    _chart_pair(T.get("F6_by_month"), folder, "focus_3_by_month.png",
+                f"{focus} against other markets, by month", focus, "month")
+    try:
+        with pd.ExcelWriter(folder / "focus.xlsx", engine="openpyxl") as xl:
+            for name, tab in T.items():
+                if isinstance(tab, pd.DataFrame) and not tab.empty:
+                    tab.to_excel(xl, sheet_name=name[:31])
+    except Exception as exc:                          # pragma: no cover
+        warn(f"focus workbook not written: {exc}")
+
+    log("")
+    log("  WHAT EACH TEST POINTS TO")
+    for q, v in verdicts:
+        log(f"  {q}")
+        for chunk in _wrap(v, 70):
+            log(f"      {chunk}")
+    log("")
+    for name, tab in T.items():
+        if isinstance(tab, pd.DataFrame) and not tab.empty and name != "F9_worst_orders":
+            log(f"  --- {name} ---")
+            for line in tab.to_string().splitlines():
+                log("  " + line)
+            log("")
+    log(f"  The {len(worst)} orders that cost the most -> {folder / 'worst_orders.csv'}")
+    log("  Pull the child fills for those first: the tape is what confirms a cause.")
+    log(f"  tables -> {folder / 'focus.xlsx'}   charts -> {folder}")
+
+
+def _wrap(text: str, width: int) -> list:
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    return lines + ([cur] if cur else [])
 
 
 def main(argv=None) -> int:
@@ -5045,6 +5550,8 @@ def main(argv=None) -> int:
                    help="first order date to include (overrides DATE_FROM)")
     p.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD",
                    help="last order date to include (overrides DATE_TO)")
+    p.add_argument("--focus", metavar="MARKET",
+                   help='take one market apart, e.g. --focus "South Korea"')
     p.add_argument("--label", dest="label", metavar="TEXT",
                    help="period label for the charts (overrides PERIOD_LABEL)")
     args = p.parse_args(argv)
@@ -5068,11 +5575,11 @@ def main(argv=None) -> int:
                 p.error("--probe needs --data")
             probe(args.data)
         elif args.sample:
-            run(None, args.out, sample=True)
+            run(None, args.out, sample=True, focus=args.focus)
         else:
             if not args.data:
                 p.error("give --data, --sample or --self-test")
-            run(args.data, args.out)
+            run(args.data, args.out, focus=args.focus)
     finally:
         try:
             args.out.mkdir(parents=True, exist_ok=True)

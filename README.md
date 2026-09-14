@@ -599,3 +599,30 @@ Charts come from `charts_deck/`, which `moc_tca.py` writes beside `charts/`: the
 It also writes `<deck>.evidence.md` (each bullet with the rows behind it,
 checked against the saved deck) and runs the skill's plain-language check on
 the wording.
+
+## Taking one market apart: `--focus`
+
+```bash
+python moc_tca.py --data orders.csv --out output_h1 --focus "South Korea"
+```
+
+For when one market looks worse and the question is why. It runs on pre-traded
+orders in auction markets, on the first execution against the close, and sets
+the market against every other auction market. The run log prints one verdict
+line per test:
+
+| # | Question | Test |
+|---|---|---|
+| 0 | Is it worse at all? | first execution vs close, market vs the rest, with its interval |
+| 1 | Is it the orders? | same ADV% band, same spread band, and the rest re-weighted to the market's own mix |
+| 2 | Does it start too early? | by arrival bucket (or HKT start hour), with the share of the cost from each |
+| 3 | Does it trade too hard? | continuous participation, and PVWAP: in line means timing, worse means execution |
+| 4 | Is the auction too small? | ClosePR and share pre-traded, per ADV% band |
+| 5 | A few orders or all of them? | share of the cost in the worst 10 orders, median order |
+| 6 | Is it one month? | by month, with the share of the cost |
+| 7 | Are limits in the way? | limit vs market orders, limit distance from the close |
+| 8 | Is it just more volatile? | result per point of volatility |
+
+Output in `focus_<market>/`: `focus.xlsx` (every test table), four charts, and
+`worst_orders.csv` - the orders that cost the most, for the desk to pull the
+child fills on. The drill-down narrows the cause; the tape confirms it.
