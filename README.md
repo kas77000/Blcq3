@@ -179,7 +179,7 @@ for getting tagging into the extract.
   Executed shares = `#Shares × FR/100`.
 - Every aggregate is **notional-weighted**. Medians, hit rates and box
   distributions are per-order by design and labelled as such.
-- Means are **winsorised at 1/99**; the tails are pulled in, never dropped.
+- Averages are **not clipped by default**: each is `SUMPRODUCT(value, $Mln) / SUM($Mln)` over the orders in the bar, so it rebuilds in Excel. `--clip` (or `CLIP_OUTLIERS = True`) pulls each performance value to the 1st/99th percentile of its bar first; rows are never dropped, and spreads and shares are never clipped. The run log's first lines say which mode ran.
 - CIs are **95% percentile bootstrap**, 2,000 draws — slippage is fat-tailed and
   a normal-theory interval would be too narrow. Under n=8 there is no CI and the
   row is flagged small-sample. **A CI crossing zero means not distinguishable
@@ -438,7 +438,7 @@ support. Dropping whole orders for one bad cell would bias the rest, because
 orders with broken cells are not a random sample. Only orders that cannot
 contribute anywhere leave — no notional, no quantity, no readable side — and
 each exit is counted with its value. **Nothing is ever removed for being
-large**: winsorising handles the tails, and deleting the extremes would delete
+large**: clipping (`--clip`) is the tool for the tails, and deleting the extremes would delete
 the orders the review exists to find.
 
 ## Basis points for money, spreads for comparison

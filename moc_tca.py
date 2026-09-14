@@ -106,8 +106,9 @@ MOC_STRATEGIES: list[str] = ["CLOSE"]
 
 # A slippage this large is a broken record, not a fill. The CELL is cleared;
 # the order stays in the study. Nothing is ever removed for being merely
-# large - winsorising handles fat tails, and deleting the extremes would
-# delete the orders the review exists to find.
+# large - clipping (CLIP_OUTLIERS, off by default) is the tool for fat
+# tails, and deleting the extremes would delete the orders the review exists
+# to find.
 MAX_ABS_BPS = 2000.0
 
 # Period filter. None = whatever is in the file.
@@ -474,7 +475,15 @@ COHORT_ADV_LOW = 5.0          # %Adv below this = the auction could have taken i
 COHORT_FR_ZERO = 1.0          # FR below this = never traded
 
 # --- statistics -----------------------------------------------------------
-WINSOR = (0.01, 0.99)         # None to disable; applies to MEANS only
+# Clipping of extreme values before averaging. OFF by default: every chart
+# and table average is then a plain SUMPRODUCT(value, $Mln) / SUM($Mln) over
+# the orders in the bar, and anyone can rebuild it in Excel. Turn it on
+# (here, or --clip on the command line) to pull each performance value in
+# to the 1st / 99th percentile of the orders in its bar before averaging -
+# rows are never dropped, only their extreme values capped. Spreads and
+# shares (fill, %CLOSE, ClosePR) are never clipped either way.
+CLIP_OUTLIERS = False
+CLIP_PERCENTILES = (0.01, 0.99)
 BOOTSTRAP_N = 2000
 SEED = 7
 MIN_N_FOR_CI = 8
@@ -1968,8 +1977,14 @@ def weight_column(df: pd.DataFrame, preferred: str,
     return fallback
 
 
-def winsorize(v: np.ndarray, limits=WINSOR) -> np.ndarray:
-    """Pull the extreme tails back to the percentile value, do not drop them."""
+def winsorize(v: np.ndarray, limits=None) -> np.ndarray:
+    """Pull the extreme tails back to the percentile value, do not drop them.
+
+    Does nothing unless CLIP_OUTLIERS is on, or limits are passed explicitly.
+    The switch is read when called, not when the file loads, so --clip works.
+    """
+    if limits is None:
+        limits = CLIP_PERCENTILES if CLIP_OUTLIERS else None
     if limits is None:
         return v
     ok = ~np.isnan(v)
@@ -1980,7 +1995,7 @@ def winsorize(v: np.ndarray, limits=WINSOR) -> np.ndarray:
 
 
 def wmean(values, weights, winsor=True) -> float:
-    """Notional-weighted mean. Means are winsorised; nothing else is."""
+    """Notional-weighted mean. Clipped first only when CLIP_OUTLIERS is on."""
     v = np.asarray(values, dtype=float)
     w = np.asarray(weights, dtype=float)
     ok = ~np.isnan(v) & ~np.isnan(w) & (w > 0)
@@ -2510,7 +2525,8 @@ def t_in_spreads(df: pd.DataFrame, by, value: str, weight: str = "notional",
         n = int(ok.sum())
         if n == 0:
             continue
-        vv, ss, ww = winsorize(v[ok]), winsorize(sp[ok]), w[ok]
+        # The spread is a property of the stock, not noise: never clipped.
+        vv, ss, ww = winsorize(v[ok]), sp[ok], w[ok]
         bps = float(np.sum(vv * ww) / np.sum(ww))
         sprd = float(np.sum(ss * ww) / np.sum(ww))
         lo = hi = lo_b = hi_b = np.nan
@@ -2596,7 +2612,7 @@ def t_flow_split(df: pd.DataFrame) -> pd.DataFrame:
             row["% of notional in the close"] = wmean(
                 p["pct_close"], p["notional"], winsor=False)
         if "spread_bps" in p:
-            row["spread bps (wtd)"] = wmean(p["spread_bps"], p["notional"])
+            row["spread bps (wtd)"] = wmean(p["spread_bps"], p["notional"], winsor=False)
         rows.append(row)
     return pd.DataFrame(rows).set_index("flow").round(2) if rows else pd.DataFrame()
 
@@ -2656,7 +2672,7 @@ def t_exec_summary(df: pd.DataFrame) -> pd.DataFrame:
             wmean(df["fill_rate"], df["notional"], winsor=False),
             "%, notional-weighted")
     if "spread_bps" in df:
-        add("Book", "average spread", wmean(df["spread_bps"], df["notional"]),
+        add("Book", "average spread", wmean(df["spread_bps"], df["notional"], winsor=False),
             "bps, notional-weighted")
     for flow, r in t_flow_split(df).iterrows():
         for col, val in r.items():
@@ -2742,7 +2758,7 @@ def t_spread_normalised(df: pd.DataFrame, by: str) -> pd.DataFrame:
         return pd.DataFrame()
     rows = []
     for key, g in df.groupby(by, dropna=False, observed=True):
-        spread = wmean(g["spread_bps"], g["notional"])
+        spread = wmean(g["spread_bps"], g["notional"], winsor=False)
         row = {by: key, "orders": len(g),
                "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
                "spread bps (wtd)": spread}
@@ -3993,7 +4009,7 @@ def _market_row(key, g, total_notional, total_orders) -> dict:
         "% of orders": 100.0 * len(g) / max(total_orders, 1),
         "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
         "% of notional": 100.0 * g["notional"].sum() / max(total_notional, 1e-9),
-        "spread bps (wtd)": wmean(g["spread_bps"], g["notional"])
+        "spread bps (wtd)": wmean(g["spread_bps"], g["notional"], winsor=False)
             if "spread_bps" in g else np.nan,
         "wtd %CLOSE": wmean(g["pct_close"], g["notional"], winsor=False)
             if "pct_close" in g else np.nan,
@@ -5073,8 +5089,15 @@ def self_test() -> int:
           math.isnan(boot_ci(np.arange(3.0), np.ones(3))[0]))
     lo, hi = boot_ci(np.random.default_rng(1).normal(5, 1, 400), np.ones(400))
     check("bootstrap CI brackets a known mean", lo < 5 < hi, (lo, hi))
-    check("winsorising pulls the tail in, it does not drop rows",
-          len(winsorize(np.array([-999.0, 0, 1, 2, 3, 999.0]))) == 6)
+    tail = np.array([-999.0, 0, 1, 2, 3, 999.0])
+    check("clipping pulls the tail in, it does not drop rows",
+          len(winsorize(tail, (0.01, 0.99))) == 6
+          and winsorize(tail, (0.01, 0.99)).max() < 999.0)
+    check("by default nothing is clipped",
+          CLIP_OUTLIERS or np.array_equal(winsorize(tail), tail))
+    vals, wts = np.array([10.0, -900.0, 5.0, 7.0]), np.array([2.0, 1.0, 3.0, 4.0])
+    check("by default the average is SUMPRODUCT / SUM, as in Excel",
+          CLIP_OUTLIERS or abs(wmean(vals, wts) - (vals * wts).sum() / wts.sum()) < 1e-9)
 
     df = add_frontier_shortfall(df)
     df["cohort"] = assign_cohort(df)
@@ -5455,7 +5478,7 @@ def focus_market(t: dict, out_dir: Path, focus: str) -> None:
     T["F1b_by_spread"] = _vs(foc, rest, "spread_bucket")
     cells = [c for c in ("adv_bucket", "spread_bucket") if c in pre_all]
     act, exp, cover = standardised_gap(foc, rest, cells)
-    sprd = wmean(foc["spread_bps"], foc[weight_column(foc, FE_W)]) \
+    sprd = wmean(foc["spread_bps"], foc[weight_column(foc, FE_W)], winsor=False) \
         if "spread_bps" in foc else np.nan
     T["F1c_same_mix"] = pd.DataFrame([{
         "focus actual bps": act, "others with focus mix bps": exp,
@@ -5727,13 +5750,18 @@ def main(argv=None) -> int:
                    help="first order date to include (overrides DATE_FROM)")
     p.add_argument("--to", dest="date_to", metavar="YYYY-MM-DD",
                    help="last order date to include (overrides DATE_TO)")
+    p.add_argument("--clip", action="store_true",
+                   help="clip each performance value to the 1st/99th percentile "
+                        "of its bar before averaging (off by default)")
     p.add_argument("--focus", metavar="MARKET",
                    help='take one market apart, e.g. --focus "South Korea"')
     p.add_argument("--label", dest="label", metavar="TEXT",
                    help="period label for the charts (overrides PERIOD_LABEL)")
     args = p.parse_args(argv)
 
-    global DATE_FROM, DATE_TO, PERIOD_LABEL
+    global DATE_FROM, DATE_TO, PERIOD_LABEL, CLIP_OUTLIERS
+    if args.clip:
+        CLIP_OUTLIERS = True
     if args.date_from:
         DATE_FROM = args.date_from
     if args.date_to:
@@ -5742,6 +5770,11 @@ def main(argv=None) -> int:
         PERIOD_LABEL = args.label
 
     log(f"MOC / close-algo TCA   {_dt.datetime.now():%Y-%m-%d %H:%M}")
+    log("  averages: " + (
+        f"performance values CLIPPED to the {CLIP_PERCENTILES[0]:.0%} / "
+        f"{CLIP_PERCENTILES[1]:.0%} percentile of each bar before averaging"
+        if CLIP_OUTLIERS else
+        "NOT clipped - each is SUMPRODUCT(value, $Mln) / SUM($Mln) over its orders"))
 
     rc = 0
     try:
