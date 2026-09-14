@@ -261,9 +261,8 @@ COLUMNS = {
     "next_open_price": ["nxt_open", "NxtOpen", "next_open_price"],
     # Average executed price, local currency ($Mln is built from it).
     "avg_price":     ["avgprice", "AvgPrice", "avg_px", "AvgPx"],
-    # First execution price, if the extract carries one under any of these.
-    "first_exec_price": ["first_exec_price", "firstExecPrice", "first_px",
-                         "firstPx", "fexec_price"],
+    # First execution price. first_execprice is the AWS extract's name.
+    "first_exec_price": ["first_execprice", "first_exec_price", "first_px"],
     # capacity and behaviour
     "adv_pct":       ["%Adv", "% Adv", "PctAdv"],
     "adv":           ["Adv", "ADV"],
