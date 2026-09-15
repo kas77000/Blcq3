@@ -632,11 +632,18 @@ child fills on. The drill-down narrows the cause; the tape confirms it.
 The sanity report rebuilds each slippage column from prices and compares it
 with the file, side-adjusted, positive = saving:
 
-| Column | Rebuilt as | Prices |
+The desk's definitions, all side-adjusted:
+
+| Column | Positive when | Rebuilt as (positive = saving) |
 |---|---|---|
-| `Close` | side x (close - average price) | `endprice`, `avgprice` |
-| `first_exec_vs_close` | side x (close - first execution price) | `endprice`, first price if the extract has one |
-| `NextOpen` | side x (next open - close) | `nxt_open`, `endprice` |
+| `Close` | avgprice below (buy) / above (sell) the close | side x (endprice - avgprice) |
+| `NextOpen` | avgprice below (buy) / above (sell) the next open | side x (nxt_open - avgprice) |
+| `first_exec_vs_close` | the close below (buy) / above (sell) the first fill: **a cost** | side x (endprice - first_execprice), after x(-1) |
+| reversion (close to T+1) | = `NextOpen - Close` | side x (nxt_open - endprice) |
+
+First execution and reversion are **computed from the prices** for the charts
+(`FIRST_EXEC_SOURCE`, `REVERSION_SOURCE`); the file's versions are kept and
+checked here.
 
 Each is tried over the close, the order's own price and their midpoint, and
 reported as **matches**, **SIGN INVERTED** or **DOES NOT MATCH**, with the sign
