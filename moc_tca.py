@@ -1884,12 +1884,35 @@ def verify_slippage(df: pd.DataFrame, quiet: bool = False) -> pd.DataFrame:
                 rebuilt[ok].abs() > 1].mean())
             row[f"median |diff| bps, / {name}"] = round(diff, 2)
             if best is None or diff < best[1]:
-                best = (name, diff, agree)
+                best = (name, diff, agree, rebuilt)
         row["sign agrees %"] = round(100 * best[2], 1)
         row["best denominator"] = best[0]
+        # Buys and sells apart. A column that is a raw price difference, not
+        # side-adjusted, is right on one side and exactly wrong on the other;
+        # pooled, that reads as a mediocre match and hides the cause.
+        rb = best[3]
+        same = np.sign(file_bps) == np.sign(rb)
+        live = ok & (rb.abs() > 1)
+        by_side = {}
+        for side_name, mask in (("buys", live & df["is_buy"].astype(bool)),
+                                ("sells", live & ~df["is_buy"].astype(bool))):
+            by_side[side_name] = (float(same[mask].mean()) if mask.sum() else np.nan,
+                                  int(mask.sum()))
+            row[f"sign agrees % ({side_name})"] = (round(100 * by_side[side_name][0], 1)
+                                                   if mask.sum() else np.nan)
+        (ab, nb), (asl, ns) = by_side["buys"], by_side["sells"]
+        one_side = None
+        if min(nb, ns) >= 3:
+            if ab >= SLIPPAGE_SIGN_MIN and asl <= 1 - SLIPPAGE_SIGN_MIN:
+                one_side = "sells"
+            elif asl >= SLIPPAGE_SIGN_MIN and ab <= 1 - SLIPPAGE_SIGN_MIN:
+                one_side = "buys"
         flipped = 1e4 * -move / ((close + px) / 2)
         flip_diff = float((file_bps[ok] - flipped[ok]).abs().median())
-        if best[2] < SLIPPAGE_SIGN_MIN and flip_diff < best[1]:
+        if one_side:
+            row["verdict"] = (f"SIGN WRONG ON {one_side.upper()} ONLY - the column is "
+                              "not side-adjusted the way the script assumes")
+        elif best[2] < SLIPPAGE_SIGN_MIN and flip_diff < best[1]:
             row["verdict"] = ("SIGN INVERTED - the file is the other way round "
                               "from positive = saving")
         elif best[1] <= SLIPPAGE_BPS_TOL and best[2] >= SLIPPAGE_SIGN_MIN:
@@ -1914,7 +1937,9 @@ def verify_slippage(df: pd.DataFrame, quiet: bool = False) -> pd.DataFrame:
         if "best denominator" in r and isinstance(r.get("best denominator"), str):
             diffs = "  ".join(f"{k.split('/ ')[1]} {r[k]:.1f}" for k in r.index
                               if str(k).startswith("median |diff|"))
-            log(f"      sign agrees {r['sign agrees %']:.0f}%, median gap bps: "
+            log(f"      sign agrees {r['sign agrees %']:.0f}% (buys "
+                f"{r['sign agrees % (buys)']:.0f}%, sells "
+                f"{r['sign agrees % (sells)']:.0f}%), median gap bps: "
                 f"{diffs}  (best: {r['best denominator']})")
         if not str(r["verdict"]).startswith("matches"):
             warn(f"{r['check']} does not agree with the prices - read the line above")
@@ -5055,6 +5080,13 @@ def self_test() -> int:
           vr.get("verdict", pd.Series()).tolist())
     px["first_exec_vs_close"] = -px["first_exec_vs_close"]
     vr = verify_slippage(px, quiet=True)
+    # a raw (first - close) column, flipped on load, is right on buys and
+    # wrong on sells - the case the sell check exists for
+    raw_diff = 1e4 * (px["close_price"] - px["first_exec_price"]) / px["close_price"]
+    vr2 = verify_slippage(px.assign(first_exec_vs_close=-raw_diff * -1), quiet=True)
+    check("a column wrong on sells only is called out as one-sided",
+          vr2.loc[vr2["check"] == "first exec vs close", "verdict"]
+          .str.startswith("SIGN WRONG ON SELLS ONLY").all(), vr2["verdict"].tolist())
     check("an inverted column is called inverted",
           vr.loc[vr["check"] == "first exec vs close", "verdict"]
           .str.startswith("SIGN INVERTED").all(), vr["verdict"].tolist())
