@@ -314,6 +314,17 @@ SIDE_ALREADY_ADJUSTED = True
 # check in the run log reports buys and sells separately and says SIGN WRONG
 # ON SELLS ONLY (or BUYS) if this setting is wrong for one side.
 FIRST_EXEC_FLIP = "buys"
+
+# Where the first-execution figure comes from:
+#   "prices"  compute it: side x (endprice - first_execprice) / denominator,
+#             in bps, positive = the first fill beat the close  (default)
+#   "file"    use the export's first_exec_vs_close, with FIRST_EXEC_FLIP
+# With "prices", an order missing either price has no first-execution figure
+# and is left out of those charts; the file's column is never mixed in.
+FIRST_EXEC_SOURCE = "prices"
+# "close" is the benchmark convention. The export itself divides by the
+# midpoint of the two prices: -480.81 on 87,300 vs 91,600 is 4,300 / 89,450.
+FIRST_EXEC_DENOMINATOR = "close"      # "close" | "first" | "midpoint"
 BUY_VALUES = {"B", "BUY", "BOT", "1", "BUYS"}
 # Anything not in BUY_VALUES is labelled Sell, so a blank or an unexpected
 # code would silently become a sell order. SELL_VALUES exists to catch that:
@@ -802,6 +813,22 @@ def continuous_end_min(market: pd.Series, date: pd.Series) -> pd.Series:
     return out
 
 
+def first_exec_from_prices(close, first, is_buy,
+                           denominator: str = None) -> pd.Series:
+    """First execution vs close, in bps, side-adjusted, positive = saving.
+
+    Buy:  (close - first) / denominator   - bought below the close is good
+    Sell: (first - close) / denominator   - sold above the close is good
+    """
+    close = pd.to_numeric(pd.Series(close), errors="coerce")
+    first = pd.to_numeric(pd.Series(first, index=close.index), errors="coerce")
+    side = np.where(pd.Series(is_buy, index=close.index).astype(bool), 1.0, -1.0)
+    den = {"close": close, "first": first,
+           "midpoint": (close + first) / 2}[denominator or FIRST_EXEC_DENOMINATOR]
+    out = 1e4 * side * (close - first) / den
+    return out.where((close > 0) & (first > 0))
+
+
 def india_close_pr_proxy(df: pd.DataFrame, in_window: pd.Series) -> pd.Series:
     """India's close participation: its order participation (PR), not ClosePR.
 
@@ -921,9 +948,35 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
                  "first_exec_vs_close left as in the file.")
             flip = pd.Series(False, index=df.index)
         df.loc[flip, "first_exec_vs_close"] = -df.loc[flip, "first_exec_vs_close"]
-        log(f"  first_exec_vs_close: multiplied by -1 on {int(flip.sum()):,} "
-            f"{'buy ' if FIRST_EXEC_FLIP == 'buys' else ''}orders "
-            f"(FIRST_EXEC_FLIP = {FIRST_EXEC_FLIP!r})")
+        if FIRST_EXEC_SOURCE != "prices":
+            log(f"  first_exec_vs_close: multiplied by -1 on {int(flip.sum()):,} "
+                f"{'buy ' if FIRST_EXEC_FLIP == 'buys' else ''}orders "
+                f"(FIRST_EXEC_FLIP = {FIRST_EXEC_FLIP!r})")
+
+    if FIRST_EXEC_SOURCE == "prices":
+        have = {"first_exec_price", "close_price", "side"} <= set(df.columns)
+        if have:
+            buy = df["side"].astype(str).str.strip().str.upper().isin(
+                {v.upper() for v in BUY_VALUES})
+            if "first_exec_vs_close" in df:
+                df["first_exec_vs_close_file"] = df["first_exec_vs_close"]
+            df["first_exec_vs_close"] = first_exec_from_prices(
+                df["close_price"], df["first_exec_price"], buy)
+            got = int(df["first_exec_vs_close"].notna().sum())
+            log(f"  first_exec_vs_close computed from first_execprice and "
+                f"endprice on {got:,} orders: side x (close - first) / "
+                f"{FIRST_EXEC_DENOMINATOR}, positive = saving")
+            if "first_exec_vs_close_file" in df:
+                lost = int((df["first_exec_vs_close_file"].notna()
+                            & df["first_exec_vs_close"].isna()).sum())
+                if lost:
+                    log(f"    {lost:,} orders have the file's value but no prices - "
+                        "no first-execution figure for them")
+        else:
+            missing = [c for c in ("first_exec_price", "close_price", "side")
+                       if c not in df]
+            warn("FIRST_EXEC_SOURCE is 'prices' but " + ", ".join(missing)
+                 + " not found - using the file's first_exec_vs_close instead.")
 
     # --- does first execution agree with the close result? -----------------
     # On an order that traded before the auction, the first fill and the
@@ -1864,9 +1917,12 @@ def verify_slippage(df: pd.DataFrame, quiet: bool = False) -> pd.DataFrame:
     checks = []
     if "avg_price" in df and "slip_close" in df:
         checks.append(("vs Close", "slip_close", "avg_price", cls, "avg"))
-    if "first_exec_price" in df and "first_exec_vs_close" in df:
-        checks.append(("first exec vs close", "first_exec_vs_close",
-                       "first_exec_price", cls, "first"))
+    fe_col = ("first_exec_vs_close_file" if "first_exec_vs_close_file" in df
+              else "first_exec_vs_close")
+    if "first_exec_price" in df and fe_col in df:
+        checks.append(("first exec vs close" + (" (file)" if fe_col.endswith("_file")
+                                                else ""),
+                       fe_col, "first_exec_price", cls, "first"))
     if "next_open_price" in df and "slip_nextopen" in df:
         checks.append(("close to T+1 (NextOpen)", "slip_nextopen",
                        "next_open_price", cls, "open"))
@@ -5115,6 +5171,14 @@ def self_test() -> int:
     check("India window orders take PR as close participation, others keep ClosePR",
           ip["close_pr"].tolist() == [12.0, 0.0, 3.0] and used.tolist() == [True, False, False],
           ip["close_pr"].tolist())
+    fx = first_exec_from_prices([91600.0, 91600.0, 91600.0, 91600.0],
+                                [87300.0, 95900.0, 95900.0, 87300.0],
+                                [True, True, False, False], "close")
+    check("first exec from prices: buy below close and sell above are savings",
+          np.allclose(fx, [469.432, -469.432, 469.432, -469.432], atol=1e-3), fx.tolist())
+    check("first exec from prices, midpoint denominator, matches the export's -480.81",
+          abs(first_exec_from_prices([91600.0], [87300.0], [True], "midpoint").iloc[0]
+              - 480.72) < 0.05)
     check("decomposition is exact: waiting + execution = vs Arrival",
           np.allclose(df["wait_cost_bps"] + df["slip_close"], df["slip_arrival"]))
 
