@@ -83,12 +83,12 @@ AUCTION_ONLY_MIN_PCT = 99.5
 #   first_exec_vs_close
 #               positive when the CLOSE is below (buy) / above (sell) the first
 #               fill - i.e. positive is a COST, the opposite of the other two
-# So NextOpen is the execution against the next open, NOT the close against
-# the next open, and reversion is NextOpen - Close. When nxt_open and endprice
-# are there, reversion is computed from them directly instead.
-NEXTOPEN_IS_VS_CLOSE = False
-REVERSION_SOURCE = "prices"   # "prices": side x (nxt_open - endprice) / endprice
-                              # "file":   NextOpen - Close
+#
+# Reversion uses the NextOpen column as it stands (the desk's call), not
+# NextOpen - Close. The price check in the run log reports both readings -
+# NextOpen against avgprice, and against the close - so it shows which one
+# the column actually is. Set False to difference it again.
+NEXTOPEN_IS_VS_CLOSE = True
 
 # Performance charts are drawn in SPREADS: a group's notional-weighted result
 # divided by its notional-weighted spread, with that spread printed under the
@@ -1134,23 +1134,11 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["close_vs_session_bps"] = df["slip_vwap"] - df["slip_close"]
     if "slip_nextopen" in df and "slip_close" in df:
         # closing price -> next open. Negative = the price moved back against
-        # where we traded, i.e. temporary impact we paid. NextOpen and Close
-        # are both measured from the same average price, so their difference
-        # is side x (next open - close) - the avgprice cancels.
+        # where we traded, i.e. temporary impact we paid.
+        # NextOpen is used as it stands (NEXTOPEN_IS_VS_CLOSE), at the
+        # desk's call.
         df["reversion_bps"] = (df["slip_nextopen"] if NEXTOPEN_IS_VS_CLOSE
                                else df["slip_nextopen"] - df["slip_close"])
-    if (REVERSION_SOURCE == "prices" and "is_buy" in df
-            and {"next_open_price", "close_price"} <= set(df.columns)):
-        if "reversion_bps" in df:
-            df["reversion_bps_file"] = df["reversion_bps"]
-        nxt = pd.to_numeric(df["next_open_price"], errors="coerce")
-        cls = pd.to_numeric(df["close_price"], errors="coerce")
-        sgn = np.where(df["is_buy"], 1.0, -1.0)
-        df["reversion_bps"] = (1e4 * sgn * (nxt - cls) / cls).where(
-            (nxt > 0) & (cls > 0))
-        log(f"  reversion computed from nxt_open and endprice on "
-            f"{int(df['reversion_bps'].notna().sum()):,} orders: "
-            f"side x (next open - close) / close, positive = saving")
 
     # Implied execution of the portion that MISSED the auction.
     # The auction portion prints at the close by construction, contributing ~0
@@ -1946,10 +1934,8 @@ def verify_slippage(df: pd.DataFrame, quiet: bool = False) -> pd.DataFrame:
         checks.append(("first exec vs close" + (" (file)" if fe_col.endswith("_file")
                                                 else ""),
                        num(fe_col), num("first_exec_price"), cls))
-    rev_col = ("reversion_bps_file" if "reversion_bps_file" in df
-               else "reversion_bps")
-    if "next_open_price" in df and rev_col in df:
-        checks.append(("close to T+1 (NextOpen - Close)", num(rev_col), cls,
+    if "next_open_price" in df and "reversion_bps" in df:
+        checks.append(("close to T+1 (reversion used)", num("reversion_bps"), cls,
                        num("next_open_price")))
     rows = []
     buy = df["is_buy"].astype(bool)
@@ -5119,7 +5105,7 @@ def self_test() -> int:
     check("close vs session identity: Vwap - Close",
           np.allclose(df["close_vs_session_bps"],
                       df["slip_vwap"] - df["slip_close"]))
-    check("reversion is NextOpen - Close (both from avgprice) unless configured",
+    check("reversion is NextOpen as it stands, not differenced again",
           np.allclose(df["reversion_bps"], df["slip_nextopen"])
           if NEXTOPEN_IS_VS_CLOSE else
           np.allclose(df["reversion_bps"],

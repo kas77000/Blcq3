@@ -639,11 +639,12 @@ The desk's definitions, all side-adjusted:
 | `Close` | avgprice below (buy) / above (sell) the close | side x (endprice - avgprice) |
 | `NextOpen` | avgprice below (buy) / above (sell) the next open | side x (nxt_open - avgprice) |
 | `first_exec_vs_close` | the close below (buy) / above (sell) the first fill: **a cost** | side x (endprice - first_execprice), after x(-1) |
-| reversion (close to T+1) | = `NextOpen - Close` | side x (nxt_open - endprice) |
+| reversion (close to T+1) | the `NextOpen` column as it stands | checked against side x (nxt_open - endprice) |
 
-First execution and reversion are **computed from the prices** for the charts
-(`FIRST_EXEC_SOURCE`, `REVERSION_SOURCE`); the file's versions are kept and
-checked here.
+First execution is **computed from the prices** for the charts
+(`FIRST_EXEC_SOURCE`); the file's version is kept and checked here. Reversion
+uses `NextOpen` as it stands (`NEXTOPEN_IS_VS_CLOSE`); the two NextOpen lines
+in the check show whether it is measured from avgprice or from the close.
 
 Each is tried over the close, the order's own price and their midpoint, and
 reported as **matches**, **SIGN INVERTED** or **DOES NOT MATCH**, with the sign
