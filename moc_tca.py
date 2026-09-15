@@ -305,12 +305,15 @@ CSV_KWARGS = {"encoding": "utf-8-sig"}
 POSITIVE_IS_SAVING = True
 SIDE_ALREADY_ADJUSTED = True
 
-# first_exec_vs_close arrives the OTHER way round from the slippage columns:
-# negative means the first fill beat the close. Confirmed on a real order -
-# a buy first filled at 87,300 against a close of 91,600 is in the export as
-# -480.81 (4,300 over the midpoint 89,450). It is negated on load so that,
-# like every other measure here, positive is a saving.
-FIRST_EXEC_POSITIVE_IS_COST = True
+# How first_exec_vs_close is turned into positive = saving on load:
+#   "buys"  multiply BUY orders by -1, leave sells as in the file  (desk's call)
+#   "all"   multiply every order by -1
+#   "none"  use the file as it is
+# A buy first filled at 87,300 against a close of 91,600 is in the export as
+# -480.81 (4,300 over the midpoint 89,450), so buys need the flip. The price
+# check in the run log reports buys and sells separately and says SIGN WRONG
+# ON SELLS ONLY (or BUYS) if this setting is wrong for one side.
+FIRST_EXEC_FLIP = "buys"
 BUY_VALUES = {"B", "BUY", "BOT", "1", "BUYS"}
 # Anything not in BUY_VALUES is labelled Sell, so a blank or an unexpected
 # code would silently become a sell order. SELL_VALUES exists to catch that:
@@ -907,8 +910,20 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
             df[f] = -df[f]
         if "first_exec_vs_close" in df:
             df["first_exec_vs_close"] = -df["first_exec_vs_close"]
-    if FIRST_EXEC_POSITIVE_IS_COST and "first_exec_vs_close" in df:
-        df["first_exec_vs_close"] = -df["first_exec_vs_close"]
+    if "first_exec_vs_close" in df and FIRST_EXEC_FLIP in ("buys", "all"):
+        if FIRST_EXEC_FLIP == "all":
+            flip = pd.Series(True, index=df.index)
+        elif "side" in df:
+            flip = df["side"].astype(str).str.strip().str.upper().isin(
+                {v.upper() for v in BUY_VALUES})
+        else:
+            warn("FIRST_EXEC_FLIP is 'buys' but there is no side column - "
+                 "first_exec_vs_close left as in the file.")
+            flip = pd.Series(False, index=df.index)
+        df.loc[flip, "first_exec_vs_close"] = -df.loc[flip, "first_exec_vs_close"]
+        log(f"  first_exec_vs_close: multiplied by -1 on {int(flip.sum()):,} "
+            f"{'buy ' if FIRST_EXEC_FLIP == 'buys' else ''}orders "
+            f"(FIRST_EXEC_FLIP = {FIRST_EXEC_FLIP!r})")
 
     # --- does first execution agree with the close result? -----------------
     # On an order that traded before the auction, the first fill and the
@@ -926,7 +941,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
             if agree < 0.5:
                 warn("first_exec_vs_close disagrees with vs Close on most orders -")
                 log("    its sign looks inverted. Check one order's first fill against")
-                log("    the close and set FIRST_EXEC_POSITIVE_IS_COST accordingly.")
+                log("    the close and set FIRST_EXEC_FLIP accordingly.")
 
     # --- identity ---------------------------------------------------------
     if "side" in df:
@@ -3779,8 +3794,12 @@ def make_sample(n: int = 2400, seed: int = SEED) -> pd.DataFrame:
     first_exec = np.round(np.where(miss > 0.02,
                                    cont_vs_close + rng.normal(0, 9, n),
                                    np.nan), 3)
-    if FIRST_EXEC_POSITIVE_IS_COST:
-        first_exec = -first_exec          # as the export writes it
+    # written the way FIRST_EXEC_FLIP says the export writes it, so loading
+    # the sample exercises the same flip the real file gets
+    if FIRST_EXEC_FLIP == "all":
+        first_exec = -first_exec
+    elif FIRST_EXEC_FLIP == "buys":
+        first_exec = np.where(side == "Buy", -first_exec, first_exec)
 
     exec_shares = order_shares_k * 1000 * fr / 100.0
     notional_mln = np.round(exec_shares * price / 1e6, 4)
