@@ -23,6 +23,7 @@ Output, in --out (default output_moc_request/):
 
     aws_concat_<from>_<to>.csv    every parquet row in the window, one per aggrTgtId
     moc_close_<from>_<to>.csv     the file to send
+    moc_close_<from>_<to>.xlsx    the same, plus to_review, audit and run_log sheets
     moc_close_audit.csv           same orders with aggrTgtId, sym, the source
                                   columns and which rule set each value
     run_log.txt                   what was read, dropped, derived and assumed
@@ -949,6 +950,71 @@ def probe(aws: pd.DataFrame, cols: dict) -> None:
 
 
 # ===========================================================================
+# EXCEL
+# ===========================================================================
+
+TEXT_COLUMNS = {"trade_date", "sedol", "bbg_ticker", "ric", "aggrTgtId", "sym"}
+QTY_COLUMNS = {"qty_order", "qty_close_sent", "qty_close_exec", "volume_close", "cumqty"}
+
+
+def review_rows(out: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
+    """Orders to fix before sending: an unexplained reason or a blank identifier."""
+    blank = pd.Series(False, index=out.index)
+    for col in ("sedol", "bbg_ticker", "ric"):
+        blank |= out[col].isna() | out[col].astype(str).str.strip().eq("")
+    why = np.where(out["unfilled_reason"].eq(OTHER_UNEXPLAINED), "unfilled_reason unexplained", "")
+    why = pd.Series(why, index=out.index)
+    why = why.where(~blank, (why + "; identifier blank").str.lstrip("; "))
+    keep = why.ne("")
+    front = ["to_fix", "aggrTgtId", "sym"]
+    rest = [c for c in audit.columns if c not in front]
+    return audit.loc[keep].assign(to_fix=why[keep])[front + rest]
+
+
+def write_excel(out: pd.DataFrame, audit: pd.DataFrame, path: Path) -> None:
+    """One workbook: the request sheet exactly as the CSV, then what to check.
+
+      moc_close   the file to send, requested columns in requested order
+      to_review   orders with an unexplained reason or a blank identifier
+      audit       every order with its source columns and rules
+      run_log     this run's log
+    """
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    review = review_rows(out, audit)
+    sheets = {
+        "moc_close": out,
+        "to_review": review,
+        "audit": audit,
+        "run_log": pd.DataFrame({"run_log": _LOG}),
+    }
+    with pd.ExcelWriter(path, engine="openpyxl") as xl:
+        for name, frame in sheets.items():
+            frame.to_excel(xl, sheet_name=name, index=False)
+            ws = xl.sheets[name]
+            if name == "run_log":
+                ws.column_dimensions["A"].width = 120
+                continue
+            ws.freeze_panes = "A2"
+            if len(frame.columns):
+                ws.auto_filter.ref = ws.dimensions
+            for i, col in enumerate(frame.columns, start=1):
+                cell = ws.cell(row=1, column=i)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill("solid", fgColor="DDE4EE")
+                cell.alignment = Alignment(vertical="center")
+                fmt = ("@" if col in TEXT_COLUMNS else
+                       "#,##0" if col in QTY_COLUMNS else None)
+                if fmt:
+                    for (c,) in ws.iter_rows(min_row=2, min_col=i, max_col=i):
+                        c.number_format = fmt
+                width = max([len(str(col))] + [len(str(v)) for v in frame[col].head(500)])
+                ws.column_dimensions[get_column_letter(i)].width = min(max(width + 2, 8), 60)
+    log(f"  Excel: moc_close {len(out):,} rows, to_review {len(review):,} rows")
+
+
+# ===========================================================================
 # SELF-TEST
 # ===========================================================================
 
@@ -1180,6 +1246,21 @@ def self_test() -> int:
         check("no answer from either table stops the run", False, True)
     except SystemExit:
         check("no answer from either table stops the run", True, True)
+
+    print("\nexcel")
+    k_out.loc[k_out.index[0], "sedol"] = "0123456"
+    with tempfile.TemporaryDirectory() as tmp:
+        xp = Path(tmp) / "moc_close.xlsx"
+        write_excel(k_out, k_audit, xp)
+        book = pd.read_excel(xp, sheet_name=None, dtype={"sedol": str})
+    check("four sheets, in order", list(book), ["moc_close", "to_review", "audit", "run_log"])
+    check("moc_close has the requested columns", list(book["moc_close"].columns), OUTPUT_COLUMNS)
+    check("moc_close has every order", len(book["moc_close"]), len(k_out))
+    check("a sedol keeps its leading zero", book["moc_close"].at[0, "sedol"], "0123456")
+    check("to_review lists the unexplained order A7",
+          "A7" in set(book["to_review"]["aggrTgtId"]), True)
+    check("to_review leaves out a filled order with its identifiers",
+          "A9" in set(book["to_review"]["aggrTgtId"]), False)
     print(f"\nself-test: {'PASS' if not fails else f'{fails} FAILURE(S)'}")
     return 1 if fails else 0
 
@@ -1251,9 +1332,12 @@ def main(argv=None) -> int:
         out_path = args.out / f"moc_close_{tag}.csv"
         out.to_csv(out_path, index=False)
         audit.to_csv(args.out / "moc_close_audit.csv", index=False)
+        xlsx_path = args.out / f"moc_close_{tag}.xlsx"
         log("")
         log(f"  wrote {out_path}")
         log(f"  wrote {args.out / 'moc_close_audit.csv'}")
+        log(f"  wrote {xlsx_path}")
+        write_excel(out, audit, xlsx_path)
         return 0
     finally:
         (args.out / "run_log.txt").write_text("\n".join(_LOG), encoding="utf-8")
