@@ -11,11 +11,12 @@ builds the CSV the request asks for:
 snap_sent_bps, snap_used_bps and limit_status are NOT computed. They are
 written as empty columns so the file keeps the requested layout.
 
-Set AWS_DIR, KDB_HOST and KDB_PORT below first.
+Set AWS_DIR, KDB_HOST, KDB_PORT and CROSSCODE_PATH below first.
 
     python moc_close_request.py --probe          # check the mapping and STOP - run this first
-    python moc_close_request.py                  # build the files, identifiers from kdb
+    python moc_close_request.py                  # build the files, identifiers from CrossCode and kdb
     python moc_close_request.py --no-kdb         # build without kdb: no sedol
+    python moc_close_request.py --no-crosscode   # build without CrossCode: SG ric may be blank
     python moc_close_request.py --self-test      # synthetic parquet and a fake kdb, end to end
 
 Output, in --out (default output_moc_request/):
@@ -29,9 +30,11 @@ Output, in --out (default output_moc_request/):
 What comes from where (AWS column -> requested column):
 
     _date            trade_date
+    CrossCode        ric (RicCode), bbg_ticker (BloombergCode) where kdb has none
     kdb              sedol (ID_SEDOL1), bbg_ticker (TICKER + EQY_PRIM_EXCH_SHRT),
-                     ric (ric_code), from equity_master, else equity
-    sym              ric / bbg_ticker where kdb has nothing, converted where
+                     ric (ric_code) where CrossCode has none; equity_master,
+                     else equity
+    sym              ric / bbg_ticker where neither has one, converted where
                      the conversion is mechanical (JP, HK, AU)
     country / sym    market
     side             side (SSH -> SELL_SHORT)
@@ -65,10 +68,14 @@ AWS_DIR = r"data\aws"
 KDB_HOST = "CHANGEME"
 KDB_PORT = 0
 
+# The security master, the same CrossCode.csv Nova's LimitUpDown reads.
+# ric comes from its RicCode.
+CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
+
 # --- scope ----------------------------------------------------------------
 DATE_FROM = "2026-07-11"
 DATE_TO = "2026-09-11"
-MARKETS = ["AU", "HK", "JP", "SG"]
+MARKETS = ["AU", "HK", "JP", "SP"]
 
 # Which orders are "MOC algo orders". Matched on the AWS algo column,
 # upper-cased. On this platform the CLOSE label covers the MOC product
@@ -298,6 +305,12 @@ def sym_market(sym):
     return sym_parts(sym)[1]
 
 
+def scope_markets() -> set[str]:
+    """MARKETS as written, country or Bloomberg code: SP and SG are both Singapore."""
+    return {COUNTRY_MAP.get(m.upper(), BBG_SUFFIX.get(m.upper(), m.upper()))
+            for m in MARKETS}
+
+
 def identifiers(sym) -> tuple[str | None, str | None]:
     """(ric, bbg_ticker) from the symbol, where the conversion is mechanical.
 
@@ -462,8 +475,12 @@ def kdb_connect():
     return pykx.SyncQConnection(host=KDB_HOST, port=int(KDB_PORT))
 
 
-def kdb_candidates(sym) -> list[str]:
-    """The sym as the extract spells it, then the kdb form: TICKER.COMPOSITE."""
+def kdb_candidates(sym, extra=()) -> list[str]:
+    """The sym as the extract spells it, then the kdb form: TICKER.COMPOSITE.
+
+    extra is the CrossCode match for the row, which is the only way to reach
+    a name whose sym does not convert (an SG RIC to its Bloomberg ticker).
+    """
     s = str(sym).strip()
     out = [s]
     code, mkt, _ = sym_parts(s)
@@ -472,6 +489,20 @@ def kdb_candidates(sym) -> list[str]:
         if mkt == "HK" and code.isdigit():
             alts = [f"{int(code)}.HK", f"{int(code):04d}.HK"]
         out += [a for a in alts if a not in out]
+    for e in extra:
+        for a in kdb_candidates(e):
+            if a and a not in out:
+                out.append(a)
+    return out
+
+
+def row_candidates(audit: pd.DataFrame) -> list[list[str]]:
+    extras = [c for c in ("cc_fidessa", "cc_bbg") if c in audit]
+    out = []
+    for i in audit.index:
+        extra = [audit.at[i, c] for c in extras
+                 if isinstance(audit.at[i, c], str) and audit.at[i, c]]
+        out.append(kdb_candidates(audit.at[i, "sym"], extra))
     return out
 
 
@@ -505,9 +536,27 @@ def fetch_equity(conn, d_from, d_to, syms: list[str]) -> tuple[pd.DataFrame, str
         f"e.g. {syms[:4]}")
 
 
+def _set_identifier(out, audit, col, value: pd.Series, source: str,
+                    keep: pd.Series | None = None) -> None:
+    """Take value where it has one, unless keep says the current one stays."""
+    value = value.where(value.notna() & value.astype(str).str.strip().ne(""))
+    use = value.notna() if keep is None else value.notna() & ~keep
+    differ = use & out[col].notna() & (out[col] != value)
+    if differ.any():
+        ex = pd.DataFrame({"sym": audit.loc[differ, "sym"], "was": out.loc[differ, col],
+                           source: value[differ]}).head(5)
+        log(f"  {col}: {source} replaces a different value on "
+            f"{int(differ.sum()):,} orders, e.g.\n{ex.to_string()}")
+    out[col] = out[col].astype(object)
+    audit[col] = audit[col].astype(object)
+    out.loc[use, col] = value[use]
+    audit.loc[use, col] = value[use]
+    audit.loc[use, f"{col}_source"] = source
+
+
 def apply_kdb(out: pd.DataFrame, audit: pd.DataFrame, eq: pd.DataFrame,
               table: str) -> None:
-    """Overwrite sedol / bbg_ticker / ric with kdb's where kdb has a value.
+    """sedol and bbg_ticker from kdb; ric only where CrossCode had none.
 
     Row for the trade date first; failing that the latest row for the sym in
     the window, flagged in the audit as another date.
@@ -529,19 +578,19 @@ def apply_kdb(out: pd.DataFrame, audit: pd.DataFrame, eq: pd.DataFrame,
     latest = eq.drop_duplicates("sym", keep="last").set_index("sym")
 
     got = {k: [] for k in ("kdb_sym", "kdb_match", "k_sedol", "k_bbg", "k_ric")}
-    for sym, day in zip(audit["sym"], pd.to_datetime(out["trade_date"])):
-        hit, how = None, "not found"
-        for cand in kdb_candidates(sym):
+    days = pd.to_datetime(out["trade_date"])
+    for cands, day in zip(row_candidates(audit), days):
+        hit, sym, how = None, None, "not found"
+        for cand in cands:
             if (day, cand) in exact.index:
-                hit, how = exact.loc[(day, cand)], "trade date"
+                hit, sym, how = exact.loc[(day, cand)], cand, "trade date"
                 break
         if hit is None:
-            for cand in kdb_candidates(sym):
+            for cand in cands:
                 if cand in latest.index:
-                    hit, how = latest.loc[cand], "other date"
+                    hit, sym, how = latest.loc[cand], cand, "other date"
                     break
-        got["kdb_sym"].append(hit.name[1] if how == "trade date" else
-                              (hit.name if hit is not None else None))
+        got["kdb_sym"].append(sym)
         got["kdb_match"].append(how)
         for k in ("k_sedol", "k_bbg", "k_ric"):
             got[k].append(None if hit is None else hit[k])
@@ -553,20 +602,111 @@ def apply_kdb(out: pd.DataFrame, audit: pd.DataFrame, eq: pd.DataFrame,
     log(f"  kdb sym spelled as in the extract on {as_is:,}, converted on "
         f"{int(k['kdb_sym'].notna().sum()) - as_is:,}")
 
-    for col, kc in (("sedol", "k_sedol"), ("bbg_ticker", "k_bbg"), ("ric", "k_ric")):
-        derived = out[col]
-        differ = k[kc].notna() & derived.notna() & (k[kc] != derived)
-        if differ.any():
-            ex = pd.DataFrame({"derived": derived[differ], "kdb": k.loc[differ, kc]}).head(5)
-            warn(f"{col}: kdb differs from the sym-derived value on "
-                 f"{int(differ.sum()):,} orders; kdb used. e.g.\n{ex.to_string()}")
-        out[col] = k[kc].where(k[kc].notna(), derived)
-        audit[col] = out[col]
+    from_cc = (audit["ric_source"].eq("crosscode") if "ric_source" in audit
+               else pd.Series(False, index=out.index))
+    _set_identifier(out, audit, "sedol", k["k_sedol"], "kdb")
+    _set_identifier(out, audit, "bbg_ticker", k["k_bbg"], "kdb")
+    _set_identifier(out, audit, "ric", k["k_ric"], "kdb", keep=from_cc)
     audit["kdb_sym"] = k["kdb_sym"]
     audit["kdb_match"] = k["kdb_match"]
     missing = k["kdb_match"].eq("not found")
     if missing.any():
         warn(f"{int(missing.sum()):,} orders not in {table}; their syms: "
+             f"{sorted(audit.loc[missing, 'sym'].astype(str).unique())[:10]}")
+
+
+# ===========================================================================
+# CROSSCODE - the security master
+# ===========================================================================
+# Primary listings only: a Japanese name also has lines on JNX-MAIN and
+# CHJ-MAIN, whose RICs are not the one the request wants.
+CC_VENUES = {"ASX-MAIN": "AU", "HKG-MAIN": "HK", "HKG-GEM": "HK",
+             "TYO-MAIN": "JP", "SES-MAIN": "SG"}
+# LimitUpDown reads "FidessaCode", TradingData's copy has "#FidessaCode".
+CC_FIDESSA = ("FidessaCode", "#FidessaCode")
+
+
+def load_crosscode(path) -> pd.DataFrame:
+    p = Path(path)
+    if "CHANGEME" in str(path) or not p.is_file():
+        raise SystemExit(f"ERROR: CROSSCODE_PATH is not a file: {path}. Set it at "
+                         f"the top of moc_close_request.py, or run with --no-crosscode")
+    cc = pd.read_csv(p, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+    cc.columns = [c.strip() for c in cc.columns]
+    missing = [c for c in ("RicCode", "BloombergCode") if c not in cc.columns]
+    if missing:
+        raise SystemExit(f"ERROR: {p.name} has no {', '.join(missing)} column")
+    fid = next((c for c in CC_FIDESSA if c in cc.columns), None)
+    cc = cc.apply(lambda s: s.str.strip())
+    cc["cc_fidessa"] = cc[fid] if fid else ""
+    total = len(cc)
+
+    bbg = cc["BloombergCode"].str.upper()
+    cc["ticker"] = bbg.str.rsplit(" ", n=1).str[0]
+    if "FidessaMarket" in cc:
+        cc["market"] = cc["FidessaMarket"].map(CC_VENUES)
+    else:
+        warn(f"{p.name} has no FidessaMarket: markets taken from the "
+             f"BloombergCode, so secondary venues cannot be told apart")
+        cc["market"] = bbg.str.rsplit(" ", n=1).str[-1].map(BBG_SUFFIX)
+    cc = cc[cc["market"].isin(scope_markets())
+            & (cc["RicCode"].ne("") | cc["BloombergCode"].ne(""))].copy()
+
+    # Several lines for one code: the live one wins, then the file's order.
+    if "BloombergStatus" in cc:
+        status = cc["BloombergStatus"].str.upper()
+        cc["_rank"] = np.where(status.isin(["", "ACTV"]), 0, 1)
+        cc = cc.sort_values("_rank", kind="stable")
+    log(f"  CrossCode {p.name}: {total:,} rows, {len(cc):,} primary listings in "
+        f"{'/'.join(sorted(scope_markets()))}")
+    return cc
+
+
+def apply_crosscode(out: pd.DataFrame, audit: pd.DataFrame, cc: pd.DataFrame) -> None:
+    """ric (RicCode) and bbg_ticker (BloombergCode) from the CrossCode line.
+
+    The sym is tried as a FidessaCode, then as a RicCode, then its ticker
+    within its market against the BloombergCode ticker. The audit says which.
+    """
+    def index(key: pd.Series):
+        k = key.str.upper()
+        return cc[k.ne("")].assign(_k=k[k.ne("")]).drop_duplicates("_k").set_index("_k")
+
+    by_fid = index(cc["cc_fidessa"])
+    by_ric = index(cc["RicCode"])
+    by_tick = index(cc["ticker"] + "|" + cc["market"])
+
+    rows = {k: [] for k in ("cc_match", "cc_fidessa", "RicCode", "BloombergCode")}
+    for sym, mkt, ric in zip(audit["sym"], out["market"], out["ric"]):
+        s = str(sym).strip().upper()
+        code = sym_parts(s)[0]
+        if code is not None and mkt == "HK" and code.isdigit():
+            code = str(int(code))
+        tries = [("FidessaCode", by_fid, s), ("RicCode", by_ric, s)]
+        if isinstance(ric, str):
+            tries.append(("RicCode from sym", by_ric, ric.upper()))
+        if code is not None:
+            tries.append(("ticker", by_tick, f"{code}|{mkt}"))
+        hit, how = None, "not found"
+        for name, idx, key in tries:
+            if key in idx.index and idx.loc[key, "market"] == mkt:
+                hit, how = idx.loc[key], name
+                break
+        rows["cc_match"].append(how)
+        for c in ("cc_fidessa", "RicCode", "BloombergCode"):
+            rows[c].append(None if hit is None else hit[c])
+
+    m = pd.DataFrame(rows, index=out.index)
+    log("  CrossCode matched by: " + ", ".join(
+        f"{n} {v:,}" for n, v in m["cc_match"].value_counts().items()))
+    audit["cc_match"] = m["cc_match"]
+    audit["cc_fidessa"] = m["cc_fidessa"]
+    audit["cc_bbg"] = m["BloombergCode"]
+    _set_identifier(out, audit, "ric", m["RicCode"], "crosscode")
+    _set_identifier(out, audit, "bbg_ticker", m["BloombergCode"], "crosscode")
+    missing = m["cc_match"].eq("not found")
+    if missing.any():
+        warn(f"{int(missing.sum()):,} orders not in the CrossCode; their syms: "
              f"{sorted(audit.loc[missing, 'sym'].astype(str).unique())[:10]}")
 
 
@@ -591,7 +731,7 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
         raise SystemExit(f"ERROR: no algo column ({', '.join(ALGO_COLUMNS)})")
     algo = frame[algo_col].astype(str).str.strip().str.upper()
     is_moc = algo.isin(MOC_ALGOS)
-    in_mkt = market.isin(MARKETS)
+    in_mkt = market.isin(scope_markets())
     log(f"  {algo_col} in {sorted(MOC_ALGOS)}: {int(is_moc.sum()):,} orders; "
         f"in {'/'.join(MARKETS)}: {int(in_mkt.sum()):,}; both: "
         f"{int((is_moc & in_mkt).sum()):,}")
@@ -672,6 +812,8 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     if "qatt_close" in cols:
         audit["maxQattCloseSym"] = num(frame, cols, "qatt_close")
     audit["ended_before_close"] = early
+    for col in ("sedol", "bbg_ticker", "ric"):
+        audit[f"{col}_source"] = np.where(out[col].notna(), "extract", "")
     audit["reason_rule"] = rule
     audit["source_file"] = frame["source_file"]
 
@@ -699,6 +841,12 @@ def report(out: pd.DataFrame, audit: pd.DataFrame) -> None:
     log(audit["reason_rule"].value_counts().to_string())
     log("")
 
+    log("  where the identifiers came from (orders, by market):")
+    for col in ("sedol", "bbg_ticker", "ric"):
+        src = audit[f"{col}_source"].replace("", "blank")
+        log(f"    {col}:")
+        log("      " + pd.crosstab(out["market"], src).to_string().replace("\n", "\n      "))
+    log("")
     for col in ("sedol", "bbg_ticker", "ric"):
         blank = out[col].isna() | out[col].astype(str).str.strip().eq("")
         if blank.any():
@@ -757,7 +905,7 @@ def probe(aws: pd.DataFrame, cols: dict) -> None:
 
     algo_col = find_column(aws.columns, ALGO_COLUMNS)
     if algo_col is not None and "fill_close" in cols:
-        in_mkt = market.isin(MARKETS)
+        in_mkt = market.isin(scope_markets())
         sub = aws.loc[in_mkt]
         fill = num(sub, cols, "fill_close").fillna(0)
         cum = num(sub, cols, "cumqty")
@@ -837,6 +985,8 @@ def self_test() -> int:
         ("A8", "2026-07-23", "6758.T", "Buy",
          dict(cumqty=0, fillCloseSize=0, marketCloseSize=0),
          "OTHER: no closing auction held", 1000),
+        ("A9", "2026-07-23", "OCBC.SP", "Buy",
+         dict(country="Singapore", fend_time="17:10:00"), "", 1000),
         # out of scope: VWAP algo, another market, outside the window
         ("X1", "2026-07-23", "6758.T", "Buy", dict(clientAlgo="VWAP"), None, None),
         ("X2", "2026-07-23", "005930.KS", "Buy", dict(country="Korea"), None, None),
@@ -867,7 +1017,7 @@ def self_test() -> int:
         fails += not ok
         print(f"  {'ok  ' if ok else 'FAIL'} {name}: got {got!r}" + ("" if ok else f", want {want!r}"))
 
-    check("rows = in-scope orders", len(out), 8)
+    check("rows = in-scope orders", len(out), 9)
     check("columns in requested order", list(out.columns), OUTPUT_COLUMNS)
     by_id = audit.set_index("aggrTgtId")
     for oid, _, _, _, _, want_reason, want_sent in rows:
@@ -903,6 +1053,60 @@ def self_test() -> int:
         def pd(self):
             return self.df
 
+    print("\ncrosscode")
+    cc_text = (
+        "#FidessaCode,RicCode,Type,BloombergCode,FidessaMarket,BloombergStatus\n"
+        # a delisted line first: the live one below must win
+        "D05.SP,D05old.SI,Equity,DBS SP,SES-MAIN,DLST\n"
+        "D05.SP,D05.SI,Equity,DBS SP,SES-MAIN,ACTV\n"
+        "OCBC.SP,OCBC.SI,Equity,OCBC SP,SES-MAIN,ACTV\n"
+        # a secondary Japanese venue, ignored
+        "9984.JP,9984.JNX,Equity,9984 JT,JNX-MAIN,ACTV\n"
+        "9984.JP,9984.T,Equity,9984 JT,TYO-MAIN,ACTV\n"
+        "BHP.AU,BHP.AX,Equity,BHP AT,ASX-MAIN,ACTV\n"
+        "LINK.HK,0823.HK,Equity,823 HK,HKG-MAIN,ACTV\n"
+        "1299.HK,1299.HK,Equity,1299 HK,HKG-MAIN,\n"
+        ",U11.SI,Equity,UOB SP,SES-MAIN,ACTV\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        ccp = Path(tmp) / "CrossCode.csv"
+        ccp.write_text(cc_text, encoding="utf-8")
+        cc = load_crosscode(ccp)
+        bad = Path(tmp) / "bad.csv"
+        bad.write_text("FidessaCode,BloombergCode\nX.JP,X JT\n", encoding="utf-8")
+        for name, path in (("a placeholder path stops the run", r"CHANGEME\CrossCode.csv"),
+                           ("a CrossCode without RicCode stops the run", bad)):
+            try:
+                load_crosscode(path)
+                check(name, False, True)
+            except SystemExit:
+                check(name, True, True)
+    check("secondary venues are left out", "9984.JNX" in set(cc["RicCode"]), False)
+
+    c_out, c_audit = out.copy(), audit.copy()
+    apply_crosscode(c_out, c_audit, cc)
+    cb = c_audit.set_index("aggrTgtId")
+    check("A6 SG ric by RicCode", (cb.at["A6", "ric"], cb.at["A6", "cc_match"]),
+          ("D05.SI", "RicCode"))
+    check("A6 SG bbg from CrossCode",
+          (cb.at["A6", "bbg_ticker"], cb.at["A6", "bbg_ticker_source"]),
+          ("DBS SP", "crosscode"))
+    check("A9 house sym OCBC.SP -> ric by FidessaCode",
+          (cb.at["A9", "ric"], cb.at["A9", "cc_match"]), ("OCBC.SI", "FidessaCode"))
+    check("A1 9984.T keeps the TYO line, not JNX", cb.at["A1", "ric"], "9984.T")
+    check("A3 BHP AT by the RIC its sym converts to", cb.at["A3", "cc_match"],
+          "RicCode from sym")
+    t_out = pd.DataFrame({"market": ["SG"], "ric": [None], "bbg_ticker": ["UOB SP"]},
+                         dtype=object)
+    t_audit = pd.DataFrame({"sym": ["UOB SP"], "ric": [None], "bbg_ticker": ["UOB SP"],
+                            "ric_source": [""], "bbg_ticker_source": ["extract"]})
+    apply_crosscode(t_out, t_audit, cc)
+    check("UOB SP, no FidessaCode or RIC to go on: by ticker within market",
+          (t_audit.at[0, "cc_match"], t_out.at[0, "ric"]), ("ticker", "U11.SI"))
+    check("A5 1299.HK, blank status kept", cb.at["A5", "ric_source"], "crosscode")
+    check("A7 not in CrossCode keeps the sym ric",
+          (cb.at["A7", "ric"], cb.at["A7", "ric_source"]), ("6758.T", "extract"))
+
+    print("\nkdb")
     kdb_rows = pd.DataFrame([
         # trade-date row, found through the converted sym
         dict(date=pd.Timestamp("2026-07-21"), sym="9984.JP", ID_SEDOL1="6770620",
@@ -910,9 +1114,12 @@ def self_test() -> int:
         # only a day earlier than the order's trade date
         dict(date=pd.Timestamp("2026-07-21"), sym="BHP.AU", ID_SEDOL1="6144690",
              TICKER="BHP", EQY_PRIM_EXCH_SHRT="AT", ric_code="BHP.AX"),
-        # SG: the sym as the extract spells it; fills the ticker derivation cannot
-        dict(date=pd.Timestamp("2026-07-23"), sym="D05.SI", ID_SEDOL1="6175203",
-             TICKER="DBS", EQY_PRIM_EXCH_SHRT="SP", ric_code=""),
+        # SG: kdb keys DBS.SP, reachable from D05.SI only through CrossCode
+        dict(date=pd.Timestamp("2026-07-23"), sym="DBS.SP", ID_SEDOL1="6175203",
+             TICKER="DBS", EQY_PRIM_EXCH_SHRT="SP", ric_code="DBSM.SI"),
+        # CrossCode's ric must survive a different kdb ric_code
+        dict(date=pd.Timestamp("2026-07-23"), sym="OCBC.SP", ID_SEDOL1="6663689",
+             TICKER="OCBC", EQY_PRIM_EXCH_SHRT="SP", ric_code="OCBC.XX"),
         dict(date=pd.Timestamp("2026-07-21"), sym="700.HK", ID_SEDOL1="BMMV2K8",
              TICKER="700", EQY_PRIM_EXCH_SHRT="HK", ric_code="0700.HK"),
     ])
@@ -931,10 +1138,10 @@ def self_test() -> int:
                 cols.append("ric_code")
             return Result(kdb_rows.loc[keep, cols].reset_index(drop=True))
 
-    syms = sorted({c for s in audit["sym"] for c in kdb_candidates(s)})
+    syms = sorted({c for cands in row_candidates(c_audit) for c in cands})
     fk = FakeKdb()
     eq, table = fetch_equity(fk, pd.Timestamp(DATE_FROM), pd.Timestamp(DATE_TO), syms)
-    k_out, k_audit = out.copy(), audit.copy()
+    k_out, k_audit = c_out.copy(), c_audit.copy()
     apply_kdb(k_out, k_audit, eq, table)
     kb = k_audit.set_index("aggrTgtId")
     check("equity_master answered first", table, "equity_master")
@@ -948,8 +1155,12 @@ def self_test() -> int:
     check("A1 via the converted sym", kb.at["A1", "kdb_sym"], "9984.JP")
     check("A3 matched on another date", kb.at["A3", "kdb_match"], "other date")
     check("A3 sedol", kb.at["A3", "sedol"], "6144690")
-    check("A6 SG bbg filled by kdb", kb.at["A6", "bbg_ticker"], "DBS SP")
-    check("A6 blank kdb ric does not overwrite", kb.at["A6", "ric"], "D05.SI")
+    check("A6 SG reaches kdb through CrossCode",
+          (kb.at["A6", "kdb_sym"], kb.at["A6", "sedol"]), ("DBS.SP", "6175203"))
+    check("A6 CrossCode ric is not replaced by kdb", kb.at["A6", "ric"], "D05.SI")
+    check("A9 CrossCode ric is not replaced by kdb", kb.at["A9", "ric"], "OCBC.SI")
+    check("A2 no CrossCode line: kdb ric used",
+          (kb.at["A2", "ric"], kb.at["A2", "ric_source"]), ("0700.HK", "kdb"))
     check("A2 HK through 700.HK", kb.at["A2", "sedol"], "BMMV2K8")
     check("A7 not in kdb keeps derived ric", kb.at["A7", "ric"], "6758.T")
     check("A7 flagged not found", kb.at["A7", "kdb_match"], "not found")
@@ -958,7 +1169,7 @@ def self_test() -> int:
     fk = FakeKdb(fail_tables=("equity_master",))
     eq, table = fetch_equity(fk, pd.Timestamp(DATE_FROM), pd.Timestamp(DATE_TO), syms)
     check("equity_master failing falls back to equity", table, "equity")
-    k_out, k_audit = out.copy(), audit.copy()
+    k_out, k_audit = c_out.copy(), c_audit.copy()
     apply_kdb(k_out, k_audit, eq, table)
     check("off equity, sedol still fills",
           k_audit.set_index("aggrTgtId").at["A1", "sedol"], "6770620")
@@ -984,6 +1195,8 @@ def main(argv=None) -> int:
     p.add_argument("--to", dest="d_to", default=DATE_TO)
     p.add_argument("--no-kdb", action="store_true",
                    help="skip kdb: sedol stays blank, tickers derived from sym")
+    p.add_argument("--no-crosscode", action="store_true",
+                   help="skip CrossCode: ric from kdb or the sym, SG may be blank")
     p.add_argument("--sent-source", choices=["residual", "qatt"],
                    default=CLOSE_SENT_SOURCE)
     p.add_argument("--probe", action="store_true",
@@ -1005,6 +1218,7 @@ def main(argv=None) -> int:
                 f"{'/'.join(MARKETS)}")
     # Connect before reading the parquet, so a wrong server fails in seconds.
     conn = None if (args.no_kdb or args.probe) else kdb_connect()
+    cc = None if (args.no_crosscode or args.probe) else load_crosscode(CROSSCODE_PATH)
     aws = read_window(aws_dir, d_from, d_to)
     try:
         if aws.empty:
@@ -1021,11 +1235,15 @@ def main(argv=None) -> int:
         log(f"  wrote {concat_path}  ({len(aws):,} rows x {len(aws.columns) - 1} columns)")
 
         out, audit = build(aws, cols)
-        tca_section("KDB IDENTIFIERS")
-        if args.no_kdb:
-            warn("--no-kdb: sedol is blank, bbg_ticker and ric are derived from sym")
+        tca_section("IDENTIFIERS")
+        if cc is None:
+            warn("--no-crosscode: ric comes from kdb or the sym only")
         else:
-            syms = sorted({c for s in audit["sym"] for c in kdb_candidates(s)})
+            apply_crosscode(out, audit, cc)
+        if args.no_kdb:
+            warn("--no-kdb: sedol is blank")
+        else:
+            syms = sorted({c for cands in row_candidates(audit) for c in cands})
             eq, table = fetch_equity(conn, d_from, d_to, syms)
             apply_kdb(out, audit, eq, table)
         report(out, audit)
