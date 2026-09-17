@@ -8,6 +8,9 @@ builds the CSV the request asks for:
     qty_close_sent, qty_close_exec, px_cont_last, px_close, volume_close,
     unfilled_reason, snap_sent_bps, snap_used_bps, limit_status
 
+plus qty_exec and qty_residual after qty_order, which the request did not
+ask for.
+
 snap_sent_bps, snap_used_bps and limit_status are NOT computed. They are
 written as empty columns so the file keeps the requested layout.
 
@@ -23,7 +26,7 @@ Output, in --out (default output_moc_request/):
 
     aws_concat_<from>_<to>.csv    every parquet row in the window, one per aggrTgtId
     moc_close_<from>_<to>.csv     the file to send
-    moc_close_<from>_<to>.xlsx    the same, plus to_review, audit and run_log sheets
+    moc_close_<from>_<to>.xlsx    the same, plus the audit sheet
     moc_close_audit.csv           same orders with aggrTgtId, sym, the source
                                   columns and which rule set each value
     run_log.txt                   what was read, dropped, derived and assumed
@@ -40,6 +43,8 @@ What comes from where (AWS column -> requested column):
     country / sym    market
     side             side (SSH -> SELL_SHORT)
     ordqty           qty_order
+    cumqty           qty_exec, executed over the whole order
+    derived          qty_residual = qty_order - qty_exec, never below 0
     derived          qty_close_sent, see CLOSE_SENT_SOURCE
     fillCloseSize    qty_close_exec
     last_cont_price  px_cont_last
@@ -116,7 +121,8 @@ VOLUME_CAP_TOL = 0.05
 OTHER_UNEXPLAINED = "OTHER: cause not identified from execution data"
 
 OUTPUT_COLUMNS = ["trade_date", "sedol", "bbg_ticker", "ric", "market", "side",
-                  "qty_order", "qty_close_sent", "qty_close_exec",
+                  "qty_order", "qty_exec", "qty_residual",
+                  "qty_close_sent", "qty_close_exec",
                   "px_cont_last", "px_close", "volume_close", "unfilled_reason",
                   "snap_sent_bps", "snap_used_bps", "limit_status"]
 NOT_COMPUTED = ["snap_sent_bps", "snap_used_bps", "limit_status"]
@@ -789,6 +795,8 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
         "sedol": sedol, "bbg_ticker": bbg, "ric": ric, "market": market,
         "side": side,
         "qty_order": ordqty.round().astype("Int64"),
+        "qty_exec": cumqty.round().astype("Int64"),
+        "qty_residual": (ordqty - cumqty).clip(lower=0).round().astype("Int64"),
         "qty_close_sent": sent.round().astype("Int64"),
         "qty_close_exec": fill.round().astype("Int64"),
         "px_cont_last": work["px_cont_last"], "px_close": work["px_close"],
@@ -804,7 +812,6 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     audit.insert(1, "sym", frame[cols["sym"]])
     audit.insert(2, algo_col, frame[algo_col])
     audit["side_raw"] = frame[cols["side"]]
-    audit["cumqty"] = cumqty
     audit["ordprice"] = work["limit"]
     audit["PreviousClose"] = work["prev_close"]
     audit["PX_LOW"] = work["px_low"]
@@ -831,6 +838,8 @@ def report(out: pd.DataFrame, audit: pd.DataFrame) -> None:
     log(pd.DataFrame({
         "orders": g.size(),
         "qty_order": g["qty_order"].sum(),
+        "qty_exec": g["qty_exec"].sum(),
+        "qty_residual": g["qty_residual"].sum(),
         "qty_close_sent": g["qty_close_sent"].sum(),
         "qty_close_exec": g["qty_close_exec"].sum(),
         "unfilled": g["unfilled_reason"].apply(lambda s: s.ne("").sum()),
@@ -858,6 +867,9 @@ def report(out: pd.DataFrame, audit: pd.DataFrame) -> None:
         n = int(out[col].isna().sum())
         if n:
             warn(f"{col} empty on {n:,} orders")
+    over = int((out["qty_exec"] > out["qty_order"]).sum())
+    if over:
+        warn(f"qty_exec above qty_order on {over:,} orders; qty_residual set to 0 there")
     over = int((out["qty_close_exec"] > out["qty_close_sent"]).sum())
     if over:
         warn(f"qty_close_exec above qty_close_sent on {over:,} orders")
@@ -954,48 +966,20 @@ def probe(aws: pd.DataFrame, cols: dict) -> None:
 # ===========================================================================
 
 TEXT_COLUMNS = {"trade_date", "sedol", "bbg_ticker", "ric", "aggrTgtId", "sym"}
-QTY_COLUMNS = {"qty_order", "qty_close_sent", "qty_close_exec", "volume_close", "cumqty"}
-
-
-def review_rows(out: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
-    """Orders to fix before sending: an unexplained reason or a blank identifier."""
-    blank = pd.Series(False, index=out.index)
-    for col in ("sedol", "bbg_ticker", "ric"):
-        blank |= out[col].isna() | out[col].astype(str).str.strip().eq("")
-    why = np.where(out["unfilled_reason"].eq(OTHER_UNEXPLAINED), "unfilled_reason unexplained", "")
-    why = pd.Series(why, index=out.index)
-    why = why.where(~blank, (why + "; identifier blank").str.lstrip("; "))
-    keep = why.ne("")
-    front = ["to_fix", "aggrTgtId", "sym"]
-    rest = [c for c in audit.columns if c not in front]
-    return audit.loc[keep].assign(to_fix=why[keep])[front + rest]
+QTY_COLUMNS = {"qty_order", "qty_exec", "qty_residual", "qty_close_sent",
+               "qty_close_exec", "volume_close"}
 
 
 def write_excel(out: pd.DataFrame, audit: pd.DataFrame, path: Path) -> None:
-    """One workbook: the request sheet exactly as the CSV, then what to check.
-
-      moc_close   the file to send, requested columns in requested order
-      to_review   orders with an unexplained reason or a blank identifier
-      audit       every order with its source columns and rules
-      run_log     this run's log
-    """
+    """moc_close - the file to send, as the CSV - and audit, every order with
+    its source columns and rules."""
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    review = review_rows(out, audit)
-    sheets = {
-        "moc_close": out,
-        "to_review": review,
-        "audit": audit,
-        "run_log": pd.DataFrame({"run_log": _LOG}),
-    }
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
-        for name, frame in sheets.items():
+        for name, frame in (("moc_close", out), ("audit", audit)):
             frame.to_excel(xl, sheet_name=name, index=False)
             ws = xl.sheets[name]
-            if name == "run_log":
-                ws.column_dimensions["A"].width = 120
-                continue
             ws.freeze_panes = "A2"
             if len(frame.columns):
                 ws.auto_filter.ref = ws.dimensions
@@ -1011,7 +995,6 @@ def write_excel(out: pd.DataFrame, audit: pd.DataFrame, path: Path) -> None:
                         c.number_format = fmt
                 width = max([len(str(col))] + [len(str(v)) for v in frame[col].head(500)])
                 ws.column_dimensions[get_column_letter(i)].width = min(max(width + 2, 8), 60)
-    log(f"  Excel: moc_close {len(out):,} rows, to_review {len(review):,} rows")
 
 
 # ===========================================================================
@@ -1092,6 +1075,12 @@ def self_test() -> int:
             continue
         check(f"{oid} unfilled_reason", by_id.at[oid, "unfilled_reason"], want_reason)
         check(f"{oid} qty_close_sent", int(by_id.at[oid, "qty_close_sent"]), want_sent)
+    check("A1 qty_exec is cumqty", int(by_id.at["A1", "qty_exec"]), 500)
+    check("A1 qty_residual is qty_order - qty_exec", int(by_id.at["A1", "qty_residual"]), 500)
+    check("A3 fully executed: qty_residual 0", int(by_id.at["A3", "qty_residual"]), 0)
+    check("qty_exec and qty_residual follow qty_order",
+          OUTPUT_COLUMNS[OUTPUT_COLUMNS.index("qty_order"):OUTPUT_COLUMNS.index("qty_order") + 3],
+          ["qty_order", "qty_exec", "qty_residual"])
     check("A1 ric", by_id.at["A1", "ric"], "9984.T")
     check("A1 bbg", by_id.at["A1", "bbg_ticker"], "9984 JT")
     check("A1 side", by_id.at["A1", "side"], "SELL_SHORT")
@@ -1253,14 +1242,13 @@ def self_test() -> int:
         xp = Path(tmp) / "moc_close.xlsx"
         write_excel(k_out, k_audit, xp)
         book = pd.read_excel(xp, sheet_name=None, dtype={"sedol": str})
-    check("four sheets, in order", list(book), ["moc_close", "to_review", "audit", "run_log"])
+    check("two sheets, in order", list(book), ["moc_close", "audit"])
     check("moc_close has the requested columns", list(book["moc_close"].columns), OUTPUT_COLUMNS)
     check("moc_close has every order", len(book["moc_close"]), len(k_out))
     check("a sedol keeps its leading zero", book["moc_close"].at[0, "sedol"], "0123456")
-    check("to_review lists the unexplained order A7",
-          "A7" in set(book["to_review"]["aggrTgtId"]), True)
-    check("to_review leaves out a filled order with its identifiers",
-          "A9" in set(book["to_review"]["aggrTgtId"]), False)
+    check("the workbook carries qty_exec and qty_residual",
+          list(book["moc_close"]["qty_residual"])[:1] == [int(k_out["qty_residual"].iloc[0])],
+          True)
     print(f"\nself-test: {'PASS' if not fails else f'{fails} FAILURE(S)'}")
     return 1 if fails else 0
 
