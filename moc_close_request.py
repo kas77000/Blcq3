@@ -26,15 +26,16 @@ Output, in --out (default output_moc_request/):
 
     aws_concat_<from>_<to>.csv    every parquet row in the window, one per aggrTgtId
     moc_close_<from>_<to>.csv     the file to send
-    moc_close_<from>_<to>.xlsx    the same, plus the audit sheet
-    moc_close_audit.csv           same orders with aggrTgtId, sym, the source
+    moc_close_<from>_<to>.xlsx    the same, one sheet
+    moc_close_audit.csv           same orders with sym, the source
                                   columns and which rule set each value
     run_log.txt                   what was read, dropped, derived and assumed
 
 What comes from where (AWS column -> requested column):
 
+    aggrTgtId        order_id
     _date            trade_date
-    CrossCode        ric (RicCode), bbg_ticker (BloombergCode) where kdb has none
+    CrossCode       ric (RicCode), bbg_ticker (BloombergCode) where kdb has none
     kdb              sedol (ID_SEDOL1), bbg_ticker (TICKER + EQY_PRIM_EXCH_SHRT),
                      ric (ric_code) where CrossCode has none; equity_master,
                      else equity
@@ -120,7 +121,7 @@ VOLUME_CAP_TOL = 0.05
 # audit file; replace them before the file goes out.
 OTHER_UNEXPLAINED = "OTHER: cause not identified from execution data"
 
-OUTPUT_COLUMNS = ["trade_date", "sedol", "bbg_ticker", "ric", "market", "side",
+OUTPUT_COLUMNS = ["order_id", "trade_date", "sedol", "bbg_ticker", "ric", "market", "side",
                   "qty_order", "qty_exec", "qty_residual",
                   "qty_close_sent", "qty_close_exec",
                   "px_cont_last", "px_close", "volume_close", "unfilled_reason",
@@ -791,6 +792,7 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     reason, rule = assign_unfilled_reason(work)
 
     out = pd.DataFrame({
+        "order_id": frame[cols["id"]],
         "trade_date": dates.dt.strftime("%Y-%m-%d"),
         "sedol": sedol, "bbg_ticker": bbg, "ric": ric, "market": market,
         "side": side,
@@ -808,7 +810,6 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = out[OUTPUT_COLUMNS]
 
     audit = out.copy()
-    audit.insert(0, "aggrTgtId", frame[cols["id"]])
     audit.insert(1, "sym", frame[cols["sym"]])
     audit.insert(2, algo_col, frame[algo_col])
     audit["side_raw"] = frame[cols["side"]]
@@ -965,19 +966,18 @@ def probe(aws: pd.DataFrame, cols: dict) -> None:
 # EXCEL
 # ===========================================================================
 
-TEXT_COLUMNS = {"trade_date", "sedol", "bbg_ticker", "ric", "aggrTgtId", "sym"}
+TEXT_COLUMNS = {"order_id", "trade_date", "sedol", "bbg_ticker", "ric"}
 QTY_COLUMNS = {"qty_order", "qty_exec", "qty_residual", "qty_close_sent",
                "qty_close_exec", "volume_close"}
 
 
-def write_excel(out: pd.DataFrame, audit: pd.DataFrame, path: Path) -> None:
-    """moc_close - the file to send, as the CSV - and audit, every order with
-    its source columns and rules."""
+def write_excel(out: pd.DataFrame, path: Path) -> None:
+    """One sheet, moc_close: the CSV as a workbook. The audit stays in its CSV."""
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
-        for name, frame in (("moc_close", out), ("audit", audit)):
+        for name, frame in (("moc_close", out),):
             frame.to_excel(xl, sheet_name=name, index=False)
             ws = xl.sheets[name]
             ws.freeze_panes = "A2"
@@ -1068,7 +1068,7 @@ def self_test() -> int:
 
     check("rows = in-scope orders", len(out), 9)
     check("columns in requested order", list(out.columns), OUTPUT_COLUMNS)
-    by_id = audit.set_index("aggrTgtId")
+    by_id = audit.set_index("order_id")
     for oid, _, _, _, _, want_reason, want_sent in rows:
         if want_reason is None:
             check(f"{oid} excluded", oid in by_id.index, False)
@@ -1139,7 +1139,7 @@ def self_test() -> int:
 
     c_out, c_audit = out.copy(), audit.copy()
     apply_crosscode(c_out, c_audit, cc)
-    cb = c_audit.set_index("aggrTgtId")
+    cb = c_audit.set_index("order_id")
     check("A6 SG ric by RicCode", (cb.at["A6", "ric"], cb.at["A6", "cc_match"]),
           ("D05.SI", "RicCode"))
     check("A6 SG bbg from CrossCode",
@@ -1198,7 +1198,7 @@ def self_test() -> int:
     eq, table = fetch_equity(fk, pd.Timestamp(DATE_FROM), pd.Timestamp(DATE_TO), syms)
     k_out, k_audit = c_out.copy(), c_audit.copy()
     apply_kdb(k_out, k_audit, eq, table)
-    kb = k_audit.set_index("aggrTgtId")
+    kb = k_audit.set_index("order_id")
     check("equity_master answered first", table, "equity_master")
     check("dates cross as day counts from 2000.01.01",
           fk.calls[0][1:3], (int((pd.Timestamp(DATE_FROM) - Q_EPOCH).days),
@@ -1227,7 +1227,7 @@ def self_test() -> int:
     k_out, k_audit = c_out.copy(), c_audit.copy()
     apply_kdb(k_out, k_audit, eq, table)
     check("off equity, sedol still fills",
-          k_audit.set_index("aggrTgtId").at["A1", "sedol"], "6770620")
+          k_audit.set_index("order_id").at["A1", "sedol"], "6770620")
 
     empty = FakeKdb(fail_tables=("equity_master", "equity"))
     try:
@@ -1240,9 +1240,12 @@ def self_test() -> int:
     k_out.loc[k_out.index[0], "sedol"] = "0123456"
     with tempfile.TemporaryDirectory() as tmp:
         xp = Path(tmp) / "moc_close.xlsx"
-        write_excel(k_out, k_audit, xp)
-        book = pd.read_excel(xp, sheet_name=None, dtype={"sedol": str})
-    check("two sheets, in order", list(book), ["moc_close", "audit"])
+        write_excel(k_out, xp)
+        book = pd.read_excel(xp, sheet_name=None, dtype={"sedol": str, "order_id": str})
+    check("one sheet", list(book), ["moc_close"])
+    check("order_id comes first and is the aggrTgtId",
+          (book["moc_close"].columns[0], set(book["moc_close"]["order_id"])),
+          ("order_id", set(k_out["order_id"])))
     check("moc_close has the requested columns", list(book["moc_close"].columns), OUTPUT_COLUMNS)
     check("moc_close has every order", len(book["moc_close"]), len(k_out))
     check("a sedol keeps its leading zero", book["moc_close"].at[0, "sedol"], "0123456")
@@ -1325,7 +1328,7 @@ def main(argv=None) -> int:
         log(f"  wrote {out_path}")
         log(f"  wrote {args.out / 'moc_close_audit.csv'}")
         log(f"  wrote {xlsx_path}")
-        write_excel(out, audit, xlsx_path)
+        write_excel(out, xlsx_path)
         return 0
     finally:
         (args.out / "run_log.txt").write_text("\n".join(_LOG), encoding="utf-8")
