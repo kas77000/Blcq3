@@ -14,12 +14,14 @@ ask for.
 snap_sent_bps, snap_used_bps and limit_status are NOT computed. They are
 written as empty columns so the file keeps the requested layout.
 
-Set AWS_DIR, KDB_HOST, KDB_PORT and CROSSCODE_PATH below first.
+Set AWS_DIR, KDB_HOST, KDB_PORT, QATT_HOST, QATT_PORT and CROSSCODE_PATH
+below first.
 
     python moc_close_request.py --probe          # check the mapping and STOP - run this first
     python moc_close_request.py                  # build the files, identifiers from CrossCode and kdb
     python moc_close_request.py --no-kdb         # build without kdb: no sedol
     python moc_close_request.py --no-crosscode   # build without CrossCode: SG ric may be blank
+    python moc_close_request.py --no-qatt        # build without qatt: px_cont_last may be blank
     python moc_close_request.py --self-test      # synthetic parquet and a fake kdb, end to end
 
 Output, in --out (default output_moc_request/):
@@ -48,7 +50,8 @@ What comes from where (AWS column -> requested column):
     derived          qty_residual = qty_order - qty_exec, never below 0
     derived          qty_close_sent, see CLOSE_SENT_SOURCE
     fillCloseSize    qty_close_exec
-    last_cont_price  px_cont_last
+    last_cont_price  px_cont_last; where empty, qatt lastPrice on the row whose
+                     cond marks the close (QATT_CLOSE_COND)
     endprice         px_close  (PX_LAST is not the day's close - see moc_tca.py)
     marketCloseSize  volume_close
     derived          unfilled_reason, see assign_unfilled_reason
@@ -75,6 +78,11 @@ AWS_DIR = r"data\aws"
 KDB_HOST = "CHANGEME"
 KDB_PORT = 0
 
+# The HISTORICAL qatt server (the one with `date`) - kdb-queries'
+# QATT_SERVER_HIST. Fills px_cont_last where the extract has none.
+QATT_HOST = "CHANGEME"
+QATT_PORT = 0
+
 # The security master, the same CrossCode.csv Nova's LimitUpDown reads.
 # ric comes from its RicCode.
 CROSSCODE_PATH = r"CHANGEME\CrossCode.csv"
@@ -99,6 +107,13 @@ MOC_ALGOS = {"CLOSE", "MOC"}
 #               confirms it means quantity sent to the close. --probe prints
 #               the two side by side.
 CLOSE_SENT_SOURCE = "residual"
+
+# --- px_cont_last from qatt ------------------------------------------------
+# The qatt row whose cond marks the close, per market, as q `like` patterns
+# (case-sensitive). lastPrice on that row fills px_cont_last.
+QATT_CLOSE_COND = {"JP": "*e*", "AU": "*CA*", "SG": "*AC*", "HK": "*CA*"}
+# Several matching rows for one sym on one day: "first" or "last" in time.
+QATT_PICK = "first"
 
 # --- unfilled_reason ------------------------------------------------------
 # Short-sale price rules that can stop a short sell printing in the auction.
@@ -470,17 +485,25 @@ def kdb_query(table: str, fields: list[str]) -> str:
             + " where date within (\"d\"$a;\"d\"$b), sym in s}")
 
 
-def kdb_connect():
-    if KDB_HOST == "CHANGEME" or not KDB_PORT:
-        raise SystemExit("ERROR: set KDB_HOST and KDB_PORT at the top of "
-                         "moc_close_request.py, or run with --no-kdb")
+def _connect(host, port, names: str, flag: str):
+    if host == "CHANGEME" or not port:
+        raise SystemExit(f"ERROR: set {names} at the top of moc_close_request.py, "
+                         f"or run with {flag}")
     try:
         import pykx
     except ImportError:
-        raise SystemExit("ERROR: pykx is not installed (pip install pykx), "
-                         "or run with --no-kdb")
-    log(f"  connecting to kdb {KDB_HOST}:{KDB_PORT}")
-    return pykx.SyncQConnection(host=KDB_HOST, port=int(KDB_PORT))
+        raise SystemExit(f"ERROR: pykx is not installed (pip install pykx), "
+                         f"or run with {flag}")
+    log(f"  connecting to kdb {host}:{port}")
+    return pykx.SyncQConnection(host=host, port=int(port))
+
+
+def kdb_connect():
+    return _connect(KDB_HOST, KDB_PORT, "KDB_HOST and KDB_PORT", "--no-kdb")
+
+
+def qatt_connect():
+    return _connect(QATT_HOST, QATT_PORT, "QATT_HOST and QATT_PORT", "--no-qatt")
 
 
 def kdb_candidates(sym, extra=()) -> list[str]:
@@ -621,6 +644,105 @@ def apply_kdb(out: pd.DataFrame, audit: pd.DataFrame, eq: pd.DataFrame,
     if missing.any():
         warn(f"{int(missing.sum()):,} orders not in {table}; their syms: "
              f"{sorted(audit.loc[missing, 'sym'].astype(str).unique())[:10]}")
+
+
+# ===========================================================================
+# QATT - px_cont_last where the extract has none
+# ===========================================================================
+# s and p arrive as bytes, so as char vectors whatever pykx does with a str:
+# `$ makes s symbols for `in` (kdb-queries luld_orders), and `like` wants p
+# as a string.
+Q_QATT = ("{[d;s;p] s:`$s; select sym,time,cond,lastPrice from qatt "
+          "where date=\"d\"$d, sym in s, cond like p, lastPrice>0}")
+
+
+def fetch_qatt(conn, day: pd.Timestamp, syms: list[str], pattern: str) -> pd.DataFrame:
+    d = int((day - Q_EPOCH).days)
+    frames = [_kdb_frame(conn(Q_QATT, d, [x.encode() for x in syms[i:i + KDB_CHUNK]],
+                              pattern.encode()))
+              for i in range(0, len(syms), KDB_CHUNK)]
+    frames = [f for f in frames if len(f)]
+    if not frames:
+        return pd.DataFrame(columns=["sym", "time", "cond", "lastPrice"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def fill_px_cont_last(conn, out: pd.DataFrame, audit: pd.DataFrame) -> pd.Index:
+    """lastPrice from qatt for every order with no px_cont_last. Returns the
+    rows filled, so their unfilled_reason can be worked out again."""
+    missing = out["px_cont_last"].isna() | (out["px_cont_last"] <= 0)
+    audit["px_cont_last_source"] = np.where(missing, "", "extract")
+    if not missing.any():
+        log("  px_cont_last: none empty, qatt not asked")
+        return out.index[:0]
+    cands = pd.Series(row_candidates(audit), index=out.index)
+    got = pd.Series(np.nan, index=out.index)
+    multi, asked = 0, 0
+    for (day, mkt), grp in out[missing].groupby(["trade_date", "market"]):
+        pattern = QATT_CLOSE_COND.get(mkt)
+        if pattern is None:
+            warn(f"no QATT_CLOSE_COND for {mkt}; its px_cont_last stays empty")
+            continue
+        syms = sorted({c for i in grp.index for c in cands[i]})
+        rows = fetch_qatt(conn, pd.Timestamp(day), syms, pattern)
+        asked += 1
+        if rows.empty:
+            continue
+        rows = rows.assign(sym=rows["sym"].astype(str).str.strip())
+        rows = rows.sort_values("time", kind="stable")
+        multi += int((rows.groupby("sym").size() > 1).sum())
+        pick = rows.drop_duplicates("sym", keep=QATT_PICK).set_index("sym")["lastPrice"]
+        for i in grp.index:
+            hit = next((c for c in cands[i] if c in pick.index), None)
+            if hit is not None:
+                got[i] = float(pick[hit])
+
+    filled = got.notna()
+    out.loc[filled, "px_cont_last"] = got[filled]
+    audit.loc[filled, "px_cont_last"] = got[filled]
+    audit.loc[filled, "px_cont_last_source"] = "qatt"
+    by = out.loc[missing, "market"].value_counts()
+    ok = out.loc[filled, "market"].value_counts()
+    log(f"  px_cont_last empty on {int(missing.sum()):,} orders, qatt filled "
+        f"{int(filled.sum()):,} ({asked:,} date/market queries): "
+        + ", ".join(f"{m} {ok.get(m, 0)}/{n}" for m, n in by.items()))
+    if multi:
+        log(f"    {multi:,} sym-days had several matching rows; the {QATT_PICK} in "
+            f"time was used (QATT_PICK)")
+    same = int((filled & np.isclose(out["px_cont_last"], out["px_close"])).sum())
+    if filled.any() and same > 0.5 * filled.sum():
+        warn(f"{same:,} of {int(filled.sum()):,} qatt prices equal px_close. The "
+             f"matching row may be the auction print rather than the last "
+             f"continuous trade - check QATT_CLOSE_COND and QATT_PICK")
+    left = missing & ~filled
+    if left.any():
+        warn(f"px_cont_last still empty on {int(left.sum()):,} orders: "
+             f"{sorted(audit.loc[left, 'sym'].astype(str).unique())[:10]}")
+    return out.index[filled]
+
+
+def rederive_reasons(out: pd.DataFrame, audit: pd.DataFrame, rows: pd.Index) -> None:
+    """unfilled_reason again for rows whose px_cont_last just arrived: the JP
+    and HK short-sell rules read it."""
+    if not len(rows):
+        return
+    work = pd.DataFrame({
+        "side": out["side"], "market": out["market"],
+        "qty_order": out["qty_order"].astype(float), "cumqty": out["qty_exec"].astype(float),
+        "qty_close_sent": out["qty_close_sent"].astype(float),
+        "qty_close_exec": out["qty_close_exec"].astype(float),
+        "px_cont_last": out["px_cont_last"], "px_close": out["px_close"],
+        "volume_close": out["volume_close"].astype(float), "limit": audit["ordprice"],
+        "prev_close": audit["PreviousClose"], "px_low": audit["PX_LOW"],
+        "early": audit["ended_before_close"].astype(bool),
+    }).loc[rows]
+    reason, rule = assign_unfilled_reason(work)
+    changed = int((out.loc[rows, "unfilled_reason"] != reason).sum())
+    out.loc[rows, "unfilled_reason"] = reason
+    audit.loc[rows, "unfilled_reason"] = reason
+    audit.loc[rows, "reason_rule"] = rule
+    if changed:
+        log(f"  unfilled_reason changed on {changed:,} orders once px_cont_last was filled")
 
 
 # ===========================================================================
@@ -1236,6 +1358,57 @@ def self_test() -> int:
     except SystemExit:
         check("no answer from either table stops the run", True, True)
 
+    print("\nqatt")
+    q_out, q_audit = k_out.copy(), k_audit.copy()
+    qi = q_audit.set_index("order_id").index
+    a5, a4, a2 = (int(np.flatnonzero(qi == x)[0]) for x in ("A5", "A4", "A2"))
+    for pos in (a5, a4):
+        q_out.iloc[pos, q_out.columns.get_loc("px_cont_last")] = np.nan
+        q_audit.iloc[pos, q_audit.columns.get_loc("px_cont_last")] = np.nan
+    # without its reference price A5 cannot be an uptick case
+    base_reason = q_out.iloc[a5]["unfilled_reason"]
+    q_out.iloc[a5, q_out.columns.get_loc("unfilled_reason")] = OTHER_UNEXPLAINED
+    qatt_rows = pd.DataFrame([
+        # A5, 1299.HK: CA rows, the first in time wins; an off-pattern row is ignored
+        dict(date="2026-07-22", sym="1299.HK", time=pd.Timedelta("15:59:59"), cond="ZZ", lastPrice=90.0),
+        dict(date="2026-07-22", sym="1299.HK", time=pd.Timedelta("16:00:01"), cond="CA", lastPrice=99.5),
+        dict(date="2026-07-22", sym="1299.HK", time=pd.Timedelta("16:08:00"), cond="CA", lastPrice=99.0),
+        # A4, 7203 JT, asked for as 7203.JP; lower-case e only
+        dict(date="2026-07-22", sym="7203.JP", time=pd.Timedelta("14:25:00"), cond="E", lastPrice=1.0),
+        dict(date="2026-07-22", sym="7203.JP", time=pd.Timedelta("14:25:01"), cond="Xe", lastPrice=99.5),
+    ])
+
+    class FakeQatt:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, q, d, s, pat):
+            import fnmatch
+            self.calls.append((q, d, list(s), pat))
+            day = (Q_EPOCH + pd.Timedelta(days=d)).strftime("%Y-%m-%d")
+            names = {x.decode() for x in s}
+            keep = (qatt_rows["date"].eq(day) & qatt_rows["sym"].isin(names)
+                    & qatt_rows["cond"].map(lambda c: fnmatch.fnmatchcase(c, pat.decode())))
+            return Result(qatt_rows.loc[keep, ["sym", "time", "cond", "lastPrice"]])
+
+    fq = FakeQatt()
+    filled = fill_px_cont_last(fq, q_out, q_audit)
+    rederive_reasons(q_out, q_audit, filled)
+    qb = q_audit.set_index("order_id")
+    check("only the empty rows were asked for", sorted({c[3] for c in fq.calls}), [b"*CA*", b"*e*"])
+    check("syms and pattern go as bytes, cast with `$ in q",
+          (all(isinstance(x, bytes) for c in fq.calls for x in c[2]), "s:`$s;" in Q_QATT),
+          (True, True))
+    check("A5 HK: first CA row in time", (qb.at["A5", "px_cont_last"], qb.at["A5", "px_cont_last_source"]),
+          (99.5, "qatt"))
+    check("A4 JP: cond like *e* is case-sensitive", qb.at["A4", "px_cont_last"], 99.5)
+    check("A2 had a price and was not touched",
+          (qb.at["A2", "px_cont_last"], qb.at["A2", "px_cont_last_source"]), (100.0, "extract"))
+    check("A5 reason worked out again from the filled price",
+          (qb.at["A5", "unfilled_reason"], base_reason), ("UPTICK_RULE", "UPTICK_RULE"))
+    check("out and audit agree on px_cont_last",
+          list(q_out["px_cont_last"]), list(q_audit["px_cont_last"]))
+
     print("\nexcel")
     k_out.loc[k_out.index[0], "sedol"] = "0123456"
     with tempfile.TemporaryDirectory() as tmp:
@@ -1269,6 +1442,8 @@ def main(argv=None) -> int:
                    help="skip kdb: sedol stays blank, tickers derived from sym")
     p.add_argument("--no-crosscode", action="store_true",
                    help="skip CrossCode: ric from kdb or the sym, SG may be blank")
+    p.add_argument("--no-qatt", action="store_true",
+                   help="skip qatt: px_cont_last only where the extract has it")
     p.add_argument("--sent-source", choices=["residual", "qatt"],
                    default=CLOSE_SENT_SOURCE)
     p.add_argument("--probe", action="store_true",
@@ -1291,6 +1466,7 @@ def main(argv=None) -> int:
     # Connect before reading the parquet, so a wrong server fails in seconds.
     conn = None if (args.no_kdb or args.probe) else kdb_connect()
     cc = None if (args.no_crosscode or args.probe) else load_crosscode(CROSSCODE_PATH)
+    qconn = None if (args.no_qatt or args.probe) else qatt_connect()
     aws = read_window(aws_dir, d_from, d_to)
     try:
         if aws.empty:
@@ -1318,6 +1494,11 @@ def main(argv=None) -> int:
             syms = sorted({c for cands in row_candidates(audit) for c in cands})
             eq, table = fetch_equity(conn, d_from, d_to, syms)
             apply_kdb(out, audit, eq, table)
+        tca_section("PX_CONT_LAST")
+        if qconn is None:
+            warn("--no-qatt: px_cont_last only where the extract has it")
+        else:
+            rederive_reasons(out, audit, fill_px_cont_last(qconn, out, audit))
         report(out, audit)
 
         out_path = args.out / f"moc_close_{tag}.csv"
