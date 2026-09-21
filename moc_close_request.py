@@ -8,20 +8,21 @@ builds the CSV the request asks for:
     qty_close_sent, qty_close_exec, px_cont_last, px_close, volume_close,
     unfilled_reason, snap_sent_bps, snap_used_bps, limit_status
 
-plus qty_exec and qty_residual after qty_order, which the request did not
-ask for.
+plus order_id first, qty_exec and qty_residual after qty_order, and TickSize
+after px_close, which the request did not ask for.
 
 snap_sent_bps, snap_used_bps and limit_status are NOT computed. They are
 written as empty columns so the file keeps the requested layout.
 
-Set AWS_DIR, KDB_HOST, KDB_PORT, QATT_HOST, QATT_PORT and CROSSCODE_PATH
-below first.
+Set AWS_DIR, KDB_HOST, KDB_PORT, QATT_HOST, QATT_PORT, AUCTION_HOST,
+AUCTION_PORT and CROSSCODE_PATH below first.
 
     python moc_close_request.py --probe          # check the mapping and STOP - run this first
     python moc_close_request.py                  # build the files, identifiers from CrossCode and kdb
-    python moc_close_request.py --no-kdb         # build without kdb: no sedol
+    python moc_close_request.py --no-kdb         # build without kdb: no sedol, no TickSize
+    python moc_close_request.py --no-close-print # build without close_print: no px_close, volume_close
     python moc_close_request.py --no-crosscode   # build without CrossCode: SG ric may be blank
-    python moc_close_request.py --no-qatt        # build without qatt: px_cont_last may be blank
+    python moc_close_request.py --no-qatt        # build without qatt: px_cont_last is blank
     python moc_close_request.py --self-test      # synthetic parquet and a fake kdb, end to end
 
 Output, in --out (default output_moc_request/):
@@ -50,10 +51,13 @@ What comes from where (AWS column -> requested column):
     derived          qty_residual = qty_order - qty_exec, never below 0
     derived          qty_close_sent, see CLOSE_SENT_SOURCE
     fillCloseSize    qty_close_exec
-    last_cont_price  px_cont_last; where empty, qatt lastPrice on the row whose
-                     cond marks the close (QATT_CLOSE_COND)
-    endprice         px_close  (PX_LAST is not the day's close - see moc_tca.py)
-    marketCloseSize  volume_close
+    qatt             px_cont_last, for every order: lastPrice on the row whose
+                     cond marks the close (QATT_CLOSE_COND). The extract's
+                     last_cont_price is not read.
+    close_print      px_close = the first price in time, volume_close = the sum
+                     of size, per sym and day. endprice and marketCloseSize
+                     are not read.
+    kdb              TickSize from ticksizeids / ticksizetbl, at px_close
     derived          unfilled_reason, see assign_unfilled_reason
 """
 from __future__ import annotations
@@ -79,9 +83,14 @@ KDB_HOST = "CHANGEME"
 KDB_PORT = 0
 
 # The HISTORICAL qatt server (the one with `date`) - kdb-queries'
-# QATT_SERVER_HIST. Fills px_cont_last where the extract has none.
+# QATT_SERVER_HIST. px_cont_last comes from it for every order.
 QATT_HOST = "CHANGEME"
 QATT_PORT = 0
+
+# The server holding close_print (QStudio's "Auction-Prices"). px_close and
+# volume_close come from it for every order.
+AUCTION_HOST = "CHANGEME"
+AUCTION_PORT = 0
 
 # The security master, the same CrossCode.csv Nova's LimitUpDown reads.
 # ric comes from its RicCode.
@@ -110,7 +119,7 @@ CLOSE_SENT_SOURCE = "residual"
 
 # --- px_cont_last from qatt ------------------------------------------------
 # The qatt row whose cond marks the close, per market, as q `like` patterns
-# (case-sensitive). lastPrice on that row fills px_cont_last.
+# (case-sensitive). lastPrice on that row is px_cont_last.
 QATT_CLOSE_COND = {"JP": "*e*", "AU": "*CA*", "SG": "*AC*", "HK": "*CA*"}
 # Several matching rows for one sym on one day: "first" or "last" in time.
 QATT_PICK = "first"
@@ -121,7 +130,7 @@ QATT_PICK = "first"
 #   JP  price restriction is on once the stock trades 10% under the previous
 #       close; a short sell then cannot print at or below the last price.
 #   HK  a short sell in the closing auction cannot be below the reference
-#       price. last_cont_price stands in for the reference price.
+#       price. px_cont_last stands in for the reference price.
 # Both are approximations from end-of-day fields. Confirm with the desk.
 JP_RESTRICTION_DROP = 0.10
 
@@ -139,7 +148,7 @@ OTHER_UNEXPLAINED = "OTHER: cause not identified from execution data"
 OUTPUT_COLUMNS = ["order_id", "trade_date", "sedol", "bbg_ticker", "ric", "market", "side",
                   "qty_order", "qty_exec", "qty_residual",
                   "qty_close_sent", "qty_close_exec",
-                  "px_cont_last", "px_close", "volume_close", "unfilled_reason",
+                  "px_cont_last", "px_close", "TickSize", "volume_close", "unfilled_reason",
                   "snap_sent_bps", "snap_used_bps", "limit_status"]
 NOT_COMPUTED = ["snap_sent_bps", "snap_used_bps", "limit_status"]
 
@@ -155,9 +164,6 @@ SOURCE = {
     "ordqty":       ["ordqty"],
     "cumqty":       ["cumqty"],
     "fill_close":   ["fillCloseSize"],
-    "market_close": ["marketCloseSize"],
-    "px_cont_last": ["last_cont_price"],
-    "px_close":     ["endprice"],
     "limit":        ["ordprice"],
     "prev_close":   ["PreviousClose"],
     "px_low":       ["PX_LOW"],
@@ -167,8 +173,7 @@ SOURCE = {
     "ric":          ["ric", "RIC"],
     "bbg":          ["bbg_ticker", "bbgTicker", "BBG"],
 }
-NEEDED = ["id", "date", "sym", "side", "ordqty", "cumqty", "fill_close",
-          "market_close", "px_cont_last", "px_close"]
+NEEDED = ["id", "date", "sym", "side", "ordqty", "cumqty", "fill_close"]
 
 SIDE_MAP = {
     "B": "BUY", "BUY": "BUY", "BOT": "BUY", "1": "BUY",
@@ -506,6 +511,11 @@ def qatt_connect():
     return _connect(QATT_HOST, QATT_PORT, "QATT_HOST and QATT_PORT", "--no-qatt")
 
 
+def auction_connect():
+    return _connect(AUCTION_HOST, AUCTION_PORT, "AUCTION_HOST and AUCTION_PORT",
+                    "--no-close-print")
+
+
 def kdb_candidates(sym, extra=()) -> list[str]:
     """The sym as the extract spells it, then the kdb form: TICKER.COMPOSITE.
 
@@ -647,7 +657,157 @@ def apply_kdb(out: pd.DataFrame, audit: pd.DataFrame, eq: pd.DataFrame,
 
 
 # ===========================================================================
-# QATT - px_cont_last where the extract has none
+# CLOSE_PRINT - px_close and volume_close, for every order
+# ===========================================================================
+# Every print of the closing auction, one row each (QStudio, Auction-Prices:
+# select from close_print where date=2026.07.13, sym=`3.HK). Same bytes and
+# `$ as the qatt query.
+Q_CLOSE_PRINT = ("{[d;s] s:`$s; select sym,time,price,size from close_print "
+                 "where date=\"d\"$d, sym in s}")
+
+
+def fetch_close_print(conn, day: pd.Timestamp, syms: list[str]) -> pd.DataFrame:
+    d = int((day - Q_EPOCH).days)
+    frames = [_kdb_frame(conn(Q_CLOSE_PRINT, d, [x.encode() for x in syms[i:i + KDB_CHUNK]]))
+              for i in range(0, len(syms), KDB_CHUNK)]
+    frames = [f for f in frames if len(f)]
+    if not frames:
+        return pd.DataFrame(columns=["sym", "time", "price", "size"])
+    return pd.concat(frames, ignore_index=True)
+
+
+def fill_close_print(conn, out: pd.DataFrame, audit: pd.DataFrame) -> None:
+    """px_close = the first price in time, volume_close = the sum of size.
+
+    A sym with no print on a day its market printed for other names had no
+    closing auction: volume_close 0, px_close blank. A market with no print
+    at all that day is left blank - more likely the sym form than a market
+    without an auction.
+    """
+    cands = pd.Series(row_candidates(audit), index=out.index)
+    px = pd.Series(np.nan, index=out.index)
+    vol = pd.Series(np.nan, index=out.index)
+    src = pd.Series("", index=out.index, dtype=object)
+    for day, grp in out.groupby("trade_date"):
+        syms = sorted({c for i in grp.index for c in cands[i]})
+        rows = fetch_close_print(conn, pd.Timestamp(day), syms)
+        if rows.empty:
+            continue
+        rows = rows.assign(sym=rows["sym"].astype(str).str.strip(),
+                           price=pd.to_numeric(rows["price"], errors="coerce"),
+                           size=pd.to_numeric(rows["size"], errors="coerce"))
+        rows = rows.sort_values("time", kind="stable")
+        first = rows[rows["price"] > 0].drop_duplicates("sym").set_index("sym")["price"]
+        total = rows.groupby("sym")["size"].sum()
+        printed = set()
+        for i in grp.index:
+            hit = next((c for c in cands[i] if c in total.index), None)
+            if hit is not None:
+                px[i] = first.get(hit, np.nan)
+                vol[i] = total[hit]
+                src[i] = "close_print"
+                printed.add(grp.at[i, "market"])
+        for i in grp.index:
+            if src[i] == "" and grp.at[i, "market"] in printed:
+                vol[i] = 0.0
+                src[i] = "close_print: no print"
+
+    out["px_close"] = px
+    out["volume_close"] = vol.round().astype("Int64")
+    for col in ("px_close", "volume_close"):
+        audit[col] = out[col]
+    audit["close_print_source"] = src
+    n = len(out)
+    by = out["market"].value_counts()
+    ok = out.loc[src.eq("close_print"), "market"].value_counts()
+    log(f"  close_print: printed for {int(src.eq('close_print').sum()):,} of {n:,} orders: "
+        + ", ".join(f"{m} {ok.get(m, 0)}/{c}" for m, c in by.items()))
+    none_ = src.eq("close_print: no print")
+    if none_.any():
+        log(f"    {int(none_.sum()):,} orders: no print while their market printed that "
+            f"day - volume_close 0, read as no closing auction")
+    blank = src.eq("")
+    if blank.any():
+        warn(f"close_print had nothing for {int(blank.sum()):,} orders on a day their "
+             f"market printed nothing at all: {sorted(audit.loc[blank, 'sym'].astype(str).unique())[:10]}")
+
+
+# ===========================================================================
+# TICK SIZE - ticksizeids / ticksizetbl on the equity server
+# ===========================================================================
+# As Nova's LimitUpDown kdbclose.py reads them. Reference data, not by date:
+#   ticksizeids   sym -> id
+#   ticksizetbl   id, price, ticksize - price is an EXCLUSIVE upper bound:
+#                 the tick is the first row with ref < price, else the last.
+# id is a symbol in both tables and is matched as text. ticksizetbl is small
+# and read whole, so no id list crosses the wire.
+TICK_IDS_Q = "{[s] select sym, id from ticksizeids where sym in s}"
+TICK_TBL_Q = "select id, price, ticksize from ticksizetbl"
+# The price the tick is read at.
+TICK_REF = "px_close"
+
+
+def _id_text(value) -> str:
+    """A tick table id, a symbol, as text. A null id is ""."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return ""
+    t = value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+    return t.strip()
+
+
+def tick_for(ladder: list[tuple[float, float]], ref) -> float:
+    if ref is None or not np.isfinite(ref) or not ladder:
+        return np.nan
+    for bound, tick in ladder:
+        if ref < bound:
+            return tick
+    return ladder[-1][1]
+
+
+def fill_tick_size(conn, out: pd.DataFrame, audit: pd.DataFrame) -> None:
+    cands = pd.Series(row_candidates(audit), index=out.index)
+    syms = sorted({c for cs in cands for c in cs})
+    ids = pd.concat([_kdb_frame(conn(TICK_IDS_Q, syms[i:i + KDB_CHUNK]))
+                     for i in range(0, len(syms), KDB_CHUNK)] or [pd.DataFrame()],
+                    ignore_index=True)
+    by_sym = ({str(sy).strip(): _id_text(i) for sy, i in zip(ids["sym"], ids["id"])}
+              if len(ids) else {})
+    tbl = _kdb_frame(conn(TICK_TBL_Q))
+    ladders = {}
+    for tid, price, tick in zip(tbl.get("id", []), tbl.get("price", []), tbl.get("ticksize", [])):
+        if pd.notna(price) and pd.notna(tick) and float(tick) > 0:
+            ladders.setdefault(_id_text(tid), []).append((float(price), float(tick)))
+    ladders = {k: sorted(v) for k, v in ladders.items()}
+    log(f"  tick tables: {len(set(by_sym.values())):,} ids for {len(by_sym):,} syms, "
+        f"{len(ladders):,} ladders in ticksizetbl")
+
+    ref = out[TICK_REF].where(out[TICK_REF] > 0, out["px_cont_last"])
+    tick = pd.Series(np.nan, index=out.index)
+    tick_id = pd.Series("", index=out.index, dtype=object)
+    for i in out.index:
+        hit = next((c for c in cands[i] if c in by_sym), None)
+        if hit is None:
+            continue
+        tick_id[i] = by_sym[hit]
+        tick[i] = tick_for(ladders.get(by_sym[hit], []), ref[i])
+    out["TickSize"] = tick
+    audit["TickSize"] = tick
+    audit["tick_table"] = tick_id
+    by = out["market"].value_counts()
+    ok = out.loc[tick.notna(), "market"].value_counts()
+    log(f"  TickSize on {int(tick.notna().sum()):,} of {len(out):,} orders: "
+        + ", ".join(f"{m} {ok.get(m, 0)}/{c}" for m, c in by.items()))
+    no_id = tick_id.eq("")
+    if no_id.any():
+        warn(f"{int(no_id.sum()):,} orders have no tick table id: "
+             f"{sorted(audit.loc[no_id, 'sym'].astype(str).unique())[:10]}")
+    unmatched = sorted(set(tick_id[~no_id]) - set(ladders))
+    if unmatched:
+        warn(f"tick table id(s) {unmatched[:5]} have no rows in ticksizetbl")
+
+
+# ===========================================================================
+# QATT - px_cont_last, for every order
 # ===========================================================================
 # s and p arrive as bytes, so as char vectors whatever pykx does with a str:
 # `$ makes s symbols for `in` (kdb-queries luld_orders), and `like` wants p
@@ -668,13 +828,10 @@ def fetch_qatt(conn, day: pd.Timestamp, syms: list[str], pattern: str) -> pd.Dat
 
 
 def fill_px_cont_last(conn, out: pd.DataFrame, audit: pd.DataFrame) -> pd.Index:
-    """lastPrice from qatt for every order with no px_cont_last. Returns the
-    rows filled, so their unfilled_reason can be worked out again."""
-    missing = out["px_cont_last"].isna() | (out["px_cont_last"] <= 0)
-    audit["px_cont_last_source"] = np.where(missing, "", "extract")
-    if not missing.any():
-        log("  px_cont_last: none empty, qatt not asked")
-        return out.index[:0]
+    """px_cont_last from qatt lastPrice, for every order. Returns the rows
+    priced, so their unfilled_reason can be worked out again."""
+    missing = pd.Series(True, index=out.index)
+    audit["px_cont_last_source"] = ""
     cands = pd.Series(row_candidates(audit), index=out.index)
     got = pd.Series(np.nan, index=out.index)
     multi, asked = 0, 0
@@ -703,8 +860,8 @@ def fill_px_cont_last(conn, out: pd.DataFrame, audit: pd.DataFrame) -> pd.Index:
     audit.loc[filled, "px_cont_last_source"] = "qatt"
     by = out.loc[missing, "market"].value_counts()
     ok = out.loc[filled, "market"].value_counts()
-    log(f"  px_cont_last empty on {int(missing.sum()):,} orders, qatt filled "
-        f"{int(filled.sum()):,} ({asked:,} date/market queries): "
+    log(f"  px_cont_last: qatt priced {int(filled.sum()):,} of {len(out):,} orders "
+        f"({asked:,} date/market queries): "
         + ", ".join(f"{m} {ok.get(m, 0)}/{n}" for m, n in by.items()))
     if multi:
         log(f"    {multi:,} sym-days had several matching rows; the {QATT_PICK} in "
@@ -716,14 +873,14 @@ def fill_px_cont_last(conn, out: pd.DataFrame, audit: pd.DataFrame) -> pd.Index:
              f"continuous trade - check QATT_CLOSE_COND and QATT_PICK")
     left = missing & ~filled
     if left.any():
-        warn(f"px_cont_last still empty on {int(left.sum()):,} orders: "
+        warn(f"px_cont_last empty on {int(left.sum()):,} orders, no qatt row: "
              f"{sorted(audit.loc[left, 'sym'].astype(str).unique())[:10]}")
     return out.index[filled]
 
 
 def rederive_reasons(out: pd.DataFrame, audit: pd.DataFrame, rows: pd.Index) -> None:
-    """unfilled_reason again for rows whose px_cont_last just arrived: the JP
-    and HK short-sell rules read it."""
+    """unfilled_reason again once px_close, volume_close and px_cont_last have
+    arrived from kdb: the auction, limit and short-sell rules all read them."""
     if not len(rows):
         return
     work = pd.DataFrame({
@@ -742,7 +899,7 @@ def rederive_reasons(out: pd.DataFrame, audit: pd.DataFrame, rows: pd.Index) -> 
     audit.loc[rows, "unfilled_reason"] = reason
     audit.loc[rows, "reason_rule"] = rule
     if changed:
-        log(f"  unfilled_reason changed on {changed:,} orders once px_cont_last was filled")
+        log(f"  unfilled_reason changed on {changed:,} orders once the kdb prices arrived")
 
 
 # ===========================================================================
@@ -882,13 +1039,15 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     dates = frame["trade_date_parsed"]
     ordqty = num(frame, cols, "ordqty")
     cumqty = num(frame, cols, "cumqty")
-    volume_close = num(frame, cols, "market_close")
+    # px_close, volume_close (close_print), px_cont_last (qatt) and TickSize
+    # arrive after the identifiers; unfilled_reason is worked out again then
+    none = pd.Series(np.nan, index=frame.index)
+    volume_close = none
     fill = num(frame, cols, "fill_close")
-    blank_fill = fill.isna() & (volume_close > 0)
+    blank_fill = fill.isna()
     if blank_fill.any():
-        log(f"  {int(blank_fill.sum()):,} orders have an empty fillCloseSize on a "
-            f"day the auction ran; read as 0")
-    fill = fill.where(~blank_fill, 0.0)
+        log(f"  {int(blank_fill.sum()):,} orders have an empty fillCloseSize; read as 0")
+    fill = fill.fillna(0.0)
 
     early = ended_before_close(frame, cols, market, dates)
     sent = close_sent(frame, cols, ordqty, cumqty, fill, early)
@@ -905,8 +1064,9 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
     work = pd.DataFrame({
         "side": side, "market": market, "qty_order": ordqty, "cumqty": cumqty,
         "qty_close_sent": sent, "qty_close_exec": fill,
-        "px_cont_last": num(frame, cols, "px_cont_last"),
-        "px_close": num(frame, cols, "px_close"),
+        # from qatt, after the identifiers are known - see fill_px_cont_last
+        "px_cont_last": none,
+        "px_close": none,
         "volume_close": volume_close, "limit": num(frame, cols, "limit"),
         "prev_close": num(frame, cols, "prev_close"),
         "px_low": num(frame, cols, "px_low"), "early": early,
@@ -924,6 +1084,7 @@ def build(aws: pd.DataFrame, cols: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
         "qty_close_sent": sent.round().astype("Int64"),
         "qty_close_exec": fill.round().astype("Int64"),
         "px_cont_last": work["px_cont_last"], "px_close": work["px_close"],
+        "TickSize": none,
         "volume_close": volume_close.round().astype("Int64"),
         "unfilled_reason": reason,
     })
@@ -986,7 +1147,7 @@ def report(out: pd.DataFrame, audit: pd.DataFrame) -> None:
             by = out.loc[blank, "market"].value_counts()
             warn(f"{col} blank on {int(blank.sum()):,} orders ("
                  + ", ".join(f"{k} {v}" for k, v in by.items()) + ")")
-    for col in ("px_cont_last", "px_close", "volume_close"):
+    for col in ("px_cont_last", "px_close", "TickSize", "volume_close"):
         n = int(out[col].isna().sum())
         if n:
             warn(f"{col} empty on {n:,} orders")
@@ -1010,8 +1171,8 @@ def report(out: pd.DataFrame, audit: pd.DataFrame) -> None:
     log("  Assumptions to confirm before sending:")
     log("    - MOC orders are " + f"{sorted(MOC_ALGOS)}" + " on the algo column")
     log(f"    - qty_close_sent source: {CLOSE_SENT_SOURCE}")
-    log("    - fillCloseSize and marketCloseSize are auction prints only (no TAL)")
-    log("    - UPTICK_RULE: JP 10% price restriction, HK reference price ~ last_cont_price")
+    log("    - fillCloseSize and the close_print sizes are auction prints only (no TAL)")
+    log("    - UPTICK_RULE: JP 10% price restriction, HK reference price ~ px_cont_last")
     if AUCTION_VOLUME_CAP_PCT is None:
         log("    - VOLUME_CAP never assigned: no participation cap configured")
 
@@ -1143,17 +1304,17 @@ def self_test() -> int:
          dict(country="Australia", fend_time="14:15:00"), "", 1000),
         ("A4", "2026-07-22", "7203 JT", "SSH",
          dict(cumqty=0, fillCloseSize=0, PreviousClose=110, PX_LOW=98,
-              endprice=99, last_cont_price=99.5), "UPTICK_RULE", 1000),
+              endprice=99, last_cont_price=99.5), OTHER_UNEXPLAINED, 1000),
         ("A5", "2026-07-22", "1299.HK", "SSH",
          dict(country="HK", cumqty=0, fillCloseSize=0, endprice=99,
-              last_cont_price=99.5, fend_time="16:10:00"), "UPTICK_RULE", 1000),
+              last_cont_price=99.5, fend_time="16:10:00"), OTHER_UNEXPLAINED, 1000),
         ("A6", "2026-07-23", "D05.SI", "Buy",
          dict(country="Singapore", cumqty=300, fillCloseSize=0,
               fend_time="15:00:00"),
          "OTHER: order ended before the closing auction", 0),
         ("A7", "2026-07-23", "6758.T", "BC",
          dict(cumqty=400, fillCloseSize=100), OTHER_UNEXPLAINED, 700),
-        ("A8", "2026-07-23", "6758.T", "Buy",
+        ("A8", "2026-07-23", "6501.T", "Buy",
          dict(cumqty=0, fillCloseSize=0, marketCloseSize=0),
          "OTHER: no closing auction held", 1000),
         ("A9", "2026-07-23", "OCBC.SP", "Buy",
@@ -1170,7 +1331,7 @@ def self_test() -> int:
         for oid, date, sym, side, over, _, _ in rows:
             r = dict(base, aggrTgtId=oid, _date=pd.Timestamp(date), sym=sym, side=side)
             r.update(over)
-            recs.append(r)
+            recs.append(dict(r, endprice=777.0, marketCloseSize=777.0))
         df = pd.DataFrame(recs)
         for i, (_, chunk) in enumerate(df.groupby(df["_date"].dt.date)):
             chunk.to_parquet(folder / f"part_{i}.parquet", index=False)
@@ -1190,6 +1351,54 @@ def self_test() -> int:
 
     check("rows = in-scope orders", len(out), 9)
     check("columns in requested order", list(out.columns), OUTPUT_COLUMNS)
+    check("endprice and marketCloseSize are not read",
+          (bool(out["px_close"].isna().all()), bool(out["volume_close"].isna().all())), (True, True))
+
+    print("\nclose_print")
+    cp = []
+    for oid, date, sym, side, over, want, _ in rows:
+        if want is None or oid == "A8":
+            continue
+        price = over.get("endprice", base["endprice"])
+        volume = over.get("marketCloseSize", base["marketCloseSize"])
+        kdb_sym = kdb_candidates(sym)[min(1, len(kdb_candidates(sym)) - 1)]
+        # two rows, the second at another price: the FIRST price is the close
+        cp.append(dict(date=date, sym=kdb_sym, time=pd.Timedelta("16:08:39.328"),
+                       price=price, size=volume - 100))
+        cp.append(dict(date=date, sym=kdb_sym, time=pd.Timedelta("16:08:39.329"),
+                       price=price + 1, size=100))
+    cp = pd.DataFrame(cp).drop_duplicates(["date", "sym", "time"])
+
+    class Result:
+        def __init__(self, df):
+            self.df = df
+
+        def pd(self):
+            return self.df
+
+    class FakeClosePrint:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, q, d, s):
+            self.calls.append((q, d, list(s)))
+            day = (Q_EPOCH + pd.Timedelta(days=d)).strftime("%Y-%m-%d")
+            keep = cp["date"].eq(day) & cp["sym"].isin({x.decode() for x in s})
+            return Result(cp.loc[keep, ["sym", "time", "price", "size"]])
+
+    fcp = FakeClosePrint()
+    fill_close_print(fcp, out, audit)
+    rederive_reasons(out, audit, out.index)
+    cb0 = audit.set_index("order_id")
+    check("one close_print query per trade date", len(fcp.calls), 3)
+    check("syms go as bytes, cast with `$ in q",
+          (all(isinstance(x, bytes) for c in fcp.calls for x in c[2]), "s:`$s;" in Q_CLOSE_PRINT),
+          (True, True))
+    check("A1 px_close is the first price, not the second", cb0.at["A1", "px_close"], 5751.0)
+    check("A3 volume_close is the sum of size", int(cb0.at["A3", "volume_close"]), 500000)
+    check("A2 0700.HK found as 700.HK", cb0.at["A2", "close_print_source"], "close_print")
+    check("A8 no print while JP printed that day: volume 0",
+          (int(cb0.at["A8", "volume_close"]), bool(np.isnan(cb0.at["A8", "px_close"]))), (0, True))
     by_id = audit.set_index("order_id")
     for oid, _, _, _, _, want_reason, want_sent in rows:
         if want_reason is None:
@@ -1197,6 +1406,7 @@ def self_test() -> int:
             continue
         check(f"{oid} unfilled_reason", by_id.at[oid, "unfilled_reason"], want_reason)
         check(f"{oid} qty_close_sent", int(by_id.at[oid, "qty_close_sent"]), want_sent)
+    check("the extract's last_cont_price is not read", bool(out["px_cont_last"].isna().all()), True)
     check("A1 qty_exec is cumqty", int(by_id.at["A1", "qty_exec"]), 500)
     check("A1 qty_residual is qty_order - qty_exec", int(by_id.at["A1", "qty_residual"]), 500)
     check("A3 fully executed: qty_residual 0", int(by_id.at["A3", "qty_residual"]), 0)
@@ -1222,13 +1432,6 @@ def self_test() -> int:
     check("kdb candidates for HK", kdb_candidates("0700.HK"), ["0700.HK", "700.HK"])
 
     print("\nkdb")
-
-    class Result:
-        def __init__(self, df):
-            self.df = df
-
-        def pd(self):
-            return self.df
 
     print("\ncrosscode")
     cc_text = (
@@ -1305,7 +1508,13 @@ def self_test() -> int:
         def __init__(self, fail_tables=()):
             self.calls, self.fail = [], fail_tables
 
-        def __call__(self, q, a, b, s):
+        def __call__(self, q, *args):
+            if "ticksizeids" in q:
+                keep = tick_ids["sym"].isin(list(args[0]))
+                return Result(tick_ids[keep].reset_index(drop=True))
+            if "ticksizetbl" in q:
+                return Result(tick_tbl)
+            a, b, s = args
             self.calls.append((q, a, b, list(s)))
             if any(f" from {t} " in q for t in self.fail):
                 raise RuntimeError("ric_code")
@@ -1315,6 +1524,13 @@ def self_test() -> int:
                 cols.append("ric_code")
             return Result(kdb_rows.loc[keep, cols].reset_index(drop=True))
 
+    # id is a symbol in both tables
+    tick_ids = pd.DataFrame({"sym": ["700.HK", "1299.HK", "9984.JP"],
+                             "id": ["HK1", "HK1", "6132"]})
+    tick_tbl = pd.DataFrame({
+        "id": ["HK1"] * 4 + ["6132"] * 3,
+        "price": [10.0, 20.0, 100.0, 200.0, 3000.0, 5000.0, 30000.0],
+        "ticksize": [0.01, 0.02, 0.05, 0.1, 1.0, 5.0, 10.0]})
     syms = sorted({c for cands in row_candidates(c_audit) for c in cands})
     fk = FakeKdb()
     eq, table = fetch_equity(fk, pd.Timestamp(DATE_FROM), pd.Timestamp(DATE_TO), syms)
@@ -1360,14 +1576,6 @@ def self_test() -> int:
 
     print("\nqatt")
     q_out, q_audit = k_out.copy(), k_audit.copy()
-    qi = q_audit.set_index("order_id").index
-    a5, a4, a2 = (int(np.flatnonzero(qi == x)[0]) for x in ("A5", "A4", "A2"))
-    for pos in (a5, a4):
-        q_out.iloc[pos, q_out.columns.get_loc("px_cont_last")] = np.nan
-        q_audit.iloc[pos, q_audit.columns.get_loc("px_cont_last")] = np.nan
-    # without its reference price A5 cannot be an uptick case
-    base_reason = q_out.iloc[a5]["unfilled_reason"]
-    q_out.iloc[a5, q_out.columns.get_loc("unfilled_reason")] = OTHER_UNEXPLAINED
     qatt_rows = pd.DataFrame([
         # A5, 1299.HK: CA rows, the first in time wins; an off-pattern row is ignored
         dict(date="2026-07-22", sym="1299.HK", time=pd.Timedelta("15:59:59"), cond="ZZ", lastPrice=90.0),
@@ -1376,6 +1584,8 @@ def self_test() -> int:
         # A4, 7203 JT, asked for as 7203.JP; lower-case e only
         dict(date="2026-07-22", sym="7203.JP", time=pd.Timedelta("14:25:00"), cond="E", lastPrice=1.0),
         dict(date="2026-07-22", sym="7203.JP", time=pd.Timedelta("14:25:01"), cond="Xe", lastPrice=99.5),
+        # A2, 0700.HK, asked for as 700.HK; its extract value was 100
+        dict(date="2026-07-21", sym="700.HK", time=pd.Timedelta("16:00:01"), cond="CA", lastPrice=100.5),
     ])
 
     class FakeQatt:
@@ -1395,19 +1605,35 @@ def self_test() -> int:
     filled = fill_px_cont_last(fq, q_out, q_audit)
     rederive_reasons(q_out, q_audit, filled)
     qb = q_audit.set_index("order_id")
-    check("only the empty rows were asked for", sorted({c[3] for c in fq.calls}), [b"*CA*", b"*e*"])
+    check("every market is asked, with its own pattern",
+          sorted({c[3] for c in fq.calls}), [b"*AC*", b"*CA*", b"*e*"])
     check("syms and pattern go as bytes, cast with `$ in q",
           (all(isinstance(x, bytes) for c in fq.calls for x in c[2]), "s:`$s;" in Q_QATT),
           (True, True))
     check("A5 HK: first CA row in time", (qb.at["A5", "px_cont_last"], qb.at["A5", "px_cont_last_source"]),
           (99.5, "qatt"))
     check("A4 JP: cond like *e* is case-sensitive", qb.at["A4", "px_cont_last"], 99.5)
-    check("A2 had a price and was not touched",
-          (qb.at["A2", "px_cont_last"], qb.at["A2", "px_cont_last_source"]), (100.0, "extract"))
-    check("A5 reason worked out again from the filled price",
-          (qb.at["A5", "unfilled_reason"], base_reason), ("UPTICK_RULE", "UPTICK_RULE"))
+    check("A2 priced by qatt, not the extract's 100",
+          (qb.at["A2", "px_cont_last"], qb.at["A2", "px_cont_last_source"]), (100.5, "qatt"))
+    check("A7 has no qatt row and stays blank",
+          (bool(np.isnan(qb.at["A7", "px_cont_last"])), qb.at["A7", "px_cont_last_source"]), (True, ""))
+    check("A4 and A5 become uptick cases once qatt prices them",
+          (qb.at["A4", "unfilled_reason"], qb.at["A5", "unfilled_reason"]),
+          ("UPTICK_RULE", "UPTICK_RULE"))
     check("out and audit agree on px_cont_last",
-          list(q_out["px_cont_last"]), list(q_audit["px_cont_last"]))
+          list(q_out["px_cont_last"].fillna(-1)), list(q_audit["px_cont_last"].fillna(-1)))
+
+    print("\ntick size")
+    t_out, t_audit = q_out.copy(), q_audit.copy()
+    fill_tick_size(FakeKdb(), t_out, t_audit)
+    tb = t_audit.set_index("order_id")
+    check("A5 99 on table HK1: 0.05", tb.at["A5", "TickSize"], 0.05)
+    check("A2 100 sits ON a bound, which is exclusive: 0.1", tb.at["A2", "TickSize"], 0.1)
+    check("A1 5751 on table 6132, symbol id matched across the two tables",
+          (tb.at["A1", "TickSize"], tb.at["A1", "tick_table"]), (10.0, "6132"))
+    check("A7 has no tick table id and stays blank", bool(np.isnan(tb.at["A7", "TickSize"])), True)
+    check("TickSize sits after px_close",
+          OUTPUT_COLUMNS[OUTPUT_COLUMNS.index("px_close") + 1], "TickSize")
 
     print("\nexcel")
     k_out.loc[k_out.index[0], "sedol"] = "0123456"
@@ -1443,7 +1669,9 @@ def main(argv=None) -> int:
     p.add_argument("--no-crosscode", action="store_true",
                    help="skip CrossCode: ric from kdb or the sym, SG may be blank")
     p.add_argument("--no-qatt", action="store_true",
-                   help="skip qatt: px_cont_last only where the extract has it")
+                   help="skip qatt: px_cont_last is blank")
+    p.add_argument("--no-close-print", action="store_true",
+                   help="skip close_print: px_close and volume_close are blank")
     p.add_argument("--sent-source", choices=["residual", "qatt"],
                    default=CLOSE_SENT_SOURCE)
     p.add_argument("--probe", action="store_true",
@@ -1467,6 +1695,7 @@ def main(argv=None) -> int:
     conn = None if (args.no_kdb or args.probe) else kdb_connect()
     cc = None if (args.no_crosscode or args.probe) else load_crosscode(CROSSCODE_PATH)
     qconn = None if (args.no_qatt or args.probe) else qatt_connect()
+    aconn = None if (args.no_close_print or args.probe) else auction_connect()
     aws = read_window(aws_dir, d_from, d_to)
     try:
         if aws.empty:
@@ -1494,11 +1723,22 @@ def main(argv=None) -> int:
             syms = sorted({c for cands in row_candidates(audit) for c in cands})
             eq, table = fetch_equity(conn, d_from, d_to, syms)
             apply_kdb(out, audit, eq, table)
+        tca_section("CLOSE PRINT")
+        if aconn is None:
+            warn("--no-close-print: px_close and volume_close are blank on every order")
+        else:
+            fill_close_print(aconn, out, audit)
         tca_section("PX_CONT_LAST")
         if qconn is None:
-            warn("--no-qatt: px_cont_last only where the extract has it")
+            warn("--no-qatt: px_cont_last is blank on every order")
         else:
-            rederive_reasons(out, audit, fill_px_cont_last(qconn, out, audit))
+            fill_px_cont_last(qconn, out, audit)
+        tca_section("TICK SIZE")
+        if conn is None:
+            warn("--no-kdb: TickSize is blank on every order")
+        else:
+            fill_tick_size(conn, out, audit)
+        rederive_reasons(out, audit, out.index)
         report(out, audit)
 
         out_path = args.out / f"moc_close_{tag}.csv"
