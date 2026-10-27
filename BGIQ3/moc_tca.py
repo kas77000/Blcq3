@@ -3321,7 +3321,7 @@ def t_decomposition(df: pd.DataFrame, by: str) -> pd.DataFrame:
             "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
             "cost of waiting for the close": wmean(g["wait_cost_bps"], g["notional"]),
             "execution vs the close": wmean(g["slip_close"], g["notional"]),
-            "= vs Arrival": wmean(g["slip_arrival"], g["notional"])
+            "total vs Arrival": wmean(g["slip_arrival"], g["notional"])
                 if "slip_arrival" in g else np.nan,
         })
     return pd.DataFrame(rows).set_index(by).round(2)
@@ -4715,7 +4715,7 @@ def t_decomp3(df: pd.DataFrame, by, legs=LEGS, total: bool = True) -> pd.DataFra
             row[lab + " bps"] = wmean(g[c], g["notional"])
             st = robust_stats(g[c], g["notional"], g.get("date"))
             row[lab + " t-stat"] = st["t-stat"]
-        row["= vs Arrival bps"] = wmean(g["slip_arrival"], g["notional"])
+        row["total vs Arrival bps"] = wmean(g["slip_arrival"], g["notional"])
         row["small sample"] = len(g) < MIN_N_FOR_CI
         rows.append(row)
     return pd.DataFrame(rows).set_index(by).round(2)
@@ -5468,7 +5468,7 @@ def review_findings(t: dict) -> None:
     d3 = t.get("91_decomp3_market", E)
     if not d3.empty and "All" in d3.index:
         r = d3.loc["All"]
-        log(f"  vs Arrival {r['= vs Arrival bps']:+.1f} bps = trend "
+        log(f"  vs Arrival {r['total vs Arrival bps']:+.1f} bps = trend "
             f"{r['pre-close trend bps']:+.1f} + auction move {r['auction move bps']:+.1f}"
             f" + execution vs close {r['execution vs close bps']:+.1f}  (+ = saving)")
     dis = t.get("92_dislocation_share", E)
