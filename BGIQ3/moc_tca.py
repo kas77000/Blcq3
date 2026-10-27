@@ -3330,7 +3330,22 @@ def _fig(figsize=FIGSIZE, ncols=1):
     return fig, axes
 
 
+def _wrap_axis(label: str, width: int = 46) -> str:
+    """A long axis label on two lines, broken at the comma or bracket nearest
+    the middle, so it never runs off the end of the axis."""
+    if not label or len(label) <= width or chr(10) in label:
+        return label
+    mid = len(label) // 2
+    cuts = [i for i, ch in enumerate(label) if label[i:i + 2] in (", ", " (")]
+    if not cuts:
+        return label
+    i = min(cuts, key=lambda c: abs(c - mid))
+    head, tail = label[:i + 1].rstrip(), label[i + 1:].strip()
+    return head + chr(10) + tail
+
+
 def _style(ax, xlabel="", ylabel="", title="", horizontal=False):
+    xlabel, ylabel = _wrap_axis(xlabel, 70), _wrap_axis(ylabel)
     ax.set_title(title, color=INK, fontsize=11, loc="left", pad=10)
     ax.set_xlabel(xlabel, color=INK_SECOND, fontsize=9)
     ax.set_ylabel(ylabel, color=INK_SECOND, fontsize=9)
@@ -3640,8 +3655,8 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     if len(parts) > 1:
         ax.legend(frameon=False, ncol=len(parts), loc="upper right",
                   fontsize=8.5)
-    _style(ax, ylabel=f"executed notional ({CURRENCY}m)",
-           title="Value traded by market")
+    _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="Market",
+           title=f"{PERIOD_LABEL} MOC TCA Overview")
     if len(parts) > 1:
         ax.text(0.0, -0.30, "cash and swap split by client account; the "
                 "percentage is the market's share of the value traded",
@@ -3684,8 +3699,9 @@ def chart_spread_relative(t: pd.DataFrame, out: Path,
                     if "small sample" in d.columns else None)
     ax.yaxis.set_major_formatter(
         matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:+.2f}"))
-    _style(ax, ylabel=f"{value.replace(' spreads', '')}, in spreads paid",
-           title="Spread relative performance")
+    _style(ax, ylabel=f"{MEASURE_NAMES.get(value.replace(' spreads', ''), value.replace(' spreads', ''))}"
+                      ", in spreads paid", xlabel="Market",
+           title="Spread Relative Performance, by Market")
     ax.text(0.0, -0.34, "basis points are not comparable between markets - a "
             "wide-spread name costs more of them whatever the algo does. "
             "Spreads are. [x bps] is one spread in that market.",
@@ -3729,7 +3745,7 @@ def chart_algo_choice(t: pd.DataFrame, out: Path,
     ax.invert_yaxis()
     ax.legend(frameon=False, loc="lower right", fontsize=8.5)
     _style(ax, xlabel="vs Arrival, notional-weighted (bps)",
-           title="Same market, same ADV% band - what each algo cost",
+           title="Algo Choice, by Market and ADV%",
            horizontal=True)
     ax.text(0.0, -0.09, "colour is the algo on this chart, not the direction - "
             "left of the line is still a cost",
@@ -3749,7 +3765,45 @@ CI_NOTE = ("whiskers are 95% bootstrap CIs; a CI crossing zero is not "
            "distinguishable from zero")
 REV_NOTE = "negative means the price came back against us by the next open"
 # The desk's name for the reversion axis. {unit} is spreads or bps.
-REV_YLABEL = "Close to T+1 notional weighted in {unit}"
+REV_YLABEL = "Reversion, close to T+1 open (notional-weighted, {unit})"
+
+# What each measure is, spelled out for the y axis. The short name stays in
+# the code and the tables; the axis says what was compared with what.
+MEASURE_NAMES = {
+    "vs Close": "Execution price vs official close",
+    "first execution vs Close": "First execution price vs official close",
+    "next open vs close": "Reversion, close to T+1 open",
+    "vs PVWAP": "Execution price vs interval VWAP (PVWAP)",
+    "vs Arrival": "Arrival price slippage",
+    "auction move": "Auction move, last continuous trade to close",
+    "reversion": "Reversion, close to T+1 open",
+}
+
+# What the categories along the x axis are, from the table's index name.
+AXIS_NAMES = {
+    "market": "Market",
+    "strategy": "Strategy",
+    "adv_bucket": "Order size (% of ADV)",
+    "spread_bucket": "Spread band (bps)",
+    "close_pr_bucket": "Close participation (% of close auction volume)",
+    "cap": "Market cap",
+    "vol_bucket": "Daily volatility band (bps)",
+    "daily vol": "Daily volatility band (bps)",
+    "buy_sell": "Side",
+    "month": "Month",
+    "India": "India population",
+}
+
+
+def _axis_name(index) -> str:
+    """The x-axis label for a table's categories, from its index name."""
+    names = getattr(index, "names", None) or [getattr(index, "name", None)]
+    return AXIS_NAMES.get(str(names[0]), "") if names and names[0] else ""
+
+
+def _measure_axis(measure: str, unit: str) -> str:
+    return (f"{MEASURE_NAMES.get(measure, measure)}, "
+            f"{unit} (notional-weighted)")
 CO_NOTE = ("close-only: 99.5% or more of the order printed in the auction, so "
            "its close slippage is zero by design and reversion is the "
            "measure. Negative means the price came back against us by the "
@@ -3828,9 +3882,8 @@ def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
                     tight=by_notional if tight is None else tight)
     _style(ax, ylabel=(ylabel.format(unit="spreads" if spreads else "bps")
                        if ylabel else
-                       measure + (", in spreads" if spreads
-                                  else ", bps, notional-weighted")),
-           title=title)
+                       _measure_axis(measure, "in spreads" if spreads else "bps")),
+           xlabel=_axis_name(d.index), title=title)
     room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
     _save(fig, out, name, bottom=room)
 
@@ -3883,8 +3936,8 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                         unit="spreads" if spreads else "bps", tight=True)
         _style(ax, ylabel=(ylabel.format(unit="spreads" if spreads else "bps")
                            if ylabel else
-                           measure + (", in spreads" if spreads else ", bps")),
-               title=f"{title}: {side}")
+                           _measure_axis(measure, "in spreads" if spreads else "bps")),
+               xlabel=_axis_name(d.index), title=f"{title}: {side}")
         ax._panel = side
     fig._deck_title = title
     _share_ylim(axes)
@@ -3928,7 +3981,9 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
         _diverging_barv(ax, labels, vals, ci=ci,
                         unit="spreads" if spreads else "bps")
         head = all_label if p == "All" else p
-        _style(ax, ylabel=("in spreads" if spreads else "bps") if i == 0 else "",
+        _style(ax, ylabel=("Result vs benchmark, "
+                           + ("in spreads" if spreads else "bps")
+                           + " (notional-weighted)") if i == 0 else "",
                title=(title + chr(10) + head) if i == 0 else chr(10) + head)
         ax._panel = head
     fig._deck_title = title
@@ -3966,8 +4021,8 @@ def chart_close_pr(tables: list, out: Path) -> None:
         # India's bar is a different measure, so it says so where it is read.
         ax.set_xticklabels([f"{k} (PR)" if str(k) == "India" else str(k)
                             for k in d.index], rotation=30, ha="right")
-        _style(ax, ylabel="Close participation, mean per order (%)",
-               title=title)
+        _style(ax, ylabel="Close participation, % of close auction volume "
+                          "(mean per order)", xlabel="Market", title=title)
         india = "India" in set(map(str, d.index))
         room = _notes(fig, ["ClosePR: our executed quantity as a share of the "
                             "closing auction's volume, averaged per order, not "
@@ -4005,8 +4060,8 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
         ticks.append(chr(10).join(bits))
     ax.set_xticks(x)
     ax.set_xticklabels(ticks)
-    _style(ax, ylabel=f"executed notional ({CURRENCY}m)",
-           title="Close-only and pre-traded flow")
+    _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="Order type",
+           title="Pre-traded vs Close only")
     room = _notes(fig, ["close-only: 99.5% or more of the order printed in the "
                         "auction. Pre-traded: part of it traded before. "
                         "Shares are of the two together; %ADV is "
@@ -4039,7 +4094,7 @@ def chart_adv_profile(t: pd.DataFrame, out: Path, name: str, title: str,
                     ha="center", va="bottom", fontsize=8.5, color=INK, zorder=5)
         ax.set_xticks(x)
         ax.set_xticklabels([str(k) for k in d.index])
-        _style(ax, xlabel="ADV%", ylabel=ylabel,
+        _style(ax, xlabel="Order size (% of ADV)", ylabel=ylabel,
                title=title if i == 0 else "")
     _save(fig, out, name)
 
@@ -4092,9 +4147,10 @@ def chart_monthly(df: pd.DataFrame, out: Path,
                 color=INK, zorder=5)
     ax.set_xticks(range(len(months)))
     ax.set_xticklabels(labels, rotation=30, ha="right")
-    _style(ax, ylabel="vs Close, " + ("in spreads" if spreads else "bps"),
-           title="Close performance by month"
-                 + (f" \u2014 {subtitle}" if subtitle else ""))
+    _style(ax, ylabel=_measure_axis("vs Close", "in spreads" if spreads else "bps"),
+           xlabel="Month",
+           title="Execution vs Close, by Month"
+                 + (f", {subtitle}" if subtitle else ""))
     room = _notes(fig, [SPREAD_NOTE if spreads else ""]) if spreads else 0.0
     _save(fig, out, name, bottom=room)
 
@@ -5028,7 +5084,7 @@ def build_review_tables(df: pd.DataFrame, auc: pd.DataFrame, t: dict) -> None:
 
 def _grouped_bars(d: pd.DataFrame, cols: list, legend: list, out: Path, name: str,
                   title: str, ylabel: str, note: str = "", limit: int = 14,
-                  order: list = None, fmt: str = "{:+.1f}") -> None:
+                  order: list = None, fmt: str = "{:+.1f}", xlabel: str = None) -> None:
     """Several measures side by side for each group, one scale, a number on
     every bar. The colours tell the measures apart; the sign is on the axis."""
     d = _chartable(d)
@@ -5057,7 +5113,8 @@ def _grouped_bars(d: pd.DataFrame, cols: list, legend: list, out: Path, name: st
     ax.axhline(0, color=BASELINE, linewidth=0.9)
     ax.set_xticks(x)
     ax.set_xticklabels([str(i) for i in d.index], rotation=30, ha="right")
-    _style(ax, ylabel=ylabel, title=title)
+    _style(ax, ylabel=ylabel, title=title,
+           xlabel=_axis_name(d.index) if xlabel is None else xlabel)
     ax.legend(frameon=False, fontsize=8, ncol=min(k, 4), loc="best")
     room = _notes(fig, [note])
     _save(fig, out, name, bottom=room)
@@ -5070,6 +5127,7 @@ def _rank_barh(labels, values, out: Path, name: str, title: str, xlabel: str,
     keep = np.isfinite(v)
     if not keep.any():
         return
+    cat = _axis_name(labels) if isinstance(labels, pd.Index) else ""
     labels = [str(l) for l, k in zip(labels, keep) if k]
     v = v[keep]
     fig, (ax,) = _fig((10.0, max(3.5, 0.42 * len(v) + 1.8)))
@@ -5080,7 +5138,7 @@ def _rank_barh(labels, values, out: Path, name: str, title: str, xlabel: str,
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
     ax.invert_yaxis()
-    _style(ax, xlabel=xlabel, title=title, horizontal=True)
+    _style(ax, xlabel=xlabel, ylabel=cat, title=title, horizontal=True)
     room = _notes(fig, [note])
     _save(fig, out, name, bottom=room)
 
@@ -5104,27 +5162,28 @@ def build_review_charts(t: dict, charts: Path) -> None:
              "vs close. " + SIGN)
     _grouped_bars(t.get("91_decomp3_market", E), legs, names, charts,
                   "40_decomposition_market.png",
-                  "Where the cost came from, by market", "bps, notional-weighted",
+                  "Where the Cost Came From, by Market", "Contribution to arrival price slippage, bps (notional-weighted)",
                   note=note4)
     _grouped_bars(t.get("91b_decomp3_side", E), legs, names, charts,
                   "40b_decomposition_side.png",
-                  "Where the cost came from, buys and sells", "bps, notional-weighted",
+                  "Where the Cost Came From, by Side", "Contribution to arrival price slippage, bps (notional-weighted)",
                   note=note4)
     _grouped_bars(t.get("91c_decomp3_strategy", E), legs, names, charts,
                   "40c_decomposition_strategy.png",
-                  "Where the cost came from, by strategy", "bps, notional-weighted",
+                  "Where the Cost Came From, by Strategy", "Contribution to arrival price slippage, bps (notional-weighted)",
                   note=note4)
     adj = [lab + " bps" for _, lab in LEGS_ADJ]
     _grouped_bars(t.get("91d_decomp3_mkt_adjusted", E), adj, names, charts,
                   "50_decomposition_market_adjusted.png",
-                  "Where the cost came from, after the index move", "bps",
+                  "Where the Cost Came From, Market-adjusted",
+                  "Contribution to arrival price slippage after the index move, bps",
                   note="the index's move over the same interval, times beta, "
                        "taken off the stock's. " + SIGN)
 
     # 3: auction move
     chart_spreads(t.get("90_auction_move_mkt", E), charts,
                   "41_auction_move_market.png",
-                  "Auction move: last continuous trade to the close, by market",
+                  "Auction Move, by Market",
                   "auction move", by_notional=True, note=SIGN)
     dis = t.get("92_dislocation_share", E)
     if not dis.empty:
@@ -5132,8 +5191,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
         _grouped_bars(dis, cols, [f"> {x} spread" + ("s" if x > 1 else "")
                                   for x in DISLOCATION_SPREADS],
                       charts, "49_dislocation_share_market.png",
-                      "Orders in names whose close moved more than x spreads",
-                      "% of orders", fmt="{:.0f}",
+                      "Close Dislocation, by Market",
+                      "Share of orders (%)", fmt="{:.0f}",
                       note="the close against the last continuous trade, either "
                            "direction, in the name's own spread")
 
@@ -5145,8 +5204,9 @@ def build_review_charts(t: dict, charts: Path) -> None:
                       else ["|auction move| bps (median)"],
                       ["close vs last continuous trade", "close vs last-15m VWAP"],
                       charts, "56_vol_dislocation.png",
-                      "Closing dislocation by the stock's daily volatility",
-                      "median, bps, either direction", fmt="{:.1f}",
+                      "Close Dislocation, by Volatility",
+                      "Distance of the close, bps (median, either direction)",
+                      fmt="{:.1f}",
                       note="daily vol quartiles from the Vol column. A bigger bar is "
                            "a close further from the trading just before it")
     vf = t.get("110_vol_flow_vs_arrival", E)
@@ -5157,8 +5217,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
         cols = [c for c in ["Close only", "Pre-traded"] if c in wide]
         if cols:
             _grouped_bars(wide, cols, cols, charts, "57_vol_close_vs_pretraded.png",
-                          "Close only against pre-traded, by daily volatility",
-                          "vs Arrival, bps, notional-weighted",
+                          "Close Only vs Pre-traded, by Volatility",
+                          "Arrival price slippage, bps (notional-weighted)",
                           note="does completing risk before the auction pay off in "
                                "calmer names? " + SIGN)
 
@@ -5167,12 +5227,14 @@ def build_review_charts(t: dict, charts: Path) -> None:
     dnames = [f"last {w} min" for w in DRIFT_WINDOWS_MIN] + ["auction"]
     _grouped_bars(t.get("93_preclose_drift_mkt", E), dcols, dnames, charts,
                   "42_pre_close_drift_market.png",
-                  "The stock's move before the auction, and in it", "bps",
+                  "Pre-close Drift, by Market",
+                  "Side-adjusted price move, bps (notional-weighted)",
                   note="each window ends at the continuous close. Negative = the "
                        "price was moving against the order. " + SIGN)
     _grouped_bars(t.get("93b_preclose_drift_side", E), dcols, dnames, charts,
                   "42b_pre_close_drift_side.png",
-                  "The move before the auction, buys and sells", "bps", note=SIGN)
+                  "Pre-close Drift, by Side",
+                  "Side-adjusted price move, bps (notional-weighted)", note=SIGN)
 
     # 6: close vs last-15m VWAP
     dist = t.get("94b_close_vs_vwap15_dist", E)
@@ -5185,8 +5247,9 @@ def build_review_charts(t: dict, charts: Path) -> None:
                     color=INK_SECOND)
         ax.set_xticks(x)
         ax.set_xticklabels(dist.index, rotation=30, ha="right")
-        _style(ax, xlabel="close vs last-15m VWAP, bps", ylabel="% of name-days",
-               title="How far the close sits from the last 15 minutes' VWAP")
+        _style(ax, xlabel="Close vs last 15 min VWAP (bps)",
+               ylabel="Share of name-days (%)",
+               title="Close vs Last 15 Min VWAP, Distribution")
         room = _notes(fig, ["one count per name per day; positive = the close "
                             "printed above the VWAP (not side-adjusted)"])
         _save(fig, charts, "43_close_vs_vwap15_distribution.png", bottom=room)
@@ -5195,24 +5258,24 @@ def build_review_charts(t: dict, charts: Path) -> None:
     if not rk.empty:
         _rank_barh(rk.index, rk["mean |close vs VWAP15| bps"], charts,
                    "44_close_vs_vwap15_market.png",
-                   "Markets ranked by how far the close sits from the last 15m VWAP",
-                   "mean |close vs VWAP15|, bps",
+                   "Close vs Last 15 Min VWAP, by Market",
+                   "Close vs last 15 min VWAP, bps (mean, either direction)",
                    note="unsigned, per name-day: a bigger number is a close more "
                         "out of line with the trading just before it")
 
     # 7: participation
     chart_spreads(t.get("95a_closepr_auction_move", E), charts,
                   "45a_closepr_auction_move.png",
-                  "Auction move by close participation", "auction move",
+                  "Auction Move, by Close Participation", "auction move",
                   note="participation = shares executed in the close / official "
                        "close auction volume. " + SIGN)
     chart_spreads(t.get("95b_closepr_reversion", E), charts,
                   "45b_closepr_reversion.png",
-                  "Reversion to the next open by close participation", "reversion",
+                  "Close Reversion, by Close Participation", "reversion",
                   note=REV_NOTE)
     chart_spreads_by_side(t.get("96_closepr_side_auction_mv", E), charts,
                           "46_closepr_by_side.png",
-                          "Auction move by close participation", "auction move",
+                          "Auction Move by Close Participation, by Side", "auction move",
                           order=CLOSE_PR_LABELS, note=SIGN)
 
     # 8: impact curve
@@ -5232,8 +5295,9 @@ def build_review_charts(t: dict, charts: Path) -> None:
         ax.axhline(0, color=BASELINE, linewidth=0.9)
         for k in REG_KNOTS:
             ax.axvline(k, color=GRID, linewidth=0.8, linestyle="--")
-        _style(ax, xlabel="close participation, %", ylabel="auction move, bps",
-               title="Does cost accelerate with close participation?")
+        _style(ax, xlabel="Close participation (% of close auction volume)",
+               ylabel="Auction move, last continuous trade to close (bps)",
+               title="Impact Curve, by Close Participation")
         ax.legend(frameon=False, fontsize=8, loc="best")
         segs = t.get("103_impact_segments", E)
         steep = (segs.index[segs["steepest cost"]].tolist() if not segs.empty else [])
@@ -5250,7 +5314,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
         _diverging_barv(ax, [str(i) for i in d.index],
                         [float(v) for v in d[f"{lab}: buy - sell"]],
                         ci=_gap_ci(d, lab))
-        _style(ax, ylabel="buy minus sell, bps", title=f"Buys against sells: {lab}, by market")
+        _style(ax, ylabel="Buy minus sell, bps (notional-weighted)", xlabel="Market",
+               title=f"Buy vs Sell, by Market ({lab})")
         room = _notes(fig, ["positive = buys did better than sells. Whiskers are "
                             "+/- 1.96 date-clustered standard errors"])
         _save(fig, charts, "48_side_gap_market.png", bottom=room)
@@ -5262,7 +5327,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
         fig, (ax,) = _fig((11.0, 6.0))
         _diverging_barv(ax, [str(i) for i in d.index],
                         [float(v) for v in d["opportunity cost bps"]])
-        _style(ax, ylabel="bps of executed value", title="Opportunity cost of the unfilled part, by market")
+        _style(ax, ylabel="Opportunity cost, bps of executed notional", xlabel="Market",
+               title="Opportunity Cost, by Market")
         room = _notes(fig, ["unfilled share x the move from the close to the next "
                             "open, side-adjusted. " + SIGN])
         _save(fig, charts, "47_opportunity_cost_market.png", bottom=room)
@@ -5273,8 +5339,9 @@ def build_review_charts(t: dict, charts: Path) -> None:
     if vcols:
         _grouped_bars(pv, vcols, [c.replace(" per daily vol", "") for c in vcols],
                       charts, "52_cost_per_vol_market.png",
-                      "Cost in units of daily volatility, by market",
-                      "multiples of daily vol", fmt="{:+.2f}",
+                      "Cost in Daily Volatility, by Market",
+                      "Cost in multiples of daily volatility (notional-weighted)",
+                      fmt="{:+.2f}",
                       note="the weighted cost over the weighted daily vol. " + SIGN)
 
     # 11: concentration
@@ -5283,8 +5350,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
         d = _chartable(cc.drop(index="All", errors="ignore"))
         _rank_barh(d.index, d["top-5 names % of value"], charts,
                    "53_concentration_market.png",
-                   "Share of each market's value in its five largest names",
-                   "% of value", fmt="{:.0f}%",
+                   "Name Concentration, by Market",
+                   "Top-5 names, % of the market's executed notional", fmt="{:.0f}%",
                    note=f"above {CONCENTRATION_FLAG_PCT:.0f}%, the market's average "
                         f"is mostly those names - read it with that in mind")
 
@@ -5293,7 +5360,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
     if not cd.empty:
         _rank_barh(cd.index, cd["|auction move| bps (median)"], charts,
                    "54_cap_dislocation.png",
-                   "Auction dislocation by market cap", "median |auction move|, bps",
+                   "Close Dislocation, by Market Cap",
+                   "Auction move, bps (median, either direction)",
                    note="last continuous trade to the close, either direction")
 
     # 13: India CAS
@@ -5302,7 +5370,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
         cols = [c for c in ["vs Arrival bps", "vs Close bps", "auction move bps",
                             "reversion bps"] if c in ic]
         _grouped_bars(ic, cols, [c.replace(" bps", "") for c in cols], charts,
-                      "55_india_cas.png", "India before and after the CAS", "bps",
+                      "55_india_cas.png", "India Close, Before and After CAS",
+                      "Result vs benchmark, bps (notional-weighted)",
                       note="CAS names ran the closing auction session from 3 Aug "
                            "2026 (qatt AUC/ACB). " + SIGN)
 
@@ -5822,33 +5891,33 @@ def build_charts(t: dict, out_dir: Path) -> None:
     E = pd.DataFrame()
     chart_spreads(t.get("61_close_mkt_spreads", E), charts,
                   "15_market_vs_close.png",
-                  "Against the closing price, by market", "vs Close",
+                  "Execution vs Close, by Market", "vs Close",
                   by_notional=True,
                   note="ordered by value traded, not by result - a small "
                        "market with a big number is still a small market")
     for key, name, title, measure in [
         ("63_close_adv_spreads", "17_close_by_adv.png",
-         "Close performance by ADV%", "vs Close"),
+         "Execution vs Close, by ADV%", "vs Close"),
         ("65_close_sprdq_spreads", "18_close_by_spread.png",
-         "Close performance by spread quartile", "vs Close"),
+         "Execution vs Close, by Spread", "vs Close"),
     ]:
         chart_spreads(t.get(key, E), charts, name, title, measure)
     for key, name, title in [
         ("66_pre_firstexec_adv_spreads", "19_first_exec_by_adv.png",
-         "First execution vs the close, by ADV%"),
+         "First Execution vs Close, by ADV%"),
         ("67_pre_firstexec_sprdq_spreads", "20_first_exec_by_spread.png",
-         "First execution vs the close, by spread quartile"),
+         "First Execution vs Close, by Spread"),
     ]:
         chart_spreads(t.get(key, E), charts, name, title,
                       "first execution vs Close", note=PRE_TRADED_NOTE)
     chart_spreads(t.get("68_pre_firstexec_mkt_spreads", E), charts,
                   "10b_first_exec_market.png",
-                  "Was starting before the close right? By market",
+                  "First Execution vs Close, by Market",
                   "first execution vs Close", by_notional=True,
                   note=PRE_TRADED_NOTE)
     chart_spreads(t.get("69_reversion_strat_spreads", E), charts,
                   "11_reversion.png",
-                  "Reversion - did the auction print come back?",
+                  "Reversion, by Strategy",
                   "next open vs close", note=REV_NOTE, ylabel=REV_YLABEL)
     df = t.get("_close_df")
     if df is not None:
@@ -5870,19 +5939,19 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # chart on the summary slide and should not read as a saving.
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
                       color=SERIES[2], title=
-                      "Value traded by ADV%")
+                      "Executed Notional, by ADV%")
 
     # Close-only. Its close slippage is zero by construction, so the question
     # is whether the price held after the auction: reversion, by market, and
     # by market and side.
     chart_spreads(t.get("71_co_reversion_mkt_spreads", E), charts,
                   "22_reversion_close_only.png",
-                  "Close-only orders: reversion by market",
+                  "Close Only Reversion, by Market",
                   "next open vs close", by_notional=True, note=CO_NOTE,
                   ylabel=REV_YLABEL)
     chart_spreads_by_side(t.get("72_co_reversion_mkt_side_spr", E), charts,
                           "25_close_only_reversion_market_side.png",
-                          "Close-only reversion", "next open vs close",
+                          "Close Only Reversion, by Side", "next open vs close",
                           note=CO_NOTE, ylabel=REV_YLABEL)
 
     # Pre-traded. Three prices tell its story: where it started (first
@@ -5893,48 +5962,48 @@ def build_charts(t: dict, out_dir: Path) -> None:
          ("Execution vs close", t.get("73b_pre_close_side_spr", E)),
          ("Next open vs close", t.get("73c_pre_reversion_side_spr", E))],
         charts, "26_pretraded_by_side.png",
-        "Pre-traded orders: start, finish and reversion",
+        "Pre-traded Analysis, by Side",
         note=PRE_NOTE, all_label="All pre-traded")
     chart_spreads(t.get("77_pre_close_mkt_spreads", E), charts,
                   "27_pretraded_close_market.png",
-                  "Pre-traded orders: against the closing price, by market",
+                  "Pre-traded Execution vs Close, by Market",
                   "vs Close", by_notional=True, note=PRE_NOTE)
     chart_spreads(t.get("70_pre_reversion_mkt_spreads", E), charts,
                   "21_reversion_pretraded.png",
-                  "Pre-traded orders: reversion by market",
+                  "Pre-traded Reversion, by Market",
                   "next open vs close", by_notional=True, note=PRE_NOTE,
                   ylabel=REV_YLABEL)
     chart_spreads_by_side(t.get("74_pre_firstexec_mkt_side_spr", E), charts,
                           "28_pretraded_first_exec_market_side.png",
-                          "Pre-traded, first execution vs close",
+                          "Pre-traded Analysis, by Side/Market",
                           "first execution vs Close", note=PRE_TRADED_NOTE)
     chart_spreads_by_side(t.get("75_pre_close_mkt_side_spr", E), charts,
                           "29_pretraded_close_market_side.png",
-                          "Pre-traded, execution vs close", "vs Close",
+                          "Pre-traded Execution vs Close, by Side/Market", "vs Close",
                           note=PRE_NOTE)
     chart_spreads_by_side(t.get("76_pre_reversion_mkt_side_spr", E), charts,
                           "30_pretraded_reversion_market_side.png",
-                          "Pre-traded reversion", "next open vs close",
+                          "Pre-traded Reversion, by Side/Market", "next open vs close",
                           note=PRE_NOTE, ylabel=REV_YLABEL)
     chart_spreads(t.get("78_pre_pvwap_mkt_spreads", E), charts,
                   "32_pretraded_pvwap_market.png",
-                  "Pre-traded orders: against PVWAP, by market",
+                  "Pre-traded vs PVWAP, by Market",
                   "vs PVWAP", by_notional=True, note=PVWAP_NOTE)
     chart_spreads_by_side(t.get("79_pre_pvwap_mkt_side_spr", E), charts,
                           "33_pretraded_pvwap_market_side.png",
-                          "Pre-traded, against PVWAP", "vs PVWAP",
+                          "Pre-traded vs PVWAP, by Side/Market", "vs PVWAP",
                           note=PVWAP_NOTE)
     chart_close_pr([
         (t.get("80_close_pr_mkt_all"), "34_close_pr_all.png",
-         "Close participation by market: all orders"),
+         "Close Participation by Market"),
         (t.get("81_close_pr_mkt_close_only"), "35_close_pr_close_only.png",
-         "Close participation by market: close-only orders"),
+         "Close Only Participation, by Market"),
         (t.get("82_close_pr_mkt_pretraded"), "36_close_pr_pretraded.png",
-         "Close participation by market: pre-traded orders"),
+         "Pre-traded Orders | Close participation by market"),
     ], charts)
     chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
                       "31_pretraded_adv_profile.png",
-                      "Pre-traded orders by ADV%", with_orders=True)
+                      "Pre-traded Orders, by ADV%", with_orders=True)
 
     build_review_charts(t, charts)
 
