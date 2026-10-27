@@ -6058,7 +6058,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
                   "21_reversion_pretraded.png",
                   "Pre-traded Reversion, by Market",
                   "next open vs close", by_notional=True, note=PRE_NOTE,
-                  ylabel=REV_YLABEL)
+                  ylabel="Next open vs close, in spreads")
     chart_spreads_by_side(t.get("74_pre_firstexec_mkt_side_spr", E), charts,
                           "28_pretraded_first_exec_market_side.png",
                           "Pre-traded Analysis, by Side/Market",
