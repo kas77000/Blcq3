@@ -11,9 +11,9 @@ the 95% interval of that number. Rerun moc_tca.py and the deck follows.
 
 The look is the H1 deck's: 4:3, white, a bold title top left, two or three
 large bullets, one wide chart (or two side by side), a centred
-"Data Set : ... Filter : ..." line, and the house footer. With --template the
-slides go onto that file's own master instead, footer and all, so the result
-can be pasted straight into the house template.
+"Data Set : ... Filter : ..." line. No footer and no firm name: with
+--template the slides go onto that file's own master instead, so the result
+can be pasted straight into a template.
 
 Writes <deck>.pptx and <deck>.evidence.md: each bullet with the table row it
 rests on, so any number can be defended on the call. The wording is a first
@@ -47,10 +47,6 @@ except ImportError:
 
 PERIOD = "YTD 2026"
 DATA_SET = "YTD 2026 (1 Jan - 23 Oct)"
-# The H1 deck's footer. Ignored with --template: the template's master has it.
-FOOTER_LEFT = "BERNSTEIN"
-FOOTER_LEFT_2 = "SOCIETE GENERALE GROUP"
-FOOTER_RIGHT = "INDUSTRY"
 
 FILTER_CLOSE_ONLY = "CloseFillRate > 99.5"
 FILTER_PRE_TRADED = "CloseFillRate > 0 and < 99.5"
@@ -69,7 +65,7 @@ WIDTH = SLIDE_W - 2 * LEFT
 TITLE_TOP = Inches(0.45)
 BULLETS_TOP = Inches(1.15)
 DATASET_TOP = Inches(6.5)
-FOOTER_TOP = Inches(7.0)
+BOTTOM = Inches(7.0)
 FONT = "Arial"
 
 
@@ -285,7 +281,7 @@ def story(run: Run) -> list[dict]:
         ranked = sorted(prof, key=lambda kr: -num(kr[1], "notional (USDm)"))
         top5 = 100 * sum(num(r, "notional (USDm)") for _, r in ranked[:5]) / tot
         b.append(f"Executed US${tot / 1000:.1f}bn across {len(prof)} APAC markets.")
-        (a, ra), (c, rc) = ranked[0], ranked[1]
+        a, c = ranked[0][0], ranked[1][0]
         b.append(f"{a} and {c} were the largest contributors, with the top five "
                  f"markets accounting for {top5:.0f}% of total executed notional.")
         src.append("`34_market_profile`: total " + f"{tot:,.1f}m; "
@@ -713,12 +709,10 @@ def build(run: Run, out: Path, template: Path | None) -> list:
         prs.slide_width, prs.slide_height = SLIDE_W, SLIDE_H
         layout = prs.slide_layouts[6]
 
-    page = len(prs.slides)
     for spec in slides:
         s = prs.slides.add_slide(layout)
         for ph in list(s.placeholders):           # an empty placeholder prints "Click to add"
             ph._element.getparent().remove(ph._element)
-        page += 1
         textbox(s, LEFT, TITLE_TOP, WIDTH, Inches(0.6), spec["title"], 26, bold=True)
         n = len(spec["bullets"])
         size = 18 if not spec["charts"] else (16 if n <= 2 else 14)
@@ -727,20 +721,12 @@ def build(run: Run, out: Path, template: Path | None) -> list:
             bullets(s, spec["bullets"], size)
             top = BULLETS_TOP + bullets_height(spec["bullets"], size)
         if spec["charts"]:
-            bottom = DATASET_TOP - Inches(0.05) if spec["dataset"] else FOOTER_TOP - Inches(0.1)
+            bottom = DATASET_TOP - Inches(0.05) if spec["dataset"] else BOTTOM - Inches(0.1)
             charts_row(s, [run.chart(c) for c in spec["charts"]],
                        max(top, BULLETS_TOP), bottom)
         if spec["dataset"]:
             textbox(s, LEFT, DATASET_TOP, WIDTH, Inches(0.35), spec["dataset"], 13,
                     align=PP_ALIGN.CENTER)
-        if not template:
-            box = textbox(s, LEFT, FOOTER_TOP, Inches(4.5), Inches(0.3),
-                          FOOTER_LEFT, 9, bold=True)
-            run_ = box.text_frame.paragraphs[0].add_run()
-            run_.text = f"  |  {FOOTER_LEFT_2}"
-            run_.font.size, run_.font.name, run_.font.color.rgb = Pt(8), FONT, BLACK
-            textbox(s, SLIDE_W - LEFT - Inches(2.4), FOOTER_TOP, Inches(2.4), Inches(0.3),
-                    f"{FOOTER_RIGHT}        |   {page}", 9, align=PP_ALIGN.RIGHT)
         chart_notes = [f"{run.titles[c]['title']}: " + " ".join(run.titles[c]["notes"])
                        for c in spec["charts"] if run.titles.get(c, {}).get("notes")]
         s.notes_slide.notes_text_frame.text = (
@@ -779,7 +765,7 @@ def main(argv=None) -> int:
                    help="the moc_tca.py --out folder (tables.xlsx + charts)")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--template", type=Path, default=None,
-                   help="the H1 deck (.pptx) or house template (.potx): slides go on its master")
+                   help="a .pptx or .potx whose master the slides go on")
     a = p.parse_args(argv)
 
     run = Run(a.results)
