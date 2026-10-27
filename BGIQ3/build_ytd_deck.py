@@ -698,8 +698,44 @@ def story(run: Run) -> list[dict]:
 # BUILD
 # ===========================================================================
 
+def agenda(slides: list) -> dict:
+    """The contents slide: every main slide title with the page it is on, and
+    the appendix as one line. Built from the story, so it cannot drift."""
+    main = [(i + 2, sp["title"]) for i, sp in enumerate(slides) if not sp["appendix"]]
+    first_app = next((i + 2 for i, sp in enumerate(slides) if sp["appendix"]), None)
+    rows = [f"{n}.  {t}" for n, t in main]
+    if first_app:
+        rows.append(f"{first_app}.  Appendix")
+    return dict(title="Agenda", bullets=[], charts=[], src=[], dataset=None,
+                appendix=False, agenda=rows,
+                notes="Contents. Page numbers are the slide numbers in this deck.")
+
+
+def agenda_columns(slide, rows):
+    """The titles in two columns, the deck's text style, no bullets."""
+    half = math.ceil(len(rows) / 2)
+    col_w = int((WIDTH - Inches(0.3)) / 2)
+    for k, part in enumerate((rows[:half], rows[half:])):
+        box = slide.shapes.add_textbox(LEFT + k * (col_w + Inches(0.3)), BULLETS_TOP,
+                                       col_w, Inches(5.2))
+        frame = box.text_frame
+        frame.word_wrap = True
+        for i, text in enumerate(part):
+            para = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
+            para.space_after = Pt(8)
+            # Hanging indent: a wrapped title lines up under its text.
+            pPr = para._p.get_or_add_pPr()
+            pPr.set("marL", str(Inches(0.42)))
+            pPr.set("indent", str(-Inches(0.42)))
+            number, title = text.split(".  ", 1)
+            run = para.add_run()
+            run.text = f"{number}.	{title}"
+            run.font.size, run.font.color.rgb, run.font.name = Pt(14), DARK, FONT
+
+
 def build(run: Run, out: Path, template: Path | None) -> list:
     slides = story(run)
+    slides = [agenda(slides)] + slides
     if template:
         prs = Presentation(str(template))
         layout = next((l for l in prs.slide_layouts if l.name.lower() == "blank"),
@@ -714,6 +750,8 @@ def build(run: Run, out: Path, template: Path | None) -> list:
         for ph in list(s.placeholders):           # an empty placeholder prints "Click to add"
             ph._element.getparent().remove(ph._element)
         textbox(s, LEFT, TITLE_TOP, WIDTH, Inches(0.6), spec["title"], 26, bold=True)
+        if spec.get("agenda"):
+            agenda_columns(s, spec["agenda"])
         n = len(spec["bullets"])
         size = 18 if not spec["charts"] else (16 if n <= 2 else 14)
         top = BULLETS_TOP
