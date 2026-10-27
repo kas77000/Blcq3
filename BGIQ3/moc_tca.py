@@ -531,10 +531,12 @@ VWAP_WINDOW_MIN = 15
 INDEX_SYMS: dict = {}
 BETA_DEFAULT = 1.0
 
-# Vol in the extract, as a unit. The cost-per-vol tables divide by DAILY vol
-# in bps. The first YTD run read it as annualised % and got daily vols of
-# 1-147 bps - ten times too low for these names - so it is daily %. The run
-# prints the median so this can be checked against what the column holds.
+# Vol in the extract is Parkinson daily volatility in % (from each day's high
+# and low), confirmed by the desk. The cost-per-vol tables divide by daily vol
+# in bps, so it is x100. Parkinson sees the intraday range only, not the
+# overnight gap, so it runs a little below close-to-close vol: a cost "per
+# daily vol" reads slightly high against a close-to-close figure. The run
+# prints the median so the unit can be checked against what the column holds.
 VOL_UNIT = "daily_pct"           # or "annual_pct", "daily_bps"
 
 # Close participation buckets: shares executed in the close over the official

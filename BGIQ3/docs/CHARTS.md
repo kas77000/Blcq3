@@ -100,7 +100,7 @@ The auction move, the trend, the drift and the 15-minute VWAP need intraday pric
 | `16_spread_relative` | Results by market in spreads beside bps | Why bps alone mislead across markets. |
 | `17_close_by_adv` | vs Close by ADV% band | Cost against order size. |
 | `18_close_by_spread` | vs Close by spread quartile | Cost against how wide the stock trades. |
-| `52_cost_per_vol_market` | vs Arrival, vs Close, trend and auction move in units of daily vol, by market | Daily vol comes from `Vol`, read as annualised % (`VOL_UNIT`). The run log prints the median daily vol to check. |
+| `52_cost_per_vol_market` | vs Arrival, vs Close, trend and auction move in units of daily vol, by market | Daily vol is `Vol`, Parkinson daily volatility in % (`VOL_UNIT = "daily_pct"`). The run log prints the median daily vol to check. |
 
 ## 10_signal_vs_noise (point 10)
 
