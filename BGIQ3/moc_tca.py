@@ -3997,7 +3997,7 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
 
 def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
                            note: str = "", all_label: str = "All",
-                           unit: str = None) -> None:
+                           unit: str = None, xlabel: str = "") -> None:
     """Several measures on one population: an All panel, then Buy, then Sell.
 
     specs is [(measure label, table indexed All / Buy / Sell), ...]. Each bar
@@ -4034,6 +4034,7 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
         _style(ax, ylabel=("Result vs benchmark, "
                            + ("in spreads" if spreads else "bps")
                            + " (notional-weighted)") if i == 0 else "",
+               xlabel=xlabel,
                title=(title + chr(10) + head) if i == 0 else chr(10) + head)
         ax._panel = head
     fig._deck_title = title
@@ -6051,7 +6052,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
          ("Next open vs close", t.get("73c_pre_reversion_side_spr", E))],
         charts, "26_pretraded_by_side.png",
         "Pre-traded Analysis, by Side",
-        note=PRE_NOTE, all_label="All pre-traded")
+        note=PRE_NOTE, all_label="All pre-traded", xlabel="in spreads")
     chart_spreads(t.get("77_pre_close_mkt_spreads", E), charts,
                   "27_pretraded_close_market.png",
                   "Pre-traded Execution vs Close, by Market",
