@@ -518,7 +518,8 @@ INDIA_CAS_CONT_END_HKT = "17:45"
 # The run checks px_cont_last against the close and warns when they disagree
 # by more than a plausible auction move - the sign of a clock or sym problem.
 QATT_CLOCK_OFFSET_MIN: dict = {}
-QATT_SIZE_COL = "lastSize"
+# Tried in order until one answers; the run log says which one did.
+QATT_SIZE_COLS = ["lastSize", "size", "lastQty", "qty", "volume"]
 QATT_TRADE_FILTER = ""
 DRIFT_WINDOWS_MIN = [60, 30, 15]
 VWAP_WINDOW_MIN = 15
@@ -531,9 +532,10 @@ INDEX_SYMS: dict = {}
 BETA_DEFAULT = 1.0
 
 # Vol in the extract, as a unit. The cost-per-vol tables divide by DAILY vol
-# in bps, so an annualised figure is scaled by sqrt(252) first. The run prints
-# the median so this can be checked against what the column holds.
-VOL_UNIT = "annual_pct"          # or "daily_pct", "daily_bps"
+# in bps. The first YTD run read it as annualised % and got daily vols of
+# 1-147 bps - ten times too low for these names - so it is daily %. The run
+# prints the median so this can be checked against what the column holds.
+VOL_UNIT = "daily_pct"           # or "annual_pct", "daily_bps"
 
 # Close participation buckets: shares executed in the close over the official
 # close auction volume (ClosePR), as the sales trader asked for them.
@@ -918,6 +920,18 @@ Q_CAS = ("{[d;s] s:`$s; 0!select rows:count i, cas:sum "
          + " by sym from qatt where date=\"d\"$d, sym in s}")
 Q_EPOCH = pd.Timestamp("2000-01-01")
 
+# Fallback when no India sym matched under any spelling: every sym that
+# carried a CAS code that day, whatever its suffix, matched on the ticker.
+Q_CAS_ANY = ("{[d] 0!select rows:count i by sym from qatt where date=\"d\"$d, "
+             + " or ".join(f'(cond like "{c}")' for c in CAS_CONDS) + "}")
+# Suffixes India could carry in qatt. Used only to prefer India names when a
+# ticker exists in two markets.
+INDIA_SUFFIXES = {"IN", "IS", "IB", "NS", "BO", "NSE", "BSE"}
+
+
+def _ticker(sym) -> str:
+    return re.split(r"[. ]+", str(sym).strip().upper())[0]
+
 
 def qatt_candidates(sym: str) -> list[str]:
     """The sym as the extract spells it, then TICKER.SUFFIX as qatt does, and
@@ -985,16 +999,33 @@ def lookup_cas_names(df: pd.DataFrame, conn=None) -> pd.Series:
     log(f"  cond like {' / '.join(CAS_CONDS)} on the order's date, India syms only")
     log("")
     log(f"    {'date':<12}{'names':>7}{'CAS':>7}{'not CAS':>9}{'no rows':>9}")
+    seen_suffix: dict = {}
     for day, idx in df[rows].groupby("date").groups.items():
         syms = sorted({c for i in idx for c in cands[i]})
-        got = _q_frame(conn(Q_CAS, int((pd.Timestamp(day) - Q_EPOCH).days),
-                            [x.encode() for x in syms]))
+        qd = int((pd.Timestamp(day) - Q_EPOCH).days)
+        got = _q_frame(conn(Q_CAS, qd, [x.encode() for x in syms]))
         cas = (dict(zip(got["sym"].astype(str).str.strip(), got["cas"] > 0))
                if len(got) else {})
         for i in idx:
             hit = next((c for c in cands[i] if c in cas), None)
             if hit is not None:
                 out[i] = bool(cas[hit])
+        if not cas:
+            # Not one India sym matched: the spelling is different. Take the
+            # day's CAS syms, whatever they look like, and match on ticker.
+            # A day with CAS rows makes every other India name non-CAS; a day
+            # with none (a holiday, a day qatt lacks) stays unknown.
+            anyc = _q_frame(conn(Q_CAS_ANY, qd))
+            if len(anyc):
+                names = anyc["sym"].astype(str).str.strip()
+                for x in names:
+                    sfx = re.split(r"[. ]+", x.upper())[-1]
+                    seen_suffix[sfx] = seen_suffix.get(sfx, 0) + 1
+                india = [x for x in names
+                         if re.split(r"[. ]+", x.upper())[-1] in INDIA_SUFFIXES]
+                tick = {_ticker(x) for x in (india or names)}
+                for i in idx:
+                    out[i] = _ticker(df.at[i, "symbol"]) in tick
         names = df.loc[idx, "symbol"]
         flag = out[idx]
         log(f"    {pd.Timestamp(day):%Y-%m-%d}  {names.nunique():>7,}"
@@ -1002,6 +1033,13 @@ def lookup_cas_names(df: pd.DataFrame, conn=None) -> pd.Series:
             f"{names[flag.eq(False)].nunique():>9,}"
             f"{names[flag.isna()].nunique():>9,}")
 
+    if seen_suffix:
+        log("")
+        log("  No India sym matched under its own spelling on some days, so")
+        log("  those days were matched on the ticker against every sym with a")
+        log("  CAS code. Suffixes seen on those syms (for qatt_candidates):")
+        log("    " + ", ".join(f"{k} {v:,}" for k, v in
+                               sorted(seen_suffix.items(), key=lambda kv: -kv[1])))
     n_cas, n_not = int(out.eq(True).sum()), int(out.eq(False).sum())
     n_none = int(rows.sum()) - n_cas - n_not
     log("")
@@ -1073,7 +1111,8 @@ def first_exec_from_prices(close, first, is_buy,
 def india_close_pr_proxy(df: pd.DataFrame, in_window: pd.Series) -> pd.Series:
     """India's close participation: its order participation (PR), not ClosePR.
 
-    India runs no closing auction in H1, so ClosePR is zero there by
+    An India name on a VWAP close (every name before the CAS, non-CAS names
+    after it) runs no closing auction, so ClosePR is zero there by
     construction. Its close is the last half hour, and a window order trades
     inside it - so the order's own participation rate over its life is the
     nearest honest measure of how much of that close we were. Only the
@@ -4027,9 +4066,10 @@ def chart_close_pr(tables: list, out: Path) -> None:
         room = _notes(fig, ["ClosePR: our executed quantity as a share of the "
                             "closing auction's volume, averaged per order, not "
                             "weighted by value. Markets ordered by value traded.",
-                            "India (PR): no closing auction in H1, so its bar is "
-                            "the participation rate (PR) of the orders started "
-                            "17:30-17:45 HKT." if india else ""])
+                            "India (PR): where the name had no closing auction "
+                            "(every name before 3 Aug 2026, non-CAS names after), "
+                            "the bar uses the participation rate (PR) of the "
+                            "orders started 17:30-17:45 HKT." if india else ""])
         _save(fig, out, name, bottom=room)
 
 
@@ -4325,7 +4365,7 @@ def make_sample(n: int = 2400, seed: int = SEED) -> pd.DataFrame:
         "PR": np.round(np.clip(rng.normal(14, 7, n), 0, 70), 2),
         "fPR_cont": np.round(pr_cont, 2),
         "FR": np.round(fr, 2),
-        "Vol": np.round(vol, 2),
+        "Vol": np.round(vol / np.sqrt(252), 3),     # daily %, as the extract has it
         "Sprd": np.round(spread, 2),
         "IS": slip_arrival,
         "Open": slip_open,
@@ -4379,9 +4419,8 @@ def make_sample(n: int = 2400, seed: int = SEED) -> pd.DataFrame:
 # what keeps a stock that trended all day from being blamed on the auction.
 
 def _q_intraday() -> str:
-    """One row per sym: the last trade before each cut, and the VWAP over the
-    last VWAP_WINDOW_MIN minutes. c is the list of cuts, in qatt-clock ms:
-    one per DRIFT_WINDOWS_MIN, then the continuous end, then the VWAP start."""
+    """One row per sym: the last trade before each cut. c is the list of cuts
+    in qatt-clock ms: one per DRIFT_WINDOWS_MIN, then the continuous end."""
     k = len(DRIFT_WINDOWS_MIN)
 
     def last(i):
@@ -4389,10 +4428,17 @@ def _q_intraday() -> str:
 
     cols = [f"p{w}:{last(i)}" for i, w in enumerate(DRIFT_WINDOWS_MIN)]
     cols.append(f"pcont:{last(k)}")
-    cols.append('vwap:{[p;z;t;a;b] i:where (t>=a)&t<b; (sum p[i]*z i)%sum z i}'
-                f'[lastPrice;{QATT_SIZE_COL};"t"$time;c {k + 1};c {k}]')
     return ('{[d;s;c] s:`$s; c:"t"$c; 0!select ' + ", ".join(cols)
             + ' by sym from qatt where date="d"$d, sym in s, lastPrice>0'
+            + QATT_TRADE_FILTER + '}')
+
+
+def _q_vwap(size_col: str) -> str:
+    """One row per sym: the VWAP between two cuts (qatt-clock ms). Its own
+    query, so a wrong size column costs the VWAP and nothing else."""
+    return ('{[d;s;a;b] s:`$s; 0!select vwap:(sum lastPrice*' + size_col
+            + ')%sum ' + size_col + ' by sym from qatt where date="d"$d, '
+            'sym in s, lastPrice>0, ("t"$time)>="t"$a, ("t"$time)<"t"$b'
             + QATT_TRADE_FILTER + '}')
 
 
@@ -4421,22 +4467,30 @@ def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
         if c not in df:
             df[c] = np.nan
     end = continuous_end_for_orders(df)
-    need = end.notna() & df["px_cont_last"].isna()
+    # Any of the pulled prices missing. The extract may already carry
+    # px_cont_last; that must not stop the drift prices and the VWAP from
+    # being pulled, which is what happened on the first YTD run.
+    pulled = ["px_cont_last", "vwap_15m"] + [f"px_m{w}" for w in DRIFT_WINDOWS_MIN]
+    need = end.notna() & df[pulled].isna().any(axis=1)
     if "close_price" in df:
         need &= df["close_price"].notna()
     if not need.any():
         return df
+    from_file = int((need & df["px_cont_last"].notna()).sum())
 
     section("INTRADAY PRICES (qatt)")
     if conn is None:
         conn = qatt_connect()
     if conn is None:
-        log(f"  {int(need.sum()):,} orders have no last continuous price. The")
-        log("  auction move, the three-part split, pre-close drift and close vs")
-        log("  last-15m VWAP are left out of this run.")
+        log(f"  {int(need.sum()):,} orders are missing intraday prices. Pre-close")
+        log("  drift and close vs last-15m VWAP are left out of this run, and")
+        log("  the auction move only exists where the extract has px_cont_last.")
         return df
 
     q = _q_intraday()
+    size_cols = list(QATT_SIZE_COLS)
+    if from_file:
+        log(f"  px_cont_last from the extract on {from_file:,} orders, kept as it is")
     log(f"  cuts (HKT, before the continuous end): "
         f"{', '.join(str(w) + ' min' for w in DRIFT_WINDOWS_MIN)}; "
         f"VWAP over the last {VWAP_WINDOW_MIN} min")
@@ -4447,26 +4501,40 @@ def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
     for (day, mkt), idx in df[need].groupby(["date", "market"]).groups.items():
         off = QATT_CLOCK_OFFSET_MIN.get(mkt, 0)
         for cont, sub in end[idx].groupby(end[idx]).groups.items():
-            cuts = [cont - w for w in DRIFT_WINDOWS_MIN] + [cont, cont - VWAP_WINDOW_MIN]
-            ms = [int(round((x + off) * 60_000)) for x in cuts]
+            ms = [int(round((x + off) * 60_000))
+                  for x in [cont - w for w in DRIFT_WINDOWS_MIN] + [cont]]
+            v_from = int(round((cont - VWAP_WINDOW_MIN + off) * 60_000))
+            v_to = int(round((cont + off) * 60_000))
             syms = sorted({c for i in sub for c in cands[i]})
+            qd, qs = int((pd.Timestamp(day) - Q_EPOCH).days), [x.encode() for x in syms]
             try:
-                rows = _q_frame(conn(q, int((pd.Timestamp(day) - Q_EPOCH).days),
-                                     [x.encode() for x in syms], ms))
+                rows = _q_frame(conn(q, qd, qs, ms))
             except Exception as exc:
-                warn(f"qatt intraday query failed ({exc}). Check QATT_SIZE_COL "
-                     f"and QATT_TRADE_FILTER; intraday measures stop here.")
+                warn(f"qatt intraday query failed ({exc}). Check "
+                     f"QATT_TRADE_FILTER; intraday measures stop here.")
                 return df
+            vw = pd.DataFrame(columns=["sym", "vwap"])
+            while size_cols:
+                try:
+                    vw = _q_frame(conn(_q_vwap(size_cols[0]), qd, qs, v_from, v_to))
+                    break
+                except Exception as exc:
+                    warn(f"qatt has no size column '{size_cols[0]}' ({exc}); "
+                         f"trying the next in QATT_SIZE_COLS")
+                    size_cols.pop(0)
             if rows.empty:
                 continue
             rows = rows.assign(sym=rows["sym"].astype(str).str.strip()).set_index("sym")
+            vmap = (dict(zip(vw["sym"].astype(str).str.strip(), vw["vwap"]))
+                    if len(vw) else {})
             for i in sub:
                 hit = next((c for c in cands[i] if c in rows.index), None)
                 if hit is None:
                     continue
                 r = rows.loc[hit]
-                df.at[i, "px_cont_last"] = r["pcont"]
-                df.at[i, "vwap_15m"] = r["vwap"]
+                if pd.isna(df.at[i, "px_cont_last"]):
+                    df.at[i, "px_cont_last"] = r["pcont"]
+                df.at[i, "vwap_15m"] = vmap.get(hit, np.nan)
                 for w in DRIFT_WINDOWS_MIN:
                     df.at[i, f"px_m{w}"] = r[f"p{w}"]
                 got_by_mkt[mkt] = got_by_mkt.get(mkt, 0) + 1
@@ -4490,6 +4558,8 @@ def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
                     df.at[i, "idx_close"] = float(px.iloc[-1])
 
     asked = df.loc[need, "market"].value_counts()
+    log("  VWAP size column: " + (size_cols[0] if size_cols else
+                                  "none of QATT_SIZE_COLS answered - no VWAP"))
     log("  priced: " + ", ".join(f"{m} {got_by_mkt.get(m, 0)}/{n}"
                                  for m, n in asked.items()))
     ok = need & df["px_cont_last"].notna()
@@ -5915,7 +5985,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
                   "First Execution vs Close, by Market",
                   "first execution vs Close", by_notional=True,
                   note=PRE_TRADED_NOTE)
-    chart_spreads(t.get("69_reversion_strat_spreads", E), charts,
+    rv = t.get("69_reversion_strat_spreads", E)
+    chart_spreads(rv if len(rv) >= 2 else E, charts,
                   "11_reversion.png",
                   "Reversion, by Strategy",
                   "next open vs close", note=REV_NOTE, ylabel=REV_YLABEL)
@@ -6804,13 +6875,19 @@ def self_test() -> int:
               "07_participation", "other"])
 
     class FakeIntraday:
+        """Prices query (d, syms, cuts); VWAP query (d, syms, from, to), which
+        fails for any size column but 'size', as a real qatt would."""
         def __init__(self):
             self.calls = []
 
-        def __call__(self, q, d, syms, cuts=None):
-            self.calls.append((q, d, [x.decode() for x in syms], cuts))
+        def __call__(self, q, d, syms, *rest):
+            self.calls.append((q, d, [x.decode() for x in syms], rest))
+            if "vwap:" in q:
+                if "*size)" not in q:
+                    raise RuntimeError("'lastSize")
+                return pd.DataFrame({"sym": ["700.HK"], "vwap": [100.1]})
             return pd.DataFrame({"sym": ["700.HK"], "p60": [99.0], "p30": [99.5],
-                                 "p15": [99.8], "pcont": [100.0], "vwap": [100.1]})
+                                 "p15": [99.8], "pcont": [100.0]})
 
     hk = pd.DataFrame({"market": ["Hong Kong"], "symbol": ["0700 HK"],
                        "date": [pd.Timestamp("2026-09-01")], "is_buy": [True],
@@ -6820,10 +6897,32 @@ def self_test() -> int:
     check("intraday pull: last continuous, drift prices and VWAP land on the order",
           got.loc[0, ["px_cont_last", "px_m60", "vwap_15m"]].tolist()
           == [100.0, 99.0, 100.1], got.iloc[0].to_dict())
-    check("intraday cuts: 60/30/15 min before 16:00 HKT, the close, VWAP start",
-          fi.calls and fi.calls[0][3] == [int(m * 60_000) for m in
-                                          (900, 930, 945, 960, 945)],
+    check("intraday cuts: 60/30/15 min before 16:00 HKT, then the close",
+          fi.calls and fi.calls[0][3] == ([int(m * 60_000) for m in
+                                           (900, 930, 945, 960)],),
           fi.calls[0][3] if fi.calls else None)
+    vcall = [c for c in fi.calls if "vwap:" in c[0] and "*size)" in c[0]]
+    check("VWAP: a missing size column is skipped, the next one used, over "
+          "15:45-16:00", vcall and vcall[0][3] == (945 * 60_000, 960 * 60_000),
+          [c[3] for c in fi.calls])
+    filed = fetch_intraday(hk.assign(px_cont_last=100.2), FakeIntraday())
+    check("px_cont_last in the extract: drift and VWAP still pulled, the "
+          "file's price kept",
+          filed.loc[0, ["px_cont_last", "px_m60", "vwap_15m"]].tolist()
+          == [100.2, 99.0, 100.1], filed.iloc[0].to_dict())
+
+    class FakeQattOtherSpelling:
+        """qatt spells India RELIANCE.NS: the sym query finds nothing, the
+        day's CAS syms carry the code."""
+        def __call__(self, q, d, syms=None):
+            if syms is not None:
+                return pd.DataFrame(columns=["sym", "rows", "cas"])
+            return pd.DataFrame({"sym": ["RELIANCE.NS", "BHP.AU"], "rows": [5, 3]})
+
+    got = lookup_cas_names(look, FakeQattOtherSpelling()).tolist()
+    check("CAS fallback: matched on the ticker whatever the suffix; other "
+          "India names that day are non-CAS",
+          got[:3] == [True, False, False], got)
     check("an auction-only order is cohorted as such",
           assign_cohort(pd.DataFrame({
               "fill_rate": [100.0], "pct_close": [100.0], "adv_pct": [0.5],
