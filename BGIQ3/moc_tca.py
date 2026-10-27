@@ -3941,7 +3941,7 @@ def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
 def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                           measure: str, note: str = "", limit: int = 12,
                           unit: str = None, ylabel: str = None,
-                          order: list = None) -> None:
+                          order: list = None, xlabel: str = None) -> None:
     """Markets along the bottom, a Buy panel over a Sell panel, one scale.
 
     Two panels rather than paired bars in one: colour already means saving
@@ -3987,7 +3987,7 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
         _style(ax, ylabel=(ylabel.format(unit="spreads" if spreads else "bps")
                            if ylabel else
                            _measure_axis(measure, "in spreads" if spreads else "bps")),
-               xlabel=_axis_name(d.index), title=f"{title}: {side}")
+               xlabel=xlabel or _axis_name(d.index), title=f"{title}: {side}")
         ax._panel = side
     fig._deck_title = title
     _share_ylim(axes)
@@ -6074,7 +6074,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_spreads_by_side(t.get("76_pre_reversion_mkt_side_spr", E), charts,
                           "30_pretraded_reversion_market_side.png",
                           "Pre-traded Reversion, by Side/Market", "next open vs close",
-                          note=PRE_NOTE, ylabel="Next open vs close, in spreads")
+                          note=PRE_NOTE, ylabel="Next open vs close, in spreads",
+                          xlabel="Close to T+1, notional-weighted, in spreads")
     chart_spreads(t.get("78_pre_pvwap_mkt_spreads", E), charts,
                   "32_pretraded_pvwap_market.png",
                   "Pre-traded vs PVWAP, by Market",
