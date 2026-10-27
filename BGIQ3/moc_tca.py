@@ -4049,13 +4049,14 @@ def chart_close_pr(tables: list, out: Path) -> None:
     them by eye. Magnitude, not saving or cost, so one hue.
     """
     col = "close PR % (mean)"
-    usable = [(t, name, title) for t, name, title in tables
-              if t is not None and not t.empty and col in t]
+    # An entry may carry its own value-axis label as a fourth item.
+    usable = [(e[0], e[1], e[2], e[3] if len(e) > 3 else None) for e in tables
+              if e[0] is not None and not e[0].empty and col in e[0]]
     if not usable:
         return
-    top = max(float(_chartable(t)[col].max()) for t, _, _ in usable
+    top = max(float(_chartable(t)[col].max()) for t, _, _, _ in usable
               if not _chartable(t).empty) if usable else 1.0
-    for t, name, title in usable:
+    for t, name, title, ylabel in usable:
         d = _chartable(t).head(12)
         if d.empty:
             continue
@@ -4071,8 +4072,9 @@ def chart_close_pr(tables: list, out: Path) -> None:
         # India's bar is a different measure, so it says so where it is read.
         ax.set_xticklabels([f"{k} (PR)" if str(k) == "India" else str(k)
                             for k in d.index], rotation=30, ha="right")
-        _style(ax, ylabel="Close participation, % of close auction volume "
-                          "(mean per order)", xlabel="Market", title=title)
+        _style(ax, ylabel=ylabel or "Close participation, % of close auction "
+                                    "volume (mean per order)",
+               xlabel="Market", title=title)
         india = "India" in set(map(str, d.index))
         room = _notes(fig, ["ClosePR: our executed quantity as a share of the "
                             "closing auction's volume, averaged per order, not "
@@ -6083,9 +6085,11 @@ def build_charts(t: dict, out_dir: Path) -> None:
         (t.get("80_close_pr_mkt_all"), "34_close_pr_all.png",
          "Close Participation by Market"),
         (t.get("81_close_pr_mkt_close_only"), "35_close_pr_close_only.png",
-         "Close Only Participation, by Market"),
+         "Close Only Participation, by Market",
+         "Close participation, mean per order (%)"),
         (t.get("82_close_pr_mkt_pretraded"), "36_close_pr_pretraded.png",
-         "Pre-traded Orders | Close participation by market"),
+         "Pre-traded Orders | Close participation by market",
+         "Close participation, mean per order (%)"),
     ], charts)
     chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
                       "31_pretraded_adv_profile.png",
