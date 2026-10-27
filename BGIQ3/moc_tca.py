@@ -6065,7 +6065,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_spreads_by_side(t.get("74_pre_firstexec_mkt_side_spr", E), charts,
                           "28_pretraded_first_exec_market_side.png",
                           "Pre-traded Analysis, by Side/Market",
-                          "first execution vs Close", note=PRE_TRADED_NOTE)
+                          "first execution vs Close", note=PRE_TRADED_NOTE,
+                          ylabel="First execution vs close, in spreads")
     chart_spreads_by_side(t.get("75_pre_close_mkt_side_spr", E), charts,
                           "29_pretraded_close_market_side.png",
                           "Pre-traded Execution vs Close, by Side/Market", "vs Close",
