@@ -280,11 +280,13 @@ COLUMNS = {
     "first_exec_vs_close": ["first_exec_vs_close", "firstexecvsclose",
                             "FirstExecVsClose"],
     # Intraday prices: pulled from qatt when absent (see QATT_* above).
-    "px_cont_last":  ["px_cont_last", "PxContLast", "lastContPrice"],
-    "px_m60":        ["px_m60"],
-    "px_m30":        ["px_m30"],
-    "px_m15":        ["px_m15"],
-    "vwap_15m":      ["vwap_15m", "Vwap15m", "vwap15"],
+    # The AWS extract's names first: last_cont_price, price60bef_close,
+    # price_15bef_close and last30min_vwap_cont.
+    "px_cont_last":  ["last_cont_price", "px_cont_last", "PxContLast", "lastContPrice"],
+    "px_m60":        ["price60bef_close", "price_60bef_close", "px_m60"],
+    "px_m30":        ["price30bef_close", "price_30bef_close", "px_m30"],
+    "px_m15":        ["price_15bef_close", "price15bef_close", "px_m15"],
+    "vwap_last":     ["last30min_vwap_cont", "vwap_last", "vwap_last"],
     "idx_start":     ["idx_start"],
     "idx_cont":      ["idx_cont"],
     "idx_close":     ["idx_close"],
@@ -308,7 +310,7 @@ OPTIONAL = ["sprd_arrival", "sprd_pvwap", "sprd_close", "sprd_vwap",
             "first_start_time", "fill_close_size", "market_close_size",
             "limit_price", "close_price", "next_open_price", "avg_price",
             "first_exec_price", "px_cont_last", "px_m60", "px_m30", "px_m15",
-            "vwap_15m", "idx_start", "idx_cont", "idx_close", "beta"]
+            "vwap_last", "idx_start", "idx_cont", "idx_close", "beta"]
 
 # The export writes a banner on row 1 and the real header on row 2 in some
 # formats. 0 = header on the first row.
@@ -502,11 +504,11 @@ INDIA_CAS_CONT_END_HKT = "17:45"
 # the extract does not carry, pulled from qatt per order date and market:
 #
 #   px_cont_last   last trade before the continuous session ended
-#   px_m60/30/15   last trade 60 / 30 / 15 minutes before that
-#   vwap_15m       VWAP over the last 15 minutes of the continuous session
+#   px_m60/15      last trade 60 / 15 minutes before that
+#   vwap_last      VWAP over the last VWAP_WINDOW_MIN minutes of the session
 #
-# A column already in the extract with one of these names is used as it
-# stands and not pulled again (the sample carries all of them).
+# The AWS extract carries all of these (COLUMNS maps its names), and a value
+# already there is used as it stands. qatt only fills what is missing.
 #
 # UNVERIFIED until the first real run:
 #   - qatt's clock. Cut times are built in HKT (the extract's clock) and moved
@@ -521,8 +523,15 @@ QATT_CLOCK_OFFSET_MIN: dict = {}
 # Tried in order until one answers; the run log says which one did.
 QATT_SIZE_COLS = ["lastSize", "size", "lastQty", "qty", "volume"]
 QATT_TRADE_FILTER = ""
-DRIFT_WINDOWS_MIN = [60, 30, 15]
-VWAP_WINDOW_MIN = 15
+# As the extract carries them: a price 60 and 15 minutes before the close
+# (price60bef_close, price_15bef_close) and the VWAP of the last 30 minutes of
+# the continuous session (last30min_vwap_cont). Add 30 to DRIFT_WINDOWS_MIN to
+# have qatt pull that price too. VWAP_WINDOW_MIN must match the VWAP column:
+# it names the window on every chart and is the window qatt pulls if the
+# column is missing.
+DRIFT_WINDOWS_MIN = [60, 15]
+VWAP_WINDOW_MIN = 30
+VWAP_LABEL = f"last {VWAP_WINDOW_MIN} min VWAP"
 
 # Market adjustment: the index's move over the same interval, times the
 # stock's beta, comes off the stock's move. Indices as qatt spells them, per
@@ -563,7 +572,7 @@ CHART_FOLDERS = {
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
     "04_auction_vs_trend":       ["40_", "40b_", "40c_"],
     "05_pre_close_drift":        ["42_", "42b_"],
-    "06_close_vs_last_15m_vwap": ["43_", "44_"],
+    "06_close_vs_last_vwap": ["43_", "44_"],
     "07_participation":          ["34_", "35_", "36_", "45a_", "45b_"],
     "08_regression":             ["51_"],
     "09_normalisation":          ["16_", "17_", "18_", "52_"],
@@ -1147,7 +1156,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
                "fill_close_size", "market_close_size",
                "limit_price", "close_price", "next_open_price", "avg_price",
                "first_exec_price", "px_cont_last", "px_m60", "px_m30",
-               "px_m15", "vwap_15m", "idx_start", "idx_cont", "idx_close",
+               "px_m15", "vwap_last", "idx_start", "idx_cont", "idx_close",
                "beta"]
     for logical in numeric:
         if logical in cols:
@@ -4327,7 +4336,7 @@ def make_sample(n: int = 2400, seed: int = SEED) -> pd.DataFrame:
     p15 = cont_px / (1 + rng.normal(0, 10, n) / 1e4)
     p30 = p15 / (1 + rng.normal(0, 10, n) / 1e4)
     p60 = p30 / (1 + rng.normal(0, 14, n) / 1e4)
-    vwap15 = cont_px * (1 + rng.normal(0, 8, n) / 1e4)
+    vwap_px = cont_px * (1 + rng.normal(0, 8, n) / 1e4)
     idx_start = 1000 * (1 + rng.normal(0, 0.002, n))
     idx_cont = idx_start * (1 + rng.normal(0, 0.004, n))
     idx_close = idx_cont * (1 + rng.normal(0, 0.0008, n))
@@ -4386,11 +4395,10 @@ def make_sample(n: int = 2400, seed: int = SEED) -> pd.DataFrame:
         "ClosePR": np.round(close_pr, 3),
         "marketCloseSize": np.round(mkt_close, 0),
         "endprice": np.round(close_px, 4),
-        "px_cont_last": np.round(cont_px, 4),
-        "px_m60": np.round(p60, 4),
-        "px_m30": np.round(p30, 4),
-        "px_m15": np.round(p15, 4),
-        "vwap_15m": np.round(vwap15, 4),
+        "last_cont_price": np.round(cont_px, 4),
+        "price60bef_close": np.round(p60, 4),
+        "price_15bef_close": np.round(p15, 4),
+        "last30min_vwap_cont": np.round(vwap_px, 4),
         "idx_start": np.round(idx_start, 3),
         "idx_cont": np.round(idx_cont, 3),
         "idx_close": np.round(idx_close, 3),
@@ -4460,11 +4468,11 @@ def continuous_end_for_orders(df: pd.DataFrame) -> pd.Series:
 
 
 def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
-    """Fill px_cont_last, px_m*, vwap_15m (and the index levels) from qatt,
+    """Fill px_cont_last, px_m*, vwap_last (and the index levels) from qatt,
     one query per order date and market. conn is any callable taking
     (query, *args); the self-test passes a fake."""
     df = df.copy()
-    for c in ["px_cont_last", "vwap_15m", "idx_start", "idx_cont", "idx_close"] \
+    for c in ["px_cont_last", "vwap_last", "idx_start", "idx_cont", "idx_close"] \
             + [f"px_m{w}" for w in DRIFT_WINDOWS_MIN]:
         if c not in df:
             df[c] = np.nan
@@ -4472,7 +4480,7 @@ def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
     # Any of the pulled prices missing. The extract may already carry
     # px_cont_last; that must not stop the drift prices and the VWAP from
     # being pulled, which is what happened on the first YTD run.
-    pulled = ["px_cont_last", "vwap_15m"] + [f"px_m{w}" for w in DRIFT_WINDOWS_MIN]
+    pulled = ["px_cont_last", "vwap_last"] + [f"px_m{w}" for w in DRIFT_WINDOWS_MIN]
     need = end.notna() & df[pulled].isna().any(axis=1)
     if "close_price" in df:
         need &= df["close_price"].notna()
@@ -4485,7 +4493,7 @@ def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
         conn = qatt_connect()
     if conn is None:
         log(f"  {int(need.sum()):,} orders are missing intraday prices. Pre-close")
-        log("  drift and close vs last-15m VWAP are left out of this run, and")
+        log(f"  drift and close vs {VWAP_LABEL} are left out of this run, and")
         log("  the auction move only exists where the extract has px_cont_last.")
         return df
 
@@ -4495,7 +4503,7 @@ def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
         log(f"  px_cont_last from the extract on {from_file:,} orders, kept as it is")
     log(f"  cuts (HKT, before the continuous end): "
         f"{', '.join(str(w) + ' min' for w in DRIFT_WINDOWS_MIN)}; "
-        f"VWAP over the last {VWAP_WINDOW_MIN} min")
+        f"VWAP over the {VWAP_LABEL[5:]}")
     if QATT_CLOCK_OFFSET_MIN:
         log(f"  qatt clock offset from HKT, minutes: {QATT_CLOCK_OFFSET_MIN}")
     cands = df.loc[need, "symbol"].map(qatt_candidates)
@@ -4536,7 +4544,7 @@ def fetch_intraday(df: pd.DataFrame, conn=None) -> pd.DataFrame:
                 r = rows.loc[hit]
                 if pd.isna(df.at[i, "px_cont_last"]):
                     df.at[i, "px_cont_last"] = r["pcont"]
-                df.at[i, "vwap_15m"] = vmap.get(hit, np.nan)
+                df.at[i, "vwap_last"] = vmap.get(hit, np.nan)
                 for w in DRIFT_WINDOWS_MIN:
                     df.at[i, f"px_m{w}"] = r[f"p{w}"]
                 got_by_mkt[mkt] = got_by_mkt.get(mkt, 0) + 1
@@ -4610,10 +4618,10 @@ def add_price_measures(df: pd.DataFrame) -> pd.DataFrame:
         for w in DRIFT_WINDOWS_MIN:
             if has(f"px_m{w}"):
                 df[f"drift_{w}_bps"] = _move(df, f"px_m{w}", "px_cont_last")
-    if has("close_price", "vwap_15m"):
-        v = df["vwap_15m"]
-        df["close_vs_vwap15_bps"] = (df["close_price"] - v) / v.where(v > 0) * 1e4
-        df["close_vs_vwap15_side_bps"] = _move(df, "vwap_15m", "close_price")
+    if has("close_price", "vwap_last"):
+        v = df["vwap_last"]
+        df["close_vs_vwap_bps"] = (df["close_price"] - v) / v.where(v > 0) * 1e4
+        df["close_vs_vwap_side_bps"] = _move(df, "vwap_last", "close_price")
     if has("idx_cont", "idx_close") and "auction_move_bps" in df:
         beta = (df["beta"].fillna(BETA_DEFAULT) if "beta" in df
                 else pd.Series(BETA_DEFAULT, index=df.index))
@@ -4667,7 +4675,7 @@ def log_price_measures(df: pd.DataFrame) -> None:
     section("REVIEW MEASURES")
     for col, what in [("auction_move_bps", "auction move (last continuous -> close)"),
                       ("trend_bps", "pre-close trend (arrival -> last continuous)"),
-                      ("close_vs_vwap15_bps", "close vs last-15m VWAP"),
+                      ("close_vs_vwap_bps", "close vs " + VWAP_LABEL),
                       ("auction_move_adj_bps", "market-adjusted auction move"),
                       ("vol_daily_bps", "daily vol, bps")]:
         n = int(df[col].notna().sum()) if col in df else 0
@@ -4738,7 +4746,7 @@ def t_dislocation(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def t_drift(df: pd.DataFrame, by: str) -> pd.DataFrame:
-    """The stock's move over the last 60 / 30 / 15 minutes before the
+    """The stock's move over each DRIFT_WINDOWS_MIN window before the
     continuous close, then in the auction. Side-adjusted: negative means the
     price was moving against our order before the auction started."""
     cols = [(f"drift_{w}_bps", f"last {w} min") for w in DRIFT_WINDOWS_MIN] \
@@ -4769,40 +4777,40 @@ def _name_days(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return df[df[col].notna()].drop_duplicates(["date", "symbol"])
 
 
-def t_close_vs_vwap15(df: pd.DataFrame) -> pd.DataFrame:
-    """How far the close sits from the last 15 minutes' VWAP, per name-day,
+def t_close_vs_vwap(df: pd.DataFrame) -> pd.DataFrame:
+    """How far the close sits from the last VWAP_WINDOW_MIN minutes' VWAP, per name-day,
     ranked by market. Unsigned average first: is the close an outlier?"""
-    d = _name_days(df, "close_vs_vwap15_bps")
+    d = _name_days(df, "close_vs_vwap_bps")
     if d.empty:
         return pd.DataFrame()
     sp = d["spread_bps"].where(d["spread_bps"] > 0) if "spread_bps" in d else None
     rows = []
     for key, g in list(d.groupby("market", observed=True)) + [("All", d)]:
-        a = g["close_vs_vwap15_bps"].abs()
+        a = g["close_vs_vwap_bps"].abs()
         row = {"market": key, "name-days": len(g),
-               "mean |close vs VWAP15| bps": a.mean(),
-               "median |close vs VWAP15| bps": a.median(),
-               "90th pct |close vs VWAP15| bps": a.quantile(0.9),
-               "mean signed bps": g["close_vs_vwap15_bps"].mean()}
+               "mean |close vs VWAP| bps": a.mean(),
+               "median |close vs VWAP| bps": a.median(),
+               "90th pct |close vs VWAP| bps": a.quantile(0.9),
+               "mean signed bps": g["close_vs_vwap_bps"].mean()}
         if sp is not None:
             row["% name-days > 1 spread"] = 100.0 * (a > sp.loc[g.index]).mean()
         row["small sample"] = len(g) < MIN_N_FOR_CI
         rows.append(row)
     return (pd.DataFrame(rows).set_index("market")
-            .sort_values("mean |close vs VWAP15| bps", ascending=False).round(2))
+            .sort_values("mean |close vs VWAP| bps", ascending=False).round(2))
 
 
-def t_close_vs_vwap15_dist(df: pd.DataFrame) -> pd.DataFrame:
-    d = _name_days(df, "close_vs_vwap15_bps")
+def t_close_vs_vwap_dist(df: pd.DataFrame) -> pd.DataFrame:
+    d = _name_days(df, "close_vs_vwap_bps")
     if d.empty:
         return pd.DataFrame()
     edges = [-1e9, -100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100, 1e9]
     labels = ["< -100", "-100..-50", "-50..-25", "-25..-10", "-10..-5", "-5..0",
               "0..5", "5..10", "10..25", "25..50", "50..100", "> 100"]
-    b = pd.cut(d["close_vs_vwap15_bps"], edges, labels=labels)
+    b = pd.cut(d["close_vs_vwap_bps"], edges, labels=labels)
     out = b.value_counts().reindex(labels).to_frame("name-days")
     out["% of name-days"] = (100.0 * out["name-days"] / out["name-days"].sum()).round(2)
-    out.index.name = "close vs VWAP15, bps"
+    out.index.name = "close vs VWAP, bps"
     return out
 
 
@@ -4871,8 +4879,8 @@ def t_vol_dislocation(df: pd.DataFrame) -> pd.DataFrame:
             row["|auction move| spreads (median)"] = g["auction_move_abs_spreads"].median()                 if "auction_move_abs_spreads" in g else np.nan
             row["% orders > 1 spread"] = 100.0 * (g["auction_move_abs_spreads"] > 1).mean()                 if "auction_move_abs_spreads" in g else np.nan
             row["auction move bps (wtd)"] = wmean(g["auction_move_bps"], g["notional"])
-        if "close_vs_vwap15_bps" in g:
-            row["|close vs VWAP15| bps (median)"] = g["close_vs_vwap15_bps"].abs().median()
+        if "close_vs_vwap_bps" in g:
+            row["|close vs VWAP| bps (median)"] = g["close_vs_vwap_bps"].abs().median()
         for m, lab in [("slip_arrival", "vs Arrival bps"), ("slip_close", "vs Close bps"),
                        ("reversion_bps", "reversion bps")]:
             if m in g:
@@ -5119,8 +5127,8 @@ def build_review_tables(df: pd.DataFrame, auc: pd.DataFrame, t: dict) -> None:
     t["92_dislocation_share"] = t_dislocation(auc)
     t["93_preclose_drift_mkt"] = t_drift(auc, "market")
     t["93b_preclose_drift_side"] = t_drift(auc, "buy_sell")
-    t["94_close_vs_vwap15_mkt"] = t_close_vs_vwap15(auc)
-    t["94b_close_vs_vwap15_dist"] = t_close_vs_vwap15_dist(auc)
+    t["94_close_vs_vwap_mkt"] = t_close_vs_vwap(auc)
+    t["94b_close_vs_vwap_dist"] = t_close_vs_vwap_dist(auc)
     part = auc[auc["close_pr_bucket"].notna()] if "close_pr_bucket" in auc else auc.iloc[0:0]
     t["95a_closepr_auction_move"] = t_in_spreads(part, "close_pr_bucket",
                                                  "auction_move_bps", order=CLOSE_PR_LABELS)
@@ -5271,10 +5279,10 @@ def build_review_charts(t: dict, charts: Path) -> None:
     # 3, by volatility
     vd = t.get("109_vol_dislocation", E)
     if not vd.empty and "|auction move| bps (median)" in vd:
-        _grouped_bars(vd, ["|auction move| bps (median)", "|close vs VWAP15| bps (median)"]
-                      if "|close vs VWAP15| bps (median)" in vd
+        _grouped_bars(vd, ["|auction move| bps (median)", "|close vs VWAP| bps (median)"]
+                      if "|close vs VWAP| bps (median)" in vd
                       else ["|auction move| bps (median)"],
-                      ["close vs last continuous trade", "close vs last-15m VWAP"],
+                      ["close vs last continuous trade", "close vs " + VWAP_LABEL],
                       charts, "56_vol_dislocation.png",
                       "Close Dislocation, by Volatility",
                       "Distance of the close, bps (median, either direction)",
@@ -5308,8 +5316,8 @@ def build_review_charts(t: dict, charts: Path) -> None:
                   "Pre-close Drift, by Side",
                   "Side-adjusted price move, bps (notional-weighted)", note=SIGN)
 
-    # 6: close vs last-15m VWAP
-    dist = t.get("94b_close_vs_vwap15_dist", E)
+    # 6: close vs the last VWAP_WINDOW_MIN minutes' VWAP
+    dist = t.get("94b_close_vs_vwap_dist", E)
     if not dist.empty and dist["name-days"].sum() > 0:
         fig, (ax,) = _fig((11.0, 5.6))
         x = np.arange(len(dist))
@@ -5319,19 +5327,19 @@ def build_review_charts(t: dict, charts: Path) -> None:
                     color=INK_SECOND)
         ax.set_xticks(x)
         ax.set_xticklabels(dist.index, rotation=30, ha="right")
-        _style(ax, xlabel="Close vs last 15 min VWAP (bps)",
+        _style(ax, xlabel=f"Close vs {VWAP_LABEL} (bps)",
                ylabel="Share of name-days (%)",
-               title="Close vs Last 15 Min VWAP, Distribution")
+               title=f"Close vs Last {VWAP_WINDOW_MIN} Min VWAP, Distribution")
         room = _notes(fig, ["one count per name per day; positive = the close "
                             "printed above the VWAP (not side-adjusted)"])
-        _save(fig, charts, "43_close_vs_vwap15_distribution.png", bottom=room)
-    rk = t.get("94_close_vs_vwap15_mkt", E)
+        _save(fig, charts, "43_close_vs_vwap_distribution.png", bottom=room)
+    rk = t.get("94_close_vs_vwap_mkt", E)
     rk = _chartable(rk.drop(index="All", errors="ignore")) if not rk.empty else rk
     if not rk.empty:
-        _rank_barh(rk.index, rk["mean |close vs VWAP15| bps"], charts,
-                   "44_close_vs_vwap15_market.png",
-                   "Close vs Last 15 Min VWAP, by Market",
-                   "Close vs last 15 min VWAP, bps (mean, either direction)",
+        _rank_barh(rk.index, rk["mean |close vs VWAP| bps"], charts,
+                   "44_close_vs_vwap_market.png",
+                   f"Close vs Last {VWAP_WINDOW_MIN} Min VWAP, by Market",
+                   f"Close vs {VWAP_LABEL}, bps (mean, either direction)",
                    note="unsigned, per name-day: a bigger number is a close more "
                         "out of line with the trading just before it")
 
@@ -6870,6 +6878,13 @@ def self_test() -> int:
           bk["close_pr_bucket"].tolist())
     check("qatt spells 0700 HK as 700.HK",
           "700.HK" in qatt_candidates("0700 HK"), qatt_candidates("0700 HK"))
+    raw_x2 = pd.DataFrame({"last_cont_price": [1.0], "price60bef_close": [1.0],
+                           "price_15bef_close": [1.0], "last30min_vwap_cont": [1.0]})
+    rc = resolve_columns(raw_x2)
+    check("the extract's intraday columns map onto the review measures",
+          [rc.get(k) for k in ("px_cont_last", "px_m60", "px_m15", "vwap_last")]
+          == ["last_cont_price", "price60bef_close", "price_15bef_close",
+              "last30min_vwap_cont"], rc)
     check("charts land in the folder of their review point",
           [chart_folder(n) for n in ("15_algo_choice.png", "15_market_vs_close.png",
                                      "12b_monthly_india.png", "45a_x.png", "99_x.png")]
@@ -6897,20 +6912,21 @@ def self_test() -> int:
     fi = FakeIntraday()
     got = fetch_intraday(hk, fi)
     check("intraday pull: last continuous, drift prices and VWAP land on the order",
-          got.loc[0, ["px_cont_last", "px_m60", "vwap_15m"]].tolist()
+          got.loc[0, ["px_cont_last", "px_m60", "vwap_last"]].tolist()
           == [100.0, 99.0, 100.1], got.iloc[0].to_dict())
-    check("intraday cuts: 60/30/15 min before 16:00 HKT, then the close",
+    check("intraday cuts: 60 and 15 min before 16:00 HKT, then the close",
           fi.calls and fi.calls[0][3] == ([int(m * 60_000) for m in
-                                           (900, 930, 945, 960)],),
+                                           (900, 945, 960)],),
           fi.calls[0][3] if fi.calls else None)
     vcall = [c for c in fi.calls if "vwap:" in c[0] and "*size)" in c[0]]
     check("VWAP: a missing size column is skipped, the next one used, over "
-          "15:45-16:00", vcall and vcall[0][3] == (945 * 60_000, 960 * 60_000),
+          "the last 30 min, 15:30-16:00",
+          vcall and vcall[0][3] == (930 * 60_000, 960 * 60_000),
           [c[3] for c in fi.calls])
     filed = fetch_intraday(hk.assign(px_cont_last=100.2), FakeIntraday())
     check("px_cont_last in the extract: drift and VWAP still pulled, the "
           "file's price kept",
-          filed.loc[0, ["px_cont_last", "px_m60", "vwap_15m"]].tolist()
+          filed.loc[0, ["px_cont_last", "px_m60", "vwap_last"]].tolist()
           == [100.2, 99.0, 100.1], filed.iloc[0].to_dict())
 
     class FakeQattOtherSpelling:
@@ -7062,7 +7078,7 @@ def run(path: Path, out_dir: Path, sample: bool = False,
     # all the review reads, and every order is a qatt lookup.
     sub = df["strategy"].isin(close_strats)
     got = fetch_intraday(df[sub])
-    pulled = ["px_cont_last", "vwap_15m", "idx_start", "idx_cont", "idx_close"]         + [f"px_m{w}" for w in DRIFT_WINDOWS_MIN]
+    pulled = ["px_cont_last", "vwap_last", "idx_start", "idx_cont", "idx_close"]         + [f"px_m{w}" for w in DRIFT_WINDOWS_MIN]
     for c in pulled:
         if c in got:
             if c not in df:

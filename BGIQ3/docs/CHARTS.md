@@ -20,7 +20,7 @@ Every run writes the charts to `output/charts/<folder>/` and a copy without titl
 - **Reversion:** close to the next day's open. Negative means the price came back against where we traded.
 - **ClosePR (close participation):** our shares executed in the close over the official close auction volume.
 
-The auction move, the trend, the drift and the 15-minute VWAP need intraday prices from qatt. Without qatt set up, those charts are not produced.
+The auction move, the trend, the drift and the 30-minute VWAP come from the extract's `last_cont_price`, `price60bef_close`, `price_15bef_close` and `last30min_vwap_cont`. qatt only fills a price the extract is missing. The email asked for the last 15 min VWAP; the extract carries 30.
 
 ---
 
@@ -52,7 +52,7 @@ The auction move, the trend, the drift and the 15-minute VWAP need intraday pric
 |---|---|---|
 | `41_auction_move_market` | Auction move by market, side-adjusted | Negative = the close moved against our orders. Answers "which markets have the largest closing dislocations". |
 | `49_dislocation_share_market` | % of orders in names whose close moved more than 1, 2 and 3 spreads from the last trade, either direction | Answers "what % of orders were in names with close moves above x spreads". |
-| `56_vol_dislocation` | Median distance of the close from the last trade and from the last-15m VWAP, by daily-vol quartile (from `Vol`) | Do high-vol names dislocate more at the close? |
+| `56_vol_dislocation` | Median distance of the close from the last trade and from the last 30 min VWAP, by daily-vol quartile (from `Vol`) | Do high-vol names dislocate more at the close? |
 | `57_vol_close_vs_pretraded` | vs Arrival for close-only against pre-traded, by daily-vol quartile | Does completing risk before the auction pay off in calmer names? This is the email's "low dislocation names allow completing earlier". |
 
 ## 04_auction_vs_trend (point 4)
@@ -67,15 +67,15 @@ The auction move, the trend, the drift and the 15-minute VWAP need intraday pric
 
 | Chart | What it shows | How to read it |
 |---|---|---|
-| `42_pre_close_drift_market` | The stock's move over the last 60, 30 and 15 minutes before the continuous close, then in the auction, by market | Negative = the price was already moving against the order. If the drift is large and the auction small, the cost came before the auction started. Drift toward our side is not proof of leakage: published imbalances move prices too. |
+| `42_pre_close_drift_market` | The stock's move over the last 60 and 15 minutes before the continuous close (`price60bef_close`, `price_15bef_close` to `last_cont_price`), then in the auction, by market | Negative = the price was already moving against the order. If the drift is large and the auction small, the cost came before the auction started. Drift toward our side is not proof of leakage: published imbalances move prices too. |
 | `42b_pre_close_drift_side` | The same, buys and sells | |
 
-## 06_close_vs_last_15m_vwap (point 6)
+## 06_close_vs_last_vwap (point 6)
 
 | Chart | What it shows | How to read it |
 |---|---|---|
-| `43_close_vs_vwap15_distribution` | Distribution of the close against the last 15 minutes' VWAP, one count per name per day | Market measure, not side-adjusted. Positive = the close printed above the VWAP. |
-| `44_close_vs_vwap15_market` | Markets ranked by the average distance (either direction) | A higher market has a close more out of line with the trading just before it. |
+| `43_close_vs_vwap_distribution` | Distribution of the close against the VWAP of the last 30 minutes of the continuous session (`last30min_vwap_cont`), one count per name per day | Market measure, not side-adjusted. Positive = the close printed above the VWAP. |
+| `44_close_vs_vwap_market` | Markets ranked by the average distance (either direction) | A higher market has a close more out of line with the trading just before it. |
 
 ## 07_participation (point 7)
 

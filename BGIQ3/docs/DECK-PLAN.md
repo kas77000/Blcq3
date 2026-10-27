@@ -27,8 +27,8 @@ Wording: plain sentences, the way the sales trader would say it on the call. It 
 | 2 | Pre-traded vs Close only | `23_flow_split` | Split of value, orders, fill, %ADV and % executed in the close for each. Same as H1. |
 | 3 | Where the cost came from | `40_decomposition_market` | **New.** vs Arrival split into the stock's trend before the close, the auction move and our execution. Answers the email's headline question: was the cost the market or the auction? |
 | 4 | The auction move, by market | `41_auction_move_market`, `49_dislocation_share_market` | **New.** How far the close printed from the last continuous trade, and the share of orders in names that moved more than 1, 2, 3 spreads. |
-| 5 | Before the auction | `42_pre_close_drift_market` | **New.** The move over the last 60, 30 and 15 minutes, then in the auction. Was the cost already there before the auction started? |
-| 6 | Is the close an outlier? | `44_close_vs_vwap15_market` (+ `43` in backup) | **New.** Close against the last 15 minutes' VWAP, markets ranked. |
+| 5 | Before the auction | `42_pre_close_drift_market` | **New.** The move over the last 60 and 15 minutes, then in the auction. Was the cost already there before the auction started? |
+| 6 | Is the close an outlier? | `44_close_vs_vwap_market` (+ `43` in backup) | **New.** Close against the last 30 minutes' VWAP, markets ranked. The email asked for 15; say on the slide it is 30. |
 | 7 | Close Only Participation, by Market | `35_close_pr_close_only` | Same as H1. |
 | 8 | Close Only Reversion, by Market / by Side | `22_reversion_close_only`, `25_close_only_reversion_market_side` | Same as H1. Say "the price did not come back", not "no impact". |
 | 9 | Does cost rise with participation? | `51_impact_curve`, `45a_closepr_auction_move` | **New.** Auction move by ClosePR bucket (<5, 5-10, 10-20, 20-30, 30%+) and where it steepens. Covers every market the way the H1 Korea table covered one. |
