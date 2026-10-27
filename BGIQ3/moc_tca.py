@@ -4804,9 +4804,14 @@ def t_close_vs_vwap_dist(df: pd.DataFrame) -> pd.DataFrame:
     d = _name_days(df, "close_vs_vwap_bps")
     if d.empty:
         return pd.DataFrame()
-    edges = [-1e9, -100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100, 1e9]
-    labels = ["< -100", "-100..-50", "-50..-25", "-25..-10", "-10..-5", "-5..0",
-              "0..5", "5..10", "10..25", "25..50", "50..100", "> 100"]
+    # Equal 10-bp bins with a tail on each side. Uneven bins (5 wide in the
+    # middle, 25 further out) drew two humps around a dip at zero on the
+    # first YTD run - a picture of the bin widths, not of the closes.
+    inner = list(range(-60, 61, 10))
+    edges = [-1e9] + inner + [1e9]
+    labels = ([f"< {inner[0]}"]
+              + [f"{a}..{b}" for a, b in zip(inner[:-1], inner[1:])]
+              + [f"> {inner[-1]}"])
     b = pd.cut(d["close_vs_vwap_bps"], edges, labels=labels)
     out = b.value_counts().reindex(labels).to_frame("name-days")
     out["% of name-days"] = (100.0 * out["name-days"] / out["name-days"].sum()).round(2)
