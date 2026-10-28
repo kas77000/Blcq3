@@ -4083,8 +4083,10 @@ def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
 def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                           measure: str, note: str = "", limit: int = 12,
                           unit: str = None, ylabel: str = None,
-                          order: list = None, xlabel: str = None) -> None:
+                          order: list = None, xlabel: str = None,
+                          side_by_side: bool = False) -> None:
     """Markets along the bottom, a Buy panel over a Sell panel, one scale.
+    side_by_side puts Buy on the left and Sell on the right instead.
 
     Two panels rather than paired bars in one: colour already means saving
     against cost on these charts, so it cannot also mean Buy against Sell.
@@ -4105,12 +4107,16 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
         return
     spreads = unit == "spreads"
     vcol, lo, hi = _unit_cols(unit)
-    fig, axes = plt.subplots(len(sides), 1, dpi=DPI,
-                             figsize=(11.0, 4.7 * len(sides)))
+    if side_by_side:
+        fig, axes = plt.subplots(1, len(sides), dpi=DPI,
+                                 figsize=(8.5 * len(sides), 6.0))
+    else:
+        fig, axes = plt.subplots(len(sides), 1, dpi=DPI,
+                                 figsize=(11.0, 4.7 * len(sides)))
     axes = np.atleast_1d(axes)
     fig.patch.set_facecolor(SURFACE)
     nan = float("nan")
-    for ax, side in zip(axes, sides):
+    for k, (ax, side) in enumerate(zip(axes, sides)):
         ax.set_facecolor(SURFACE)
         labels, vals, ci = [], [], []
         for m in markets:
@@ -4126,15 +4132,16 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                 ci.append((nan, nan))
         _diverging_barv(ax, labels, vals, ci=ci,
                         unit="spreads" if spreads else "bps", tight=True)
-        _style(ax, ylabel=(ylabel.format(unit="spreads" if spreads else "bps")
-                           if ylabel else
-                           _measure_axis(measure, "in spreads" if spreads else "bps")),
+        yl = (ylabel.format(unit="spreads" if spreads else "bps") if ylabel
+              else _measure_axis(measure, "in spreads" if spreads else "bps"))
+        # Side by side the panels share a scale, so one y label is enough.
+        _style(ax, ylabel=yl if not (side_by_side and k) else "",
                xlabel=xlabel or _axis_name(d.index), title=f"{title}: {side}")
         ax._panel = side
     fig._deck_title = title
     _share_ylim(axes)
     room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
-    _save(fig, out, name, bottom=room / len(sides))
+    _save(fig, out, name, bottom=room if side_by_side else room / len(sides))
 
 
 def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
@@ -6243,7 +6250,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           "30_pretraded_reversion_market_side.png",
                           "Pre-traded Reversion, by Side/Market", "next open vs close",
                           note=PRE_NOTE,
-                          ylabel="Close to T+1, notional-weighted, in spreads")
+                          ylabel="Close to T+1, notional-weighted, in spreads",
+                          side_by_side=True)
     chart_spreads(t.get("78_pre_pvwap_mkt_spreads", E), charts,
                   "32_pretraded_pvwap_market.png",
                   "Pre-traded vs PVWAP, by Market",
