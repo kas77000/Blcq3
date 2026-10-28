@@ -20,3 +20,6 @@ reviews/
 *.pptx
 *.parquet
 data/
+
+# Saved qatt answers (CAS names per order): client order ids, never commit.
+cache/

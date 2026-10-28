@@ -479,6 +479,12 @@ QATT_HOST = "CHANGEME"
 QATT_PORT = 0
 QATT_LOOKUP = True
 CAS_CONDS = ["*AUC*", "*ACB*"]          # q `like` patterns on cond
+# Every CAS / non-CAS answer qatt gives is kept here, one row per India order
+# (aggrTgtId, sym, date, cas), so a rerun asks qatt only about the date / sym
+# pairs the file does not already hold. Orders whose name had no qatt rows are
+# not kept: they are asked again next time. Delete the file, or run with
+# --refresh-cas, to ask qatt about everything again.
+CAS_CACHE = Path(__file__).resolve().parent / "cache" / "cas_names.csv"
 # qatt spells syms TICKER.COMPOSITE (moc_close_request.py), so RELIANCE IN in
 # the extract is RELIANCE.IN there, and 0700 HK is 700.HK. Every spelling is
 # asked for (qatt_candidates).
@@ -983,12 +989,28 @@ def _q_frame(result) -> pd.DataFrame:
     return df
 
 
-def lookup_cas_names(df: pd.DataFrame, conn=None) -> pd.Series:
+def _read_cas_cache(path) -> pd.DataFrame:
+    """Earlier answers: aggrTgtId, sym, date (YYYY-MM-DD), cas."""
+    cols = ["aggrTgtId", "sym", "date", "cas"]
+    if path is None or not Path(path).exists():
+        return pd.DataFrame(columns=cols)
+    try:
+        c = pd.read_csv(path, dtype=str)[cols]
+        c["cas"] = c["cas"].str.strip().str.lower().isin({"true", "1"})
+        return c
+    except Exception as e:
+        warn(f"CAS cache {path} unreadable ({e}): asking qatt again.")
+        return pd.DataFrame(columns=cols)
+
+
+def lookup_cas_names(df: pd.DataFrame, conn=None, cache=None) -> pd.Series:
     """True / False per India order from the CAS date: did qatt show that name
     carrying a CAS code on the order's date. NaN everywhere else, and wherever
     qatt has no rows for the name at all.
 
     conn is any callable taking (query, day, syms); the self-test passes a fake.
+    cache is a CSV of earlier answers (CAS_CACHE in a real run): a date / sym
+    found there is not asked again, and new answers are added to it.
     """
     out = pd.Series(np.nan, index=df.index, dtype=object)
     if not {"market", "date", "symbol"} <= set(df.columns):
@@ -999,51 +1021,88 @@ def lookup_cas_names(df: pd.DataFrame, conn=None) -> pd.Series:
         return out
 
     section("INDIA CAS NAMES (qatt)")
-    if conn is None:
+    saved = _read_cas_cache(cache)
+    known = dict(zip(zip(saved["date"], saved["sym"].str.strip()), saved["cas"]))
+    keys = {i: (f"{pd.Timestamp(df.at[i, 'date']):%Y-%m-%d}",
+                str(df.at[i, "symbol"]).strip()) for i in df.index[rows]}
+    for i, k in keys.items():
+        if k in known:
+            out[i] = bool(known[k])
+    todo = rows & out.isna()
+    if cache is not None:
+        log(f"  cache {cache}: {len(saved):,} orders saved, "
+            f"{int((rows & out.notna()).sum()):,} of {int(rows.sum()):,} "
+            "India orders answered from it")
+    if todo.any() and conn is None:
         conn = qatt_connect()
-    if conn is None:
-        log(f"  {int(rows.sum()):,} India orders from {start:%Y-%m-%d} stay in")
+    if todo.any() and conn is None:
+        log(f"  {int(todo.sum()):,} India orders from {start:%Y-%m-%d} stay in")
         log(f"  '{REGIME_UNKNOWN}': no qatt to say which names ran the CAS.")
         return out
 
     cands = df.loc[rows, "symbol"].map(qatt_candidates)
     log(f"  cond like {' / '.join(CAS_CONDS)} on the order's date, India syms only")
     log("")
-    log(f"    {'date':<12}{'names':>7}{'CAS':>7}{'not CAS':>9}{'no rows':>9}")
+    log(f"    {'date':<12}{'names':>7}{'CAS':>7}{'not CAS':>9}{'no rows':>9}"
+        f"{'':>3}source")
     seen_suffix: dict = {}
-    for day, idx in df[rows].groupby("date").groups.items():
-        syms = sorted({c for i in idx for c in cands[i]})
-        qd = int((pd.Timestamp(day) - Q_EPOCH).days)
-        got = _q_frame(conn(Q_CAS, qd, [x.encode() for x in syms]))
-        cas = (dict(zip(got["sym"].astype(str).str.strip(), got["cas"] > 0))
-               if len(got) else {})
-        for i in idx:
-            hit = next((c for c in cands[i] if c in cas), None)
-            if hit is not None:
-                out[i] = bool(cas[hit])
-        if not cas:
-            # Not one India sym matched: the spelling is different. Take the
-            # day's CAS syms, whatever they look like, and match on ticker.
-            # A day with CAS rows makes every other India name non-CAS; a day
-            # with none (a holiday, a day qatt lacks) stays unknown.
-            anyc = _q_frame(conn(Q_CAS_ANY, qd))
-            if len(anyc):
-                names = anyc["sym"].astype(str).str.strip()
-                for x in names:
-                    sfx = re.split(r"[. ]+", x.upper())[-1]
-                    seen_suffix[sfx] = seen_suffix.get(sfx, 0) + 1
-                india = [x for x in names
-                         if re.split(r"[. ]+", x.upper())[-1] in INDIA_SUFFIXES]
-                tick = {_ticker(x) for x in (india or names)}
-                for i in idx:
-                    out[i] = _ticker(df.at[i, "symbol"]) in tick
-        names = df.loc[idx, "symbol"]
-        flag = out[idx]
+    asked = 0
+    for day, idx_all in df[rows].groupby("date").groups.items():
+        idx = [i for i in idx_all if todo[i]]
+        if idx:
+            asked += 1
+            syms = sorted({c for i in idx for c in cands[i]})
+            qd = int((pd.Timestamp(day) - Q_EPOCH).days)
+            got = _q_frame(conn(Q_CAS, qd, [x.encode() for x in syms]))
+            cas = (dict(zip(got["sym"].astype(str).str.strip(), got["cas"] > 0))
+                   if len(got) else {})
+            for i in idx:
+                hit = next((c for c in cands[i] if c in cas), None)
+                if hit is not None:
+                    out[i] = bool(cas[hit])
+            if not cas:
+                # Not one India sym matched: the spelling is different. Take
+                # the day's CAS syms, whatever they look like, and match on
+                # ticker. A day with CAS rows makes every other India name
+                # non-CAS; a day with none (a holiday, a day qatt lacks) stays
+                # unknown.
+                anyc = _q_frame(conn(Q_CAS_ANY, qd))
+                if len(anyc):
+                    names = anyc["sym"].astype(str).str.strip()
+                    for x in names:
+                        sfx = re.split(r"[. ]+", x.upper())[-1]
+                        seen_suffix[sfx] = seen_suffix.get(sfx, 0) + 1
+                    india = [x for x in names
+                             if re.split(r"[. ]+", x.upper())[-1] in INDIA_SUFFIXES]
+                    tick = {_ticker(x) for x in (india or names)}
+                    for i in idx:
+                        out[i] = _ticker(df.at[i, "symbol"]) in tick
+        names = df.loc[idx_all, "symbol"]
+        flag = out[idx_all]
         log(f"    {pd.Timestamp(day):%Y-%m-%d}  {names.nunique():>7,}"
             f"{names[flag.eq(True)].nunique():>7,}"
             f"{names[flag.eq(False)].nunique():>9,}"
-            f"{names[flag.isna()].nunique():>9,}")
+            f"{names[flag.isna()].nunique():>9,}"
+            f"{'':>3}{'qatt' if idx else 'cache'}")
 
+    if cache is not None:
+        answered = rows & out.notna()
+        ids = (df["order_id"].astype(str) if "order_id" in df
+               else pd.Series("", index=df.index))
+        now = pd.DataFrame({
+            "aggrTgtId": ids[answered],
+            "sym": [keys[i][1] for i in df.index[answered]],
+            "date": [keys[i][0] for i in df.index[answered]],
+            "cas": out[answered].astype(bool)})
+        both = (pd.concat([saved, now], ignore_index=True)
+                  .drop_duplicates(["aggrTgtId", "sym", "date"], keep="last")
+                  .sort_values(["date", "sym", "aggrTgtId"]))
+        if len(both) != len(saved) or asked:
+            Path(cache).parent.mkdir(parents=True, exist_ok=True)
+            both.to_csv(cache, index=False)
+            log("")
+            log(f"  {asked:,} dates asked of qatt; {len(both):,} orders now "
+                f"saved in {cache}")
     if seen_suffix:
         log("")
         log("  No India sym matched under its own spelling on some days, so")
@@ -1302,7 +1361,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
     # Which post-CAS India names ran the auction. Asked of qatt here, before
     # the regime and the India imputation below, which both depend on it.
-    df["cas_name"] = lookup_cas_names(df)
+    df["cas_name"] = lookup_cas_names(df, cache=CAS_CACHE)
     df["close_regime"] = close_regime(df["market"], df.get("date"),
                                       df["cas_name"])
 
@@ -6949,6 +7008,21 @@ def self_test() -> int:
                 return pd.DataFrame(columns=["sym", "rows", "cas"])
             return pd.DataFrame({"sym": ["RELIANCE.NS", "BHP.AU"], "rows": [5, 3]})
 
+    import tempfile
+    cache = Path(tempfile.mkdtemp()) / "cas_names.csv"
+    look_id = look.assign(order_id=[f"T{i}" for i in range(len(look))])
+    first = lookup_cas_names(look_id, FakeQatt(), cache=cache).tolist()
+    again = FakeQatt()
+    second = lookup_cas_names(look_id, again, cache=cache).tolist()
+    saved = pd.read_csv(cache, dtype=str)
+    check("CAS cache: aggrTgtId / sym / date / cas saved; a rerun gives the "
+          "same answers and asks qatt only about the name it had no rows for",
+          first[:2] == second[:2] == [True, False] and len(again.calls) == 1
+          and again.calls[0][2] == qatt_candidates("NOSUCH IN")
+          and list(saved.columns) == ["aggrTgtId", "sym", "date", "cas"]
+          and saved["aggrTgtId"].tolist() == ["T0", "T1"],
+          (first, second, again.calls, saved.to_dict("records")))
+
     got = lookup_cas_names(look, FakeQattOtherSpelling()).tolist()
     check("CAS fallback: matched on the ticker whatever the suffix; other "
           "India names that day are non-CAS",
@@ -7656,11 +7730,15 @@ def main(argv=None) -> int:
                    help="period label for the charts (overrides PERIOD_LABEL)")
     p.add_argument("--no-qatt", action="store_true",
                    help="skip the qatt lookup: post-CAS India stays segment unknown")
+    p.add_argument("--refresh-cas", action="store_true", dest="refresh_cas",
+                   help="ignore the saved CAS answers and ask qatt again")
     args = p.parse_args(argv)
 
     global DATE_FROM, DATE_TO, PERIOD_LABEL, CLIP_OUTLIERS, QATT_LOOKUP
     if args.no_qatt:
         QATT_LOOKUP = False
+    if args.refresh_cas and CAS_CACHE.exists():
+        CAS_CACHE.unlink()
     if args.clip:
         CLIP_OUTLIERS = True
     if args.date_from:
