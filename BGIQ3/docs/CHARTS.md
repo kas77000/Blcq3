@@ -31,6 +31,8 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `15_market_vs_close` | Execution against the official close, by market, all orders | The tracking-accuracy chart. Markets ordered by value traded, not by result. |
 | `27_pretraded_close_market` | The same for pre-traded orders only | Close-only orders sit at zero by construction, so this is where any vs Close difference lives. |
 | `32_pretraded_pvwap_market` | Pre-traded orders against PVWAP (the market VWAP while the order was working) | Judges how well the pre-close part traded, apart from when the order started. |
+| `37_close_only_arrival_market` | Close-only orders against the arrival price, by market, in spreads | The full cost from the order's arrival to the close print. |
+| `38_pretraded_arrival_market` | Pre-traded orders against the arrival price, by market, in spreads | The same for orders that traded before the auction. |
 | `47_opportunity_cost_market` | Cost of the unfilled part: unfilled share × the move from the close to the next open | Approximate, because the price the residual was later completed at is not in the extract. Small when fill rates are close to 100%. |
 
 ## 02_buy_vs_sell (point 2)
@@ -44,6 +46,9 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `29_pretraded_close_market_side` | Pre-traded execution vs close, by market, buys and sells | |
 | `30_pretraded_reversion_market_side` | Pre-traded reversion, by market, buys and sells | Same as the H1 slide (Korea sells stood out in H1). |
 | `33_pretraded_pvwap_market_side` | Pre-traded vs PVWAP, by market, buys and sells | |
+| `37b_close_only_arrival_market_side` | Close-only arrival slippage, by market, buys and sells | |
+| `38b_pretraded_arrival_market_side` | Pre-traded arrival slippage, by market, buys and sells | |
+| `39b_close_only_last_cont_market_side` | Close-only last continuous price vs close, by market, buys and sells (auction names only) | Same sign as 28b. |
 | `46_closepr_by_side` | Auction move by ClosePR bucket, Buy panel and Sell panel | Does asymmetry grow with participation? |
 | `48_side_gap_market` | Buy minus sell on the auction move, by market | Positive = buys did better. Whiskers are ±1.96 standard errors clustered by date. In a rising market buys look worse for reasons that are not execution. |
 
@@ -140,6 +145,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `10c_last_cont_market` | Last continuous price vs close, by market, pre-traded orders; same sign as 10b, the mirror of the auction move (41). CAS names use qatt's last trade before the auction | Would the last continuous trade have beaten the close? |
 | `19_first_exec_by_adv` | The same, by ADV% band | |
 | `20_first_exec_by_spread` | The same, by spread quartile | |
+| `39_close_only_last_cont_market` | Last continuous price vs close, by market, close-only orders on auction names | The close-only twin of 10c. India on a VWAP close is left out: it has no auction. |
 
 ## reversion
 

@@ -578,8 +578,9 @@ CONCENTRATION_FLAG_PCT = 50.0
 # Matched on the start of the chart's file name; anything unmatched lands
 # in other/.
 CHART_FOLDERS = {
-    "01_core_cost_metrics":      ["15_market", "27_", "32_", "47_"],
+    "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
     "02_buy_vs_sell":            ["25_", "26_", "28_", "28b_", "29_", "30_", "33_",
+                                  "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
     "04_auction_vs_trend":       ["40_", "40b_", "40c_"],
@@ -592,7 +593,7 @@ CHART_FOLDERS = {
     "11_statistical_robustness": ["53_"],
     "12_liquidity_buckets":      ["24_", "31_", "54_"],
     "13_market_deep_dives":      ["12_", "12b_", "13_", "55_"],
-    "first_execution":           ["10b_", "10c_", "19_", "20_"],
+    "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
     "reversion":                 ["11_", "21_", "22_"],
     "flow_and_algo_choice":      ["15_algo", "23_"],
 }
@@ -3494,11 +3495,17 @@ COST_SAVE_NOTE = "← cost   |   savings →"
 # Every first-execution chart is on pre-traded orders only, and every one of
 # them says so. The measure is undefined for an order that only ever printed
 # in the auction, and a reader has no way to know that from the title.
-LAST_CONT_NOTE = ("pre-traded orders. Positive: the last continuous trade "
+LAST_CONT_NOTE = ("Positive: the last continuous trade "
                   "was better for the order than the close (a buy: below it; "
                   "a sell: above it). The same gap as the auction move, read "
                   "the other way round. CAS names: qatt's last trade before "
                   "the auction")
+CO_ARRIVAL_NOTE = ("close-only: 99.5% or more of the order printed in the "
+                   "auction. Arrival slippage: average price against the price "
+                   "when the order arrived; positive = saving, negative = cost")
+PRE_ARRIVAL_NOTE = ("pre-traded: part of the order traded before the auction. "
+                    "Arrival slippage: average price against the price when the "
+                    "order arrived; positive = saving, negative = cost")
 PRE_TRADED_NOTE = ("orders that traded before the close; an auction-only order has no first execution to measure and is not in here")
 
 
@@ -5827,6 +5834,20 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
         t["68b_pre_lastcont_mkt_spreads"] = t_in_spreads(pre, "market", LC)
         t["74b_pre_lastcont_mkt_side_spr"] = t_in_spreads(
             pre, ["market", "buy_sell"], LC)
+    # Arrival slippage, close-only and pre-traded, by market and side/market.
+    t["83_co_arrival_mkt_spreads"] = t_in_spreads(co, "market", "slip_arrival")
+    t["83b_co_arrival_mkt_side_spr"] = t_in_spreads(
+        co, ["market", "buy_sell"], "slip_arrival")
+    t["84_pre_arrival_mkt_spreads"] = t_in_spreads(pre, "market", "slip_arrival")
+    t["84b_pre_arrival_mkt_side_spr"] = t_in_spreads(
+        pre, ["market", "buy_sell"], "slip_arrival")
+    # Close-only against the last continuous trade. Auction names only: an
+    # India name on a VWAP close has no auction to set it against.
+    co_auc = co[co["has_auction"]] if "has_auction" in co else co
+    if LC in co_auc and co_auc[LC].notna().any():
+        t["85_co_lastcont_mkt_spreads"] = t_in_spreads(co_auc, "market", LC)
+        t["85b_co_lastcont_mkt_side_spr"] = t_in_spreads(
+            co_auc, ["market", "buy_sell"], LC)
     # Against PVWAP: the close says where the order ended up, PVWAP says
     # whether the trading along the way was good for the window it ran in.
     t["73d_pre_pvwap_side_spr"] = pd.concat([
@@ -6235,13 +6256,48 @@ def build_charts(t: dict, out_dir: Path) -> None:
                   "10c_last_cont_market.png",
                   "Last Continuous Price vs Close, by Market",
                   "last continuous price vs Close", by_notional=True,
-                  note=LAST_CONT_NOTE,
+                  note="pre-traded orders. " + LAST_CONT_NOTE,
                   ylabel="Last continuous price vs close, in spreads")
     chart_spreads_by_side(t.get("74b_pre_lastcont_mkt_side_spr", E), charts,
                           "28b_pretraded_last_cont_market_side.png",
                           "Pre-traded Last Continuous Price vs Close, by Side/Market",
-                          "last continuous price vs Close", note=LAST_CONT_NOTE,
+                          "last continuous price vs Close",
+                          note="pre-traded orders. " + LAST_CONT_NOTE,
                           ylabel="Last continuous price vs close, in spreads")
+
+    # Arrival slippage and last continuous vs close, close-only and
+    # pre-traded, by market and by side/market.
+    ARR_Y = "Arrival price slippage, in spreads"
+    LC_Y = "Last continuous price vs close, in spreads"
+    for key, name, title, measure, note, ylab in [
+        ("83_co_arrival_mkt_spreads", "37_close_only_arrival_market.png",
+         "Close Only Arrival Slippage, by Market", "vs Arrival",
+         CO_ARRIVAL_NOTE, ARR_Y),
+        ("84_pre_arrival_mkt_spreads", "38_pretraded_arrival_market.png",
+         "Pre-traded Arrival Slippage, by Market", "vs Arrival",
+         PRE_ARRIVAL_NOTE, ARR_Y),
+        ("85_co_lastcont_mkt_spreads", "39_close_only_last_cont_market.png",
+         "Close Only Last Continuous Price vs Close, by Market",
+         "last continuous price vs Close",
+         "close-only orders, auction names. " + LAST_CONT_NOTE, LC_Y),
+    ]:
+        chart_spreads(t.get(key, E), charts, name, title, measure,
+                      by_notional=True, note=note, ylabel=ylab)
+    for key, name, title, measure, note, ylab in [
+        ("83b_co_arrival_mkt_side_spr", "37b_close_only_arrival_market_side.png",
+         "Close Only Arrival Slippage, by Side/Market", "vs Arrival",
+         CO_ARRIVAL_NOTE, ARR_Y),
+        ("84b_pre_arrival_mkt_side_spr", "38b_pretraded_arrival_market_side.png",
+         "Pre-traded Arrival Slippage, by Side/Market", "vs Arrival",
+         PRE_ARRIVAL_NOTE, ARR_Y),
+        ("85b_co_lastcont_mkt_side_spr",
+         "39b_close_only_last_cont_market_side.png",
+         "Close Only Last Continuous Price vs Close, by Side/Market",
+         "last continuous price vs Close",
+         "close-only orders, auction names. " + LAST_CONT_NOTE, LC_Y),
+    ]:
+        chart_spreads_by_side(t.get(key, E), charts, name, title, measure,
+                              note=note, ylabel=ylab)
     chart_spreads_by_side(t.get("75_pre_close_mkt_side_spr", E), charts,
                           "29_pretraded_close_market_side.png",
                           "Pre-traded Execution vs Close, by Side/Market", "vs Close",
