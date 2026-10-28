@@ -480,11 +480,17 @@ QATT_PORT = 0
 QATT_LOOKUP = True
 CAS_CONDS = ["*AUC*", "*ACB*"]          # q `like` patterns on cond
 # Every CAS / non-CAS answer qatt gives is kept here, one row per India order
-# (aggrTgtId, sym, date, cas), so a rerun asks qatt only about the date / sym
+# (aggrTgtId, sym, date, cas, pcont = last trade before the auction), so a rerun asks qatt only about the date / sym
 # pairs the file does not already hold. Orders whose name had no qatt rows are
 # not kept: they are asked again next time. Delete the file, or run with
 # --refresh-cas, to ask qatt about everything again.
 CAS_CACHE = Path(__file__).resolve().parent / "cache" / "cas_names.csv"
+# The extract's last_cont_price is not the last continuous trade for a CAS
+# name. The same qatt query that finds the CAS names also returns, per name,
+# the last trade before its first AUC / ACB row; with this on, that price
+# replaces the extract's for CAS orders (the extract's is kept beside it as
+# px_cont_last_extract).
+CAS_LAST_PRICE_FROM_QATT = True
 # qatt spells syms TICKER.COMPOSITE (moc_close_request.py), so RELIANCE IN in
 # the extract is RELIANCE.IN there, and 0700 HK is 700.HK. Every spelling is
 # asked for (qatt_candidates).
@@ -931,10 +937,14 @@ def auction_available(market: pd.Series, date=None, cas=None) -> pd.Series:
 # Dates go over the wire as day counts and are cast in q; syms as bytes, made
 # symbols with `$. 0! unkeys the `by`: a keyed result needs a q licence to read
 # back. cas counts the rows carrying any CAS code, so a sym with rows and
-# cas = 0 traded that day without the auction.
-Q_CAS = ("{[d;s] s:`$s; 0!select rows:count i, cas:sum "
-         + " or ".join(f'(cond like "{c}")' for c in CAS_CONDS)
-         + " by sym from qatt where date=\"d\"$d, sym in s}")
+# cas = 0 traded that day without the auction. pcont is the last price before
+# the name's first CAS row, rows taken in time order: its last continuous
+# trade. On a name with no CAS row it is the day's last price, and unused.
+_CAS_COND = "(" + " or ".join(f'(cond like "{c}")' for c in CAS_CONDS) + ")"
+Q_CAS = ("{[d;s] s:`$s; 0!select rows:count i, cas:sum " + _CAS_COND
+         + ", pcont:{[t;p;f] o:iasc t; p:p o; f:f o; "
+           "last p where (p>0) & (til count f) < f?1b}[time;lastPrice;"
+         + _CAS_COND + "] by sym from qatt where date=\"d\"$d, sym in s}")
 Q_EPOCH = pd.Timestamp("2000-01-01")
 
 # Fallback when no India sym matched under any spelling: every sym that
@@ -990,13 +1000,17 @@ def _q_frame(result) -> pd.DataFrame:
 
 
 def _read_cas_cache(path) -> pd.DataFrame:
-    """Earlier answers: aggrTgtId, sym, date (YYYY-MM-DD), cas."""
-    cols = ["aggrTgtId", "sym", "date", "cas"]
+    """Earlier answers: aggrTgtId, sym, date (YYYY-MM-DD), cas, pcont."""
+    cols = ["aggrTgtId", "sym", "date", "cas", "pcont"]
     if path is None or not Path(path).exists():
         return pd.DataFrame(columns=cols)
     try:
-        c = pd.read_csv(path, dtype=str)[cols]
+        c = pd.read_csv(path, dtype=str)
+        if "pcont" not in c:
+            c["pcont"] = np.nan       # a file saved before the price was kept
+        c = c[cols]
         c["cas"] = c["cas"].str.strip().str.lower().isin({"true", "1"})
+        c["pcont"] = pd.to_numeric(c["pcont"], errors="coerce")
         return c
     except Exception as e:
         warn(f"CAS cache {path} unreadable ({e}): asking qatt again.")
@@ -1004,30 +1018,41 @@ def _read_cas_cache(path) -> pd.DataFrame:
 
 
 def lookup_cas_names(df: pd.DataFrame, conn=None, cache=None) -> pd.Series:
-    """True / False per India order from the CAS date: did qatt show that name
-    carrying a CAS code on the order's date. NaN everywhere else, and wherever
-    qatt has no rows for the name at all.
+    """True / False per India order from the CAS date (see lookup_cas)."""
+    return lookup_cas(df, conn, cache)["cas"]
+
+
+def lookup_cas(df: pd.DataFrame, conn=None, cache=None) -> pd.DataFrame:
+    """Per India order from the CAS date: cas, True / False - did qatt show
+    that name carrying a CAS code on the order's date - and pcont, the name's
+    last trade before its first CAS row (CAS names only). NaN everywhere
+    else, and wherever qatt has no rows for the name at all.
 
     conn is any callable taking (query, day, syms); the self-test passes a fake.
     cache is a CSV of earlier answers (CAS_CACHE in a real run): a date / sym
     found there is not asked again, and new answers are added to it.
     """
     out = pd.Series(np.nan, index=df.index, dtype=object)
+    px = pd.Series(np.nan, index=df.index, dtype=float)
+    res = lambda: pd.DataFrame({"cas": out, "pcont": px})  # noqa: E731
     if not {"market", "date", "symbol"} <= set(df.columns):
-        return out
+        return res()
     start = pd.Timestamp(AUCTION_FROM["India"])
     rows = df["market"].eq("India") & (df["date"] >= start)
     if not rows.any():
-        return out
+        return res()
 
     section("INDIA CAS NAMES (qatt)")
     saved = _read_cas_cache(cache)
-    known = dict(zip(zip(saved["date"], saved["sym"].str.strip()), saved["cas"]))
+    known = {k: (c, pc) for k, c, pc in zip(
+        zip(saved["date"], saved["sym"].str.strip()), saved["cas"], saved["pcont"])}
     keys = {i: (f"{pd.Timestamp(df.at[i, 'date']):%Y-%m-%d}",
                 str(df.at[i, "symbol"]).strip()) for i in df.index[rows]}
     for i, k in keys.items():
-        if k in known:
-            out[i] = bool(known[k])
+        # A CAS name saved without its price (an older file) is asked again.
+        if k in known and not (known[k][0] and pd.isna(known[k][1])):
+            out[i] = bool(known[k][0])
+            px[i] = known[k][1]
     todo = rows & out.isna()
     if cache is not None:
         log(f"  cache {cache}: {len(saved):,} orders saved, "
@@ -1038,7 +1063,7 @@ def lookup_cas_names(df: pd.DataFrame, conn=None, cache=None) -> pd.Series:
     if todo.any() and conn is None:
         log(f"  {int(todo.sum()):,} India orders from {start:%Y-%m-%d} stay in")
         log(f"  '{REGIME_UNKNOWN}': no qatt to say which names ran the CAS.")
-        return out
+        return res()
 
     cands = df.loc[rows, "symbol"].map(qatt_candidates)
     log(f"  cond like {' / '.join(CAS_CONDS)} on the order's date, India syms only")
@@ -1056,10 +1081,14 @@ def lookup_cas_names(df: pd.DataFrame, conn=None, cache=None) -> pd.Series:
             got = _q_frame(conn(Q_CAS, qd, [x.encode() for x in syms]))
             cas = (dict(zip(got["sym"].astype(str).str.strip(), got["cas"] > 0))
                    if len(got) else {})
+            pc = (dict(zip(got["sym"].astype(str).str.strip(), got["pcont"]))
+                  if len(got) and "pcont" in got else {})
             for i in idx:
                 hit = next((c for c in cands[i] if c in cas), None)
                 if hit is not None:
                     out[i] = bool(cas[hit])
+                    if cas[hit]:
+                        px[i] = pc.get(hit, np.nan)
             if not cas:
                 # Not one India sym matched: the spelling is different. Take
                 # the day's CAS syms, whatever they look like, and match on
@@ -1074,9 +1103,20 @@ def lookup_cas_names(df: pd.DataFrame, conn=None, cache=None) -> pd.Series:
                         seen_suffix[sfx] = seen_suffix.get(sfx, 0) + 1
                     india = [x for x in names
                              if re.split(r"[. ]+", x.upper())[-1] in INDIA_SUFFIXES]
-                    tick = {_ticker(x) for x in (india or names)}
+                    by_tick = {_ticker(x): x for x in (india or names)}
                     for i in idx:
-                        out[i] = _ticker(df.at[i, "symbol"]) in tick
+                        out[i] = _ticker(df.at[i, "symbol"]) in by_tick
+                    # The price, asked again under qatt's own spelling.
+                    want = sorted({by_tick[_ticker(df.at[i, "symbol"])]
+                                   for i in idx if out[i] is True})
+                    if want:
+                        g2 = _q_frame(conn(Q_CAS, qd, [x.encode() for x in want]))
+                        p2 = (dict(zip(g2["sym"].astype(str).str.strip(), g2["pcont"]))
+                              if len(g2) and "pcont" in g2 else {})
+                        for i in idx:
+                            if out[i] is True:
+                                px[i] = p2.get(by_tick[_ticker(df.at[i, "symbol"])],
+                                               np.nan)
         names = df.loc[idx_all, "symbol"]
         flag = out[idx_all]
         log(f"    {pd.Timestamp(day):%Y-%m-%d}  {names.nunique():>7,}"
@@ -1093,7 +1133,8 @@ def lookup_cas_names(df: pd.DataFrame, conn=None, cache=None) -> pd.Series:
             "aggrTgtId": ids[answered],
             "sym": [keys[i][1] for i in df.index[answered]],
             "date": [keys[i][0] for i in df.index[answered]],
-            "cas": out[answered].astype(bool)})
+            "cas": out[answered].astype(bool),
+            "pcont": px[answered]})
         both = (pd.concat([saved, now], ignore_index=True)
                   .drop_duplicates(["aggrTgtId", "sym", "date"], keep="last")
                   .sort_values(["date", "sym", "aggrTgtId"]))
@@ -1120,7 +1161,42 @@ def lookup_cas_names(df: pd.DataFrame, conn=None, cache=None) -> pd.Series:
         log(f"    they stay in '{REGIME_UNKNOWN}'. If this is most of them, the")
         log("    sym spelling is wrong (qatt_candidates). First few:")
         log("      " + ", ".join(missing[:10]))
-    return out
+    return res()
+
+
+def use_qatt_cas_price(df: pd.DataFrame, pcont: pd.Series) -> None:
+    """For CAS orders, qatt's last trade before the auction replaces the
+    extract's last_cont_price. The extract's value stays in
+    px_cont_last_extract, and the log says how far apart the two were."""
+    if not CAS_LAST_PRICE_FROM_QATT:
+        return
+    cas = df["cas_name"].eq(True)
+    if not cas.any():
+        return
+    if "px_cont_last" not in df:
+        df["px_cont_last"] = np.nan
+    df["px_cont_last_extract"] = df["px_cont_last"]
+    got = cas & pcont.notna() & (pcont > 0)
+    df.loc[got, "px_cont_last"] = pcont[got]
+    log("")
+    log(f"  last continuous price, CAS orders: qatt's last trade before the "
+        f"first {' / '.join(c.strip('*') for c in CAS_CONDS)} row on "
+        f"{int(got.sum()):,} of {int(cas.sum()):,}")
+    if (cas & ~got).any():
+        log(f"    {int((cas & ~got).sum()):,} with no qatt price keep the "
+            "extract's last_cont_price")
+    both = got & df["px_cont_last_extract"].notna()
+    if both.any():
+        old, new = df.loc[both, "px_cont_last_extract"], df.loc[both, "px_cont_last"]
+        gap = ((old - new) / new * 1e4).abs()
+        log(f"    extract vs qatt on {int(both.sum()):,} orders: median gap "
+            f"{gap.median():.1f} bps, {100 * float((gap > 0.5).mean()):.0f}% "
+            "differ by more than 0.5 bp")
+        if "close_price" in df:
+            cl = df.loc[both, "close_price"]
+            log(f"    equal to the close: extract "
+                f"{100 * float(((old - cl).abs() < 1e-9).mean()):.0f}%, qatt "
+                f"{100 * float(((new - cl).abs() < 1e-9).mean()):.0f}%")
 
 
 def market_from_symbol(sym: pd.Series) -> pd.Series:
@@ -1361,7 +1437,9 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
     df["market"] = market_from_symbol(df["symbol"]) if "symbol" in df else UNKNOWN_MARKET
     # Which post-CAS India names ran the auction. Asked of qatt here, before
     # the regime and the India imputation below, which both depend on it.
-    df["cas_name"] = lookup_cas_names(df, cache=CAS_CACHE)
+    cas_look = lookup_cas(df, cache=CAS_CACHE)
+    df["cas_name"] = cas_look["cas"]
+    use_qatt_cas_price(df, cas_look["pcont"])
     df["close_regime"] = close_regime(df["market"], df.get("date"),
                                       df["cas_name"])
 
@@ -6886,7 +6964,8 @@ def self_test() -> int:
         def __call__(self, q, d, syms):
             self.calls.append((q, d, [x.decode() for x in syms]))
             return pd.DataFrame({"sym": ["RELIANCE.IN", "SMALLCO.IN"],
-                                 "rows": [40, 12], "cas": [3, 0]})
+                                 "rows": [40, 12], "cas": [3, 0],
+                                 "pcont": [2450.5, 101.0]})
 
     look = pd.DataFrame({
         "market": ["India", "India", "India", "India", "Hong Kong"],
@@ -6895,7 +6974,12 @@ def self_test() -> int:
         "date": [cas, cas, cas, cas - pd.Timedelta(days=1), cas],
     })
     fq = FakeQatt()
-    got = lookup_cas_names(look, fq).tolist()
+    both = lookup_cas(look, fq)
+    got = both["cas"].tolist()
+    check("qatt: a CAS name carries its last price before the auction, a "
+          "non-CAS name none",
+          both["pcont"].iloc[0] == 2450.5 and both["pcont"].iloc[1:].isna().all(),
+          both["pcont"].tolist())
     check("qatt: CAS code -> True, rows without one -> False, no rows -> unknown",
           got[:3] == [True, False, got[2]] and pd.isna(got[2])
           and all(pd.isna(x) for x in got[3:]), got)
@@ -7015,13 +7099,27 @@ def self_test() -> int:
     again = FakeQatt()
     second = lookup_cas_names(look_id, again, cache=cache).tolist()
     saved = pd.read_csv(cache, dtype=str)
-    check("CAS cache: aggrTgtId / sym / date / cas saved; a rerun gives the "
-          "same answers and asks qatt only about the name it had no rows for",
+    check("CAS cache: aggrTgtId / sym / date / cas / pcont saved; a rerun "
+          "gives the same answers and asks qatt only about the name it had "
+          "no rows for",
           first[:2] == second[:2] == [True, False] and len(again.calls) == 1
           and again.calls[0][2] == qatt_candidates("NOSUCH IN")
-          and list(saved.columns) == ["aggrTgtId", "sym", "date", "cas"]
-          and saved["aggrTgtId"].tolist() == ["T0", "T1"],
+          and list(saved.columns) == ["aggrTgtId", "sym", "date", "cas", "pcont"]
+          and saved["aggrTgtId"].tolist() == ["T0", "T1"]
+          and float(saved["pcont"].iloc[0]) == 2450.5,
           (first, second, again.calls, saved.to_dict("records")))
+    rerun = lookup_cas(look_id, FakeQatt(), cache=cache)
+    check("CAS cache: the price comes back from the file",
+          rerun["pcont"].iloc[0] == 2450.5, rerun["pcont"].tolist())
+    swap = pd.DataFrame({"cas_name": [True, True, False],
+                         "px_cont_last": [100.0, 50.0, 10.0],
+                         "close_price": [100.0, 51.0, 10.5]})
+    use_qatt_cas_price(swap, pd.Series([99.0, np.nan, 10.2]))
+    check("CAS orders take qatt's last price; one without keeps the "
+          "extract's; a non-CAS order is untouched",
+          swap["px_cont_last"].tolist() == [99.0, 50.0, 10.0]
+          and swap["px_cont_last_extract"].tolist() == [100.0, 50.0, 10.0],
+          swap.to_dict("records"))
 
     got = lookup_cas_names(look, FakeQattOtherSpelling()).tolist()
     check("CAS fallback: matched on the ticker whatever the suffix; other "
