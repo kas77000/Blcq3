@@ -40,6 +40,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `25_close_only_reversion_market_side` | Close-only reversion by market, Buy panel and Sell panel | Same as the H1 slide. |
 | `26_pretraded_by_side` | Pre-traded orders: first execution, execution vs close, next open vs close; All / Buy / Sell | Same as the H1 slide. |
 | `28_pretraded_first_exec_market_side` | Pre-traded first execution vs close, by market, buys and sells | Was starting before the close the right call, per market and side? |
+| `28b_pretraded_last_cont_market_side` | Pre-traded last continuous price vs close, by market, buys and sells (+ = the last continuous trade was better for the order than the close) | How far did the close move from where the session ended, per market and side? |
 | `29_pretraded_close_market_side` | Pre-traded execution vs close, by market, buys and sells | |
 | `30_pretraded_reversion_market_side` | Pre-traded reversion, by market, buys and sells | Same as the H1 slide (Korea sells stood out in H1). |
 | `33_pretraded_pvwap_market_side` | Pre-traded vs PVWAP, by market, buys and sells | |
@@ -136,6 +137,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `10b_first_exec_market` | First execution vs close, by market, pre-traded orders | Was starting before the close the right call? |
+| `10c_last_cont_market` | Last continuous price vs close, by market, pre-traded orders; same sign as 10b, the mirror of the auction move (41). CAS names use qatt's last trade before the auction | Would the last continuous trade have beaten the close? |
 | `19_first_exec_by_adv` | The same, by ADV% band | |
 | `20_first_exec_by_spread` | The same, by spread quartile | |
 

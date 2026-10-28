@@ -579,7 +579,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "28_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "28_", "28b_", "29_", "30_", "33_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
     "04_auction_vs_trend":       ["40_", "40b_", "40c_"],
@@ -592,7 +592,7 @@ CHART_FOLDERS = {
     "11_statistical_robustness": ["53_"],
     "12_liquidity_buckets":      ["24_", "31_", "54_"],
     "13_market_deep_dives":      ["12_", "12b_", "13_", "55_"],
-    "first_execution":           ["10b_", "19_", "20_"],
+    "first_execution":           ["10b_", "10c_", "19_", "20_"],
     "reversion":                 ["11_", "21_", "22_"],
     "flow_and_algo_choice":      ["15_algo", "23_"],
 }
@@ -3494,6 +3494,11 @@ COST_SAVE_NOTE = "← cost   |   savings →"
 # Every first-execution chart is on pre-traded orders only, and every one of
 # them says so. The measure is undefined for an order that only ever printed
 # in the auction, and a reader has no way to know that from the title.
+LAST_CONT_NOTE = ("pre-traded orders. Positive: the last continuous trade "
+                  "was better for the order than the close (a buy: below it; "
+                  "a sell: above it). The same gap as the auction move, read "
+                  "the other way round. CAS names: qatt's last trade before "
+                  "the auction")
 PRE_TRADED_NOTE = ("orders that traded before the close; an auction-only order has no first execution to measure and is not in here")
 
 
@@ -4752,6 +4757,12 @@ def add_price_measures(df: pd.DataFrame) -> pd.DataFrame:
         if "spread_bps" in df:
             df["auction_move_abs_spreads"] = (df["auction_move_abs_bps"]
                                               / df["spread_bps"].where(df["spread_bps"] > 0))
+        if "is_buy" in df:
+            # The first-execution measure with the last continuous trade in
+            # place of the first fill: + = that trade was better for the
+            # order than the close. The auction move, the other way round.
+            df["last_cont_vs_close_bps"] = first_exec_from_prices(
+                df["close_price"], df["px_cont_last"], df["is_buy"])
         if "wait_cost_bps" in df:
             # The rest of arrival -> close, so the three legs add up exactly.
             df["trend_bps"] = df["wait_cost_bps"] - df["auction_move_bps"]
@@ -5802,6 +5813,11 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["76_pre_reversion_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], "reversion_bps")
     t["77_pre_close_mkt_spreads"] = t_in_spreads(pre, "market", "slip_close")
+    LC = "last_cont_vs_close_bps"
+    if LC in pre and pre[LC].notna().any():
+        t["68b_pre_lastcont_mkt_spreads"] = t_in_spreads(pre, "market", LC)
+        t["74b_pre_lastcont_mkt_side_spr"] = t_in_spreads(
+            pre, ["market", "buy_sell"], LC)
     # Against PVWAP: the close says where the order ended up, PVWAP says
     # whether the trading along the way was good for the window it ran in.
     t["73d_pre_pvwap_side_spr"] = pd.concat([
@@ -6204,6 +6220,19 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           "Pre-traded Analysis, by Side/Market",
                           "first execution vs Close", note=PRE_TRADED_NOTE,
                           ylabel="First execution vs close, in spreads")
+    # The same two charts with the last continuous trade in place of the
+    # first fill: how far the close moved from where the session ended.
+    chart_spreads(t.get("68b_pre_lastcont_mkt_spreads", E), charts,
+                  "10c_last_cont_market.png",
+                  "Last Continuous Price vs Close, by Market",
+                  "last continuous price vs Close", by_notional=True,
+                  note=LAST_CONT_NOTE,
+                  ylabel="Last continuous price vs close, in spreads")
+    chart_spreads_by_side(t.get("74b_pre_lastcont_mkt_side_spr", E), charts,
+                          "28b_pretraded_last_cont_market_side.png",
+                          "Pre-traded Last Continuous Price vs Close, by Side/Market",
+                          "last continuous price vs Close", note=LAST_CONT_NOTE,
+                          ylabel="Last continuous price vs close, in spreads")
     chart_spreads_by_side(t.get("75_pre_close_mkt_side_spr", E), charts,
                           "29_pretraded_close_market_side.png",
                           "Pre-traded Execution vs Close, by Side/Market", "vs Close",
@@ -7027,6 +7056,15 @@ def self_test() -> int:
                       ["d1"] * 4 + ["d2"] * 4, list("ABCDEFGH"))
     check("standard error is clustered by date (two days moving together)",
           np.isclose(st["SE bps (date-clustered)"], 1.0), st)
+    lc = add_price_measures(pd.DataFrame({
+        "is_buy": [True, False], "px_cont_last": [99.0, 99.0],
+        "close_price": [100.0, 100.0]}))
+    check("last continuous vs close: a buy whose last trade was below the "
+          "close is +, a sell -, the mirror of the auction move",
+          np.allclose(lc["last_cont_vs_close_bps"], [100.0, -100.0])
+          and (np.sign(lc["last_cont_vs_close_bps"])
+               == -np.sign(lc["auction_move_bps"])).all(),
+          lc[["last_cont_vs_close_bps", "auction_move_bps"]].to_dict("records"))
     bk = add_price_measures(pd.DataFrame({"close_pr": [0.0, 4.9, 5.0, 30.0]}))
     check("ClosePR buckets: <5 / 5-10 / 30+, and no auction fill is no bucket",
           [str(x) for x in bk["close_pr_bucket"]] == ["nan", "<5%", "5-10%", "30%+"],
