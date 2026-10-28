@@ -5484,9 +5484,10 @@ def build_review_charts(t: dict, charts: Path) -> None:
         ax.set_xticks(x)
         ax.set_xticklabels(dist.index, rotation=30, ha="right")
         _style(ax, xlabel=f"Close vs {VWAP_LABEL} (bps)",
-               ylabel="Share of name-days (%)",
+               ylabel="Share of closing prices (%)",
                title=f"Close vs Last {VWAP_WINDOW_MIN} Min VWAP, Distribution")
-        room = _notes(fig, ["one count per name per day; positive = the close "
+        room = _notes(fig, ["each stock's close counts once per day, however "
+                            "many of our orders traded it; positive = the close "
                             "printed above the VWAP (not side-adjusted)"])
         _save(fig, charts, "43_close_vs_vwap_distribution.png", bottom=room)
     rk = t.get("94_close_vs_vwap_mkt", E)
@@ -5496,8 +5497,9 @@ def build_review_charts(t: dict, charts: Path) -> None:
                    "44_close_vs_vwap_market.png",
                    f"Close vs Last {VWAP_WINDOW_MIN} Min VWAP, by Market",
                    f"Close vs {VWAP_LABEL}, bps (mean, either direction)",
-                   note="unsigned, per name-day: a bigger number is a close more "
-                        "out of line with the trading just before it")
+                   note="unsigned, each stock's close counted once per day: a "
+                        "bigger number is a close more out of line with the "
+                        "trading just before it")
 
     # 7: participation
     chart_spreads(t.get("95a_closepr_auction_move", E), charts,
