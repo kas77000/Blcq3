@@ -596,6 +596,11 @@ CHART_FOLDERS = {
     "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
     "reversion":                 ["11_", "21_", "22_"],
     "flow_and_algo_choice":      ["15_algo", "23_"],
+    # Market focus folders, asked for by name.
+    "hk focus":                  ["90_", "90b_", "90c_", "91a_", "91b_",
+                                  "91c_", "92a_", "92b_", "92c_"],
+    "India focus":               ["95_", "95b_", "95c_", "96a_", "96b_",
+                                  "96c_", "97a_", "97b_", "97c_"],
 }
 
 # Markets that cannot be attributed to a venue. They stay in every TABLE -
@@ -3991,6 +3996,8 @@ AXIS_NAMES = {
     "buy_sell": "Side",
     "month": "Month",
     "India": "India population",
+    "spread_q": "Spread quartile (bps)",
+    "adv_q": "Order size quartile (% of ADV)",
 }
 
 
@@ -4091,9 +4098,11 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                           measure: str, note: str = "", limit: int = 12,
                           unit: str = None, ylabel: str = None,
                           order: list = None, xlabel: str = None,
-                          side_by_side: bool = False) -> None:
+                          side_by_side: bool = False,
+                          panels: list = None) -> None:
     """Markets along the bottom, a Buy panel over a Sell panel, one scale.
     side_by_side puts Buy on the left and Sell on the right instead.
+    panels replaces Buy / Sell with other values of the second index level.
 
     Two panels rather than paired bars in one: colour already means saving
     against cost on these charts, so it cannot also mean Buy against Sell.
@@ -4109,7 +4118,7 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
     if order:
         markets = [m for m in order if m in set(markets)]
     present = set(d.index.get_level_values(1))
-    sides = [x for x in BUY_SELL_ORDER if x in present]
+    sides = [x for x in (panels or BUY_SELL_ORDER) if x in present]
     if not markets or not sides:
         return
     spreads = unit == "spreads"
@@ -4153,8 +4162,10 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
 
 def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
                            note: str = "", all_label: str = "All",
-                           unit: str = None, xlabel: str = "") -> None:
+                           unit: str = None, xlabel: str = "",
+                           panels: list = None) -> None:
     """Several measures on one population: an All panel, then Buy, then Sell.
+    panels replaces All / Buy / Sell with other index values of the tables.
 
     specs is [(measure label, table indexed All / Buy / Sell), ...]. Each bar
     carries its own spread because the measures are not weighted alike -
@@ -4164,7 +4175,7 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
     unit = unit or CHART_UNIT
     spreads = unit == "spreads"
     vcol, lo, hi = _unit_cols(unit)
-    panels = [p for p in ["All"] + BUY_SELL_ORDER
+    panels = [p for p in (panels or ["All"] + BUY_SELL_ORDER)
               if any(tb is not None and not tb.empty and p in tb.index
                      for _, tb in specs)]
     if not panels:
@@ -4517,7 +4528,7 @@ def make_sample(n: int = 2400, seed: int = SEED) -> pd.DataFrame:
         return [f"{a:02d}:{b:02d}:{c:02d}.000" for a, b, c in zip(h, m, sec)]
 
     df = pd.DataFrame({
-        "client": "SAMPLE",
+        "client": rng.choice(sorted(CASH_CLIENTS | SWAP_CLIENTS), n),
         "Trader": rng.choice([f"TRD{i}" for i in range(1, 7)], n),
         "Date": date.strftime("%Y-%m-%d"),
         "Sym": [f"{rng.integers(1, 9999):04d}.{m}" for m in mkt],
@@ -5329,6 +5340,170 @@ def build_review_tables(df: pd.DataFrame, auc: pd.DataFrame, t: dict) -> None:
     t["108_concentration_mkt"] = t_concentration(auc)
     t["_part_df"] = part
 
+# --- market focus: Hong Kong cash against swap, India CAS against non-CAS ------
+# The same three prices on each group: where the order started (first
+# execution), where the continuous session ended (last continuous trade) and
+# where the order finished (average price), each against the close. Then the
+# same three by spread quartile and by ADV% quartile, cut on the market's own
+# orders so both groups sit in the same bands.
+FOCUS_MEASURES = [
+    ("first_exec_vs_close", "first_exec", "First execution vs close"),
+    ("last_cont_vs_close_bps", "last_cont", "Last continuous price vs close"),
+    ("slip_close", "vs_close", "Execution vs close"),
+]
+# Each flow alone, with the measures that mean something for it. Close-only
+# orders start and finish at the close, so first execution is dropped and
+# reversion added. An order with nothing printed in the close is in neither.
+FOCUS_REVERSION = ("reversion_bps", "reversion", "Next open vs close")
+FOCUS_FLOWS = [
+    ("close_only", "co", "b", "Close Only",
+     [FOCUS_MEASURES[1], FOCUS_MEASURES[2], FOCUS_REVERSION]),
+    ("pretraded", "pre", "c", "Pre-traded", FOCUS_MEASURES),
+]
+FOCUS_FLOW_NOTES = {
+    "co": ("close-only: 99.5% or more of the order printed in the close, so its "
+           "execution sits at the close by design. Next open vs close: "
+           "negative means the price came back against us by the next open."),
+    "pre": "pre-traded: part of the order traded before the close.",
+}
+HK_GROUPS = ["Cash", "Swap", "Other"]
+INDIA_GROUPS = ["CAS", "Non-CAS"]
+
+
+def _focus_quartile(v: pd.Series, fmt: str) -> pd.Series:
+    """Quartiles of v cut on the rows given, labelled with their range."""
+    v = pd.to_numeric(v, errors="coerce")
+    ok = v.notna() & (v > 0)
+    if ok.sum() < 8 or v[ok].nunique() < 4:
+        return pd.Series(np.nan, index=v.index)
+    try:
+        _, edges = pd.qcut(v[ok], 4, retbins=True, duplicates="drop")
+    except (ValueError, IndexError):
+        return pd.Series(np.nan, index=v.index)
+    names = [fmt.format(edges[i], edges[i + 1]) for i in range(len(edges) - 1)]
+    return pd.cut(v.where(ok), edges, labels=names, include_lowest=True)
+
+
+def _focus_profile(d: pd.DataFrame, group: str, groups: list) -> pd.DataFrame:
+    """Size of each group, so a chart is never read without its sample."""
+    rows = []
+    for g in groups:
+        x = d[d[group] == g]
+        if x.empty:
+            continue
+        rows.append({
+            group: g, "orders": len(x),
+            "notional (" + CURRENCY + "m)": x["notional"].sum() / 1e6,
+            "% pre-traded (orders)": 100 * float(_flag(x, "pretraded").mean()),
+            "spread bps (wtd)": (wmean(x["spread_bps"], x["notional"], winsor=False)
+                                 if "spread_bps" in x else np.nan),
+            "median %ADV": (float(x["adv_pct"].median())
+                            if "adv_pct" in x else np.nan),
+        })
+    return pd.DataFrame(rows).set_index(group).round(2) if rows else pd.DataFrame()
+
+
+def _focus_tables(d: pd.DataFrame, group: str, groups: list, key: str,
+                  t: dict) -> None:
+    """Measures by group, then by spread and ADV% quartile and group.
+
+    Notional-weighted throughout, first execution included: an India order
+    on a VWAP close has an imputed continuous share of zero, so weighting by
+    the continuous part would drop it.
+    """
+    if d.empty:
+        return
+    d = d.copy()
+    if "spread_bps" in d:
+        d["spread_q"] = _focus_quartile(d["spread_bps"], "{:.1f}-{:.1f}")
+    if "adv_pct" in d:
+        d["adv_q"] = _focus_quartile(d["adv_pct"], "{:.2f}-{:.2f}%")
+    t[f"{key}0_profile"] = _focus_profile(d, group, groups)
+    for value, short, _ in FOCUS_MEASURES:
+        if value not in d or d[value].isna().all():
+            continue
+        t[f"{key}1_{short}"] = t_in_spreads(d, group, value, order=groups)
+        for q in ("spread_q", "adv_q"):
+            if q in d and d[q].notna().any():
+                t[f"{key}2_{short}_{q}"] = t_in_spreads(d, [q, group], value)
+    for flag, fs, _, _, measures in FOCUS_FLOWS:
+        for value, short, _ in measures:
+            if value in d and d[value].notna().any():
+                t[f"{key}3{fs}_{short}"] = t_in_spreads(
+                    d[_flag(d, flag)], group, value, order=groups)
+
+
+def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
+    """Hong Kong: cash against swap, every order in the review. India: CAS
+    names against non-CAS names, from the CAS go-live date on, so both sides
+    come from the same months."""
+    if "market" not in df:
+        return
+    hk = df[df["market"] == "Hong Kong"]
+    if len(hk) and "notional_type" in hk:
+        other = hk[hk["notional_type"] == "Other"]
+        if len(other):
+            accts = (sorted(other["client"].astype(str).str.strip().unique())
+                     if "client" in other else [])
+            warn(f"Hong Kong focus: {len(other):,} orders on accounts that are "
+                 "in neither CASH_CLIENTS nor SWAP_CLIENTS, shown as Other:")
+            log("    " + ", ".join(accts[:10]))
+        _focus_tables(hk, "notional_type", HK_GROUPS, "120_hk", t)
+    elif len(hk):
+        log("  Hong Kong focus skipped: no client account to split cash from swap.")
+    if "cas_name" in df and "date" in df:
+        ind = df[(df["market"] == "India")
+                 & (df["date"] >= pd.Timestamp(AUCTION_FROM["India"]))].copy()
+        known = ind["cas_name"].notna()
+        if (~known).any():
+            log(f"  India focus: {int((~known).sum()):,} orders since the CAS "
+                "went live have no qatt answer, so they are left out.")
+        ind = ind[known]
+        ind["cas_group"] = np.where(ind["cas_name"].astype(bool), "CAS", "Non-CAS")
+        if len(ind):
+            _focus_tables(ind, "cas_group", INDIA_GROUPS, "130_in", t)
+
+
+def build_focus_charts(t: dict, charts: Path) -> None:
+    E = pd.DataFrame()
+    for key, groups, n0, nq, who, note in [
+        ("120_hk", HK_GROUPS, "90", ("91", "92"), "Hong Kong, Cash vs Swap",
+         "Hong Kong orders in the review. Cash or swap from the client "
+         "account."),
+        ("130_in", INDIA_GROUPS, "95", ("96", "97"), "India, CAS vs Non-CAS",
+         "India orders from " + AUCTION_FROM["India"] + ", when the CAS went "
+         "live. CAS names have an AUC or ACB code in qatt that day; non-CAS "
+         "names close on the VWAP," + chr(10) + "so their close is that VWAP."),
+    ]:
+        tag = key.split("_")[1]
+        note = (note + " All measures notional-weighted." + chr(10)
+                + "Last continuous price vs close: " + LAST_CONT_NOTE[0].lower()
+                + LAST_CONT_NOTE[1:] + ".")
+        chart_measures_by_side(
+            [(label, t.get(f"{key}1_{short}", E))
+             for _, short, label in FOCUS_MEASURES],
+            charts, f"{n0}_{tag}_measures.png", who, note=note,
+            xlabel="in spreads", panels=groups)
+        for _, fs, letter, flow, measures in FOCUS_FLOWS:
+            chart_measures_by_side(
+                [(label, t.get(f"{key}3{fs}_{short}", E))
+                 for _, short, label in measures],
+                charts, f"{n0}{letter}_{tag}_{fs}_measures.png",
+                f"{who}, {flow}", note=FOCUS_FLOW_NOTES[fs] + chr(10) + note,
+                xlabel="in spreads", panels=groups)
+        for q, nn in zip(("spread_q", "adv_q"), nq):
+            by = "Spread" if q == "spread_q" else "ADV%"
+            for (_, short, label), letter in zip(FOCUS_MEASURES, "abc"):
+                tab = t.get(f"{key}2_{short}_{q}", E)
+                if tab.empty:
+                    continue
+                order = list(dict.fromkeys(tab.index.get_level_values(0)))
+                chart_spreads_by_side(
+                    tab, charts, f"{nn}{letter}_{tag}_{q}_{short}.png",
+                    f"{who}: {label}, by {by} Quartile", label, note=note,
+                    order=order, panels=groups, ylabel=label + ", in spreads",
+                    side_by_side=True)
+
 
 # --- charts --------------------------------------------------------------------
 
@@ -5870,6 +6045,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
             "skipped.")
 
     build_review_tables(df, auc, t)
+    build_focus_tables(df, t)
     t["_close_df"] = df
     t["_auction_df"] = auc
     return t
@@ -6330,6 +6506,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
                       "31_pretraded_adv_profile.png",
                       "Pre-traded Orders, by ADV%", with_orders=True)
 
+    build_focus_charts(t, charts)
     build_review_charts(t, charts)
 
     # Anything this run did not write is left over from an older version of
@@ -7279,6 +7456,37 @@ def self_test() -> int:
     strategy_profile(df)
     close = choose_close_strategies(df)
     check("close strategies were identified", len(close) > 0, close)
+
+    # Focus folders: HK splits on cash/swap, India on CAS from the go-live
+    # date, and India orders before it or with no qatt answer stay out.
+    rng = np.random.default_rng(5)
+    n = 80
+    foc = pd.DataFrame({
+        "market": ["Hong Kong"] * n + ["India"] * n,
+        "notional_type": ["Cash", "Swap"] * n,
+        "cas_name": [np.nan] * n + [True, False] * (n // 2 - 2) + [np.nan] * 4,
+        # Two known India names before the go-live date: they must drop out.
+        "date": pd.to_datetime(["2026-09-01"] * (2 * n - 6) + ["2026-07-01"] * 2
+                               + ["2026-09-01"] * 4),
+        "notional": rng.uniform(1e5, 1e6, 2 * n),
+        "spread_bps": rng.uniform(1, 20, 2 * n),
+        "adv_pct": rng.uniform(0.1, 10, 2 * n),
+        "first_exec_vs_close": rng.normal(0, 10, 2 * n),
+        "last_cont_vs_close_bps": rng.normal(0, 10, 2 * n),
+        "slip_close": rng.normal(0, 5, 2 * n),
+    })
+    ft = {}
+    build_focus_tables(foc, ft)
+    hk_fe = ft.get("120_hk1_first_exec", pd.DataFrame())
+    in_fe = ft.get("130_in1_first_exec", pd.DataFrame())
+    check("HK focus splits cash and swap",
+          list(hk_fe.index) == ["Cash", "Swap"], list(hk_fe.index))
+    check("India focus splits CAS and non-CAS, post go-live, known names only",
+          list(in_fe.index) == ["CAS", "Non-CAS"]
+          and int(in_fe["orders"].sum()) == n - 6, in_fe.get("orders"))
+    q = ft.get("130_in2_vs_close_adv_q", pd.DataFrame())
+    check("India focus has four ADV quartiles per group",
+          len(q) == 8, len(q))
 
     log("")
     log(f"  {len(failures)} failure(s)")
