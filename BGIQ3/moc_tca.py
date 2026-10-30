@@ -592,15 +592,15 @@ CHART_FOLDERS = {
     "10_signal_vs_noise":        ["50_"],
     "11_statistical_robustness": ["53_"],
     "12_liquidity_buckets":      ["24_", "31_", "54_"],
-    "13_market_deep_dives":      ["12_", "12b_", "13_", "55_"],
+    "13_market_deep_dives":      ["12_", "12b_", "13_", "13b_", "13c_", "55_"],
     "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
     "reversion":                 ["11_", "21_", "22_"],
     "flow_and_algo_choice":      ["15_algo", "23_"],
     # Market focus folders, asked for by name.
     "hk focus":                  ["90_", "90b_", "90c_", "91a_", "91b_",
-                                  "91c_", "92a_", "92b_", "92c_"],
+                                  "91c_", "92a_", "92b_", "92c_", "92d_"],
     "India focus":               ["95_", "95b_", "95c_", "96a_", "96b_",
-                                  "96c_", "97a_", "97b_", "97c_"],
+                                  "96c_", "97a_", "97b_", "97c_", "97d_"],
 }
 
 # Markets that cannot be attributed to a venue. They stay in every TABLE -
@@ -3869,6 +3869,51 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     _save(fig, out, name)
 
 
+def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
+                               name: str) -> None:
+    """Value traded by market for one account type (Cash or Swap) alone.
+
+    The stacked chart answers where the value went; this one answers where
+    each account type's value went, which the stack hides on the small
+    markets. Markets in this type's own order, each with its share of this
+    type's total.
+    """
+    if df.empty or "market" not in df or "notional_type" not in df:
+        return
+    d = drop_unattributable(df)
+    d = d[d["notional_type"] == part]
+    if d.empty:
+        return
+    totals = (d.groupby("market", observed=True)["notional"].sum() / 1e6
+              ).sort_values(ascending=False)
+    totals = totals[totals > 0].head(12)
+    grand = float(d["notional"].sum()) / 1e6
+    color = SERIES[NOTIONAL_TYPE_ORDER.index(part) % len(SERIES)]
+
+    fig, (ax,) = _fig((11.0, 6.0))
+    x = np.arange(len(totals))
+    ax.bar(x, totals.values, width=0.62, color=color, zorder=3,
+           edgecolor=SURFACE, linewidth=1.4)
+    span = max(float(totals.max()), 1.0)
+    ax.set_ylim(0, span * 1.15)
+    for j, v in enumerate(totals.values):
+        ax.text(j, v + span * 0.02,
+                f"{v:,.0f}m  ({100.0 * v / max(grand, 1e-9):.0f}%)"
+                if v >= 1 else f"<1m  ({100.0 * v / max(grand, 1e-9):.0f}%)",
+                va="bottom", ha="center", fontsize=9, color=INK, zorder=5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(list(totals.index), rotation=30, ha="right")
+    ax.grid(axis="y", zorder=0)
+    ax.set_axisbelow(True)
+    _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="Market",
+           title=f"{PERIOD_LABEL} MOC TCA Overview, {part}")
+    ax.text(0.0, -0.30, f"{part} only, by client account: {grand:,.0f}m in all. "
+            f"The percentage is the market's share of the {part.lower()} value.",
+            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
+    fig._deck_scale = 1.0
+    _save(fig, out, name)
+
+
 def chart_spread_relative(t: pd.DataFrame, out: Path,
                           name: str = "16_spread_relative.png",
                           value: str = "vs Close spreads") -> None:
@@ -5371,6 +5416,7 @@ FOCUS_FLOW_NOTES = {
 }
 # (column, name in table keys and chart files): spread quartiles, ADV% bands.
 FOCUS_CUTS = [("spread_q", "spread_q"), ("adv_bucket", "adv")]
+FE_COL = "first_exec_vs_close"
 HK_GROUPS = ["Cash", "Swap", "Other"]
 INDIA_GROUPS = ["CAS", "Non-CAS"]
 
@@ -5409,7 +5455,7 @@ def _focus_profile(d: pd.DataFrame, group: str, groups: list) -> pd.DataFrame:
 
 
 def _focus_tables(d: pd.DataFrame, group: str, groups: list, key: str,
-                  t: dict) -> None:
+                  t: dict, pre_mask: pd.Series = None) -> None:
     """Measures by group, then by spread quartile and by ADV% band, and group.
 
     Spread is cut in quartiles of the market's own orders. Size uses the
@@ -5441,6 +5487,15 @@ def _focus_tables(d: pd.DataFrame, group: str, groups: list, key: str,
             if value in d and d[value].notna().any():
                 t[f"{key}3{fs}_{short}"] = t_in_spreads(
                     d[_flag(d, flag)], group, value, order=groups)
+    # First execution, pre-traded orders alone, by ADV% quartile. Cut on the
+    # pre-traded orders themselves: they are the larger ones, so quartiles of
+    # the whole book would put nearly all of them in the top band.
+    pre = d[pre_mask] if pre_mask is not None else d[_flag(d, "pretraded")]
+    if "adv_pct" in pre and FE_COL in pre and pre[FE_COL].notna().any():
+        pre = pre.assign(adv_q=_focus_quartile(pre["adv_pct"], "{:.2f}-{:.2f}%"))
+        if pre["adv_q"].notna().any():
+            t[f"{key}4_pre_first_exec_adv_q"] = t_in_spreads(pre, ["adv_q", group],
+                                                             FE_COL)
 
 
 def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
@@ -5471,11 +5526,22 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
         ind = ind[known]
         ind["cas_group"] = np.where(ind["cas_name"].astype(bool), "CAS", "Non-CAS")
         if len(ind):
-            _focus_tables(ind, "cas_group", INDIA_GROUPS, "130_in", t)
+            # India reports no close share, so the pre-traded flag never
+            # fires there. An order whose first fill was the close itself
+            # never traded before it; any other first fill means it did.
+            fe = pd.to_numeric(ind.get(FE_COL), errors="coerce")
+            _focus_tables(ind, "cas_group", INDIA_GROUPS, "130_in", t,
+                          pre_mask=fe.notna() & (fe.abs() > 0.01))
 
 
 def build_focus_charts(t: dict, charts: Path) -> None:
     E = pd.DataFrame()
+    PRE_ADV_NOTE = {
+        "120_hk": "pre-traded orders: part of the order traded before the close.",
+        "130_in": ("pre-traded = the first fill was not at the close. India reports "
+                   "no close share, so this is read from the price. Non-CAS names "
+                   "trade through the closing VWAP, so nearly all of them count."),
+    }
     for key, groups, n0, nq, who, note in [
         ("120_hk", HK_GROUPS, "90", ("91", "92"), "Hong Kong, Cash vs Swap",
          "Hong Kong orders in the review. Cash or swap from the client "
@@ -5513,6 +5579,18 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                     f"{who}: {label}, by {by}", label, note=note,
                     order=order, panels=groups, ylabel=label + ", in spreads",
                     side_by_side=True, short_panels=True)
+        tab = t.get(f"{key}4_pre_first_exec_adv_q", E)
+        if not tab.empty:
+            chart_spreads_by_side(
+                tab, charts, f"{nq[1]}d_{tag}_pre_adv_q_first_exec.png",
+                f"{who}, Pre-traded: First execution vs close, by ADV% Quartile",
+                "first execution vs Close",
+                note=PRE_ADV_NOTE[key] + " Quartiles are cut on the pre-traded orders."
+                     + chr(10) + note,
+                order=list(dict.fromkeys(tab.index.get_level_values(0))),
+                panels=groups, ylabel="First execution vs close, in spreads",
+                xlabel="Order size quartile, pre-traded orders (% of ADV)",
+                side_by_side=True, short_panels=True)
 
 
 # --- charts --------------------------------------------------------------------
@@ -6338,6 +6416,9 @@ def build_charts(t: dict, out_dir: Path) -> None:
     close_df = t.get("_close_df")
     if close_df is not None:
         chart_market_notional(close_df, charts)
+        for part, name in [("Cash", "13b_market_notional_cash.png"),
+                           ("Swap", "13c_market_notional_swap.png")]:
+            chart_market_notional_type(close_df, charts, part, name)
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
 
@@ -7495,6 +7576,10 @@ def self_test() -> int:
           list(in_fe.index) == ["CAS", "Non-CAS"]
           and int(in_fe["orders"].sum()) == n - 6, in_fe.get("orders"))
     q = ft.get("130_in2_vs_close_adv", pd.DataFrame())
+    q4 = ft.get("130_in4_pre_first_exec_adv_q", pd.DataFrame())
+    check("India pre-traded first execution has ADV quartiles for CAS and non-CAS",
+          not q4.empty and set(q4.index.get_level_values(1)) == {"CAS", "Non-CAS"},
+          q4.index.tolist() if not q4.empty else "empty")
     check("India focus uses the fixed ADV% bands",
           set(q.index.get_level_values(0)) <= set(ADV_LABELS) and len(q) == 8, len(q))
 

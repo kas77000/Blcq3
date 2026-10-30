@@ -133,6 +133,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `13_market_notional` | Value traded by market, Cash and Swap | Same as the H1 overview. |
+| `13b_market_notional_cash` / `13c_market_notional_swap` | Value traded by market, cash alone and swap alone | Each in its own order, each percentage a share of that account type's total. |
 | `12_monthly` | vs Close by month, excluding India | |
 | `12b_monthly_india` | The same, India only | India changes regime on 3 August. |
 | `55_india_cas` | India before the CAS, then CAS names and non-CAS names after it | CAS names are those with an AUC or ACB code in qatt that day. Needs qatt. Small sample. |
@@ -173,6 +174,7 @@ Hong Kong, every order in the review, split Cash / Swap by client account (`CASH
 | `90c_hk_pre_measures` | Pre-traded orders: first execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | Orders with nothing printed in the close are in neither 90b nor 90c. |
 | `91a`/`91b`/`91c_hk_spread_q_*` | Each of the three by spread quartile, Cash and Swap side by side | Does the gap between Cash and Swap hold in names that trade alike? |
 | `92a`/`92b`/`92c_hk_adv_*` | The same by ADV% band (0-1, 1-3, 3-5, 5-10, 10-25, 25%+) | The same question for order size. Fixed bands, not quartiles: most orders are tiny, so quartiles would put every large order in one band. |
+| `92d_hk_pre_adv_q_first_exec` | Pre-traded only: first execution vs close by ADV% quartile, Cash and Swap | Quartiles cut on the pre-traded orders, so the four bands cover the sizes that trade before the auction. |
 
 ## India focus
 
@@ -185,3 +187,4 @@ India orders from 3 August 2026 (CAS go-live), split CAS / Non-CAS. CAS = the na
 | `95c_in_pre_measures` | Pre-traded: first execution, last continuous price, execution, each vs close | CAS names only in practice: a Non-CAS order cannot be pre-traded. |
 | `96a`/`96b`/`96c_in_spread_q_*` | By spread quartile, CAS and Non-CAS side by side | |
 | `97a`/`97b`/`97c_in_adv_*` | By ADV% band | |
+| `97d_in_pre_adv_q_first_exec` | Pre-traded only: first execution vs close by ADV% quartile, CAS and Non-CAS | India reports no close share, so pre-traded here means the first fill was not at the close. Non-CAS names trade through the closing VWAP, so nearly all of them count. |
