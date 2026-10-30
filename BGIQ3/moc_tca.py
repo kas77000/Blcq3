@@ -4099,10 +4099,12 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                           unit: str = None, ylabel: str = None,
                           order: list = None, xlabel: str = None,
                           side_by_side: bool = False,
-                          panels: list = None) -> None:
+                          panels: list = None, short_panels: bool = False) -> None:
     """Markets along the bottom, a Buy panel over a Sell panel, one scale.
     side_by_side puts Buy on the left and Sell on the right instead.
     panels replaces Buy / Sell with other values of the second index level.
+    short_panels heads each panel with its name alone (Cash, Swap) and puts
+    the title once, above the first panel.
 
     Two panels rather than paired bars in one: colour already means saving
     against cost on these charts, so it cannot also mean Buy against Sell.
@@ -4152,7 +4154,9 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
               else _measure_axis(measure, "in spreads" if spreads else "bps"))
         # Side by side the panels share a scale, so one y label is enough.
         _style(ax, ylabel=yl if not (side_by_side and k) else "",
-               xlabel=xlabel or _axis_name(d.index), title=f"{title}: {side}")
+               xlabel=xlabel or _axis_name(d.index),
+               title=((title + chr(10) if k == 0 else chr(10)) + str(side)
+                      if short_panels else f"{title}: {side}"))
         ax._panel = side
     fig._deck_title = title
     _share_ylim(axes)
@@ -5502,7 +5506,7 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                     tab, charts, f"{nn}{letter}_{tag}_{q}_{short}.png",
                     f"{who}: {label}, by {by} Quartile", label, note=note,
                     order=order, panels=groups, ylabel=label + ", in spreads",
-                    side_by_side=True)
+                    side_by_side=True, short_panels=True)
 
 
 # --- charts --------------------------------------------------------------------

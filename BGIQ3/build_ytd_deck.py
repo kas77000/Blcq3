@@ -212,7 +212,8 @@ class Run:
 
 def num(r, col) -> float:
     try:
-        return float(r[col])
+        v = float(r[col])
+        return 0.0 if abs(v) < 0.005 and col == "spreads" else v
     except (TypeError, ValueError, KeyError):
         return math.nan
 
@@ -265,6 +266,19 @@ def sized(rows, n_min=30):
 def slide(title, b, charts, src, notes, dataset=None, appendix=False):
     return dict(title=title, bullets=[x for x in b if x], charts=charts,
                 src=src, notes=notes, dataset=dataset, appendix=appendix)
+
+
+def talk(say: str, ask: str = "", nxt: str = "") -> str:
+    """Speaker notes: what to say, the caveat if asked, and the bridge to the
+    next slide."""
+    parts = []
+    if say:
+        parts.append("Say: " + say)
+    if ask:
+        parts.append("If asked: " + ask)
+    if nxt:
+        parts.append(nxt)
+    return "\n\n".join(parts)
 
 
 def story(run: Run) -> list[dict]:
@@ -334,47 +348,62 @@ def story(run: Run) -> list[dict]:
                    "result divided by the average spread, the [x bps] under each bar. "
                    "Multiply the two to get bps.", ds_all))
 
+    # From here every slide follows the H1 shape: the first bullet says in
+    # plain words what the chart measures, the next ones say what happened and
+    # what it means. The speaker notes carry a script the sales trader can
+    # read out ("Say:") and the caveat to keep in their pocket ("If asked:").
+    story_points = {}
+
     # --- 3. close only reversion by market -------------------------------------------
     # A close-only order prints at the close by design, so the only test of
     # the price it got is whether that price held overnight.
     rv = sized(run.rows("71_co_reversion_mkt_spreads"))
     allc = run.row("71b_co_reversion_side_spr", "All")
     co_held = allc is not None and not (holds(allc) and num(allc, "spreads") < 0)
-    b, src = [], []
+    b, src, say = [], [], ""
+    b.append("Reversion asks one thing: did the closing price hold the next morning?")
     if allc is not None:
         v = num(allc, "spreads")
-        if v >= 0:
-            b.append(f"The close held overnight: {v:+.2f} spreads by the next open.")
+        if co_held:
+            b.append(f"Overall it held: {v:+.2f} spreads by the next open"
+                     + ("." if v >= 0 else ", within noise."))
+            story_points["co"] = "Close-only orders: the closing price held the next morning."
         else:
-            b.append(f"The close gave back {sp(v)} spreads by the next open"
-                     + (", within noise." if co_held else ". That holds."))
+            b.append(f"Overall it gave back {sp(v)} spreads by the next open.")
+            story_points["co"] = "Close-only orders: the close gave back part of its move overnight."
+        say = (f"Our close-only orders trade at the close, so the question is not the "
+               f"price we got but whether it was a fair price. If our orders had pushed "
+               f"the close, it would bounce back by the next open. Across all markets the "
+               f"move to the next open was {v:+.2f} spreads, "
+               + ("so the close held." if co_held else "so some of it came back."))
         src.append(cite("71b_co_reversion_side_spr", "All", allc))
     if rv:
         k, r = min(rv, key=lambda kr: num(kr[1], "spreads"))
         if num(r, "spreads") < 0:
-            b.append(f"{k} gave back the most, {sp(num(r, 'spreads'))} spreads"
-                     + (". That one holds." if holds(r) else ", but within noise."))
+            b.append(f"{k} moved most, {sp(num(r, 'spreads'))} spreads"
+                     + (", but within noise." if not holds(r) else ". That one is real."))
         src += [cite("71_co_reversion_mkt_spreads", k, r) for k, r in rv]
-    if co_held:
-        b.append("No sign that our close-only orders pushed the close.")
     S.append(slide("Close Only Orders Reversion, by Market", b,
                    ["22_reversion_close_only.png"], src,
-                   "Close-only orders print at the close by design, so execution vs close "
-                   "is zero and says nothing. Reversion is the test: if our order had "
-                   "pushed the close, the price would come back by the next open. "
-                   "Negative = it came back against us. Philippines and other small "
-                   "markets swing on a handful of orders.", ds_co))
+                   talk(say,
+                        "Execution vs close is zero by design for these orders, which is "
+                        "why we use reversion. Small markets such as the Philippines swing "
+                        "on a handful of orders: the whisker shows it.",
+                        "Next: does it look the same for buys and sells?"), ds_co))
 
     # --- 4. close only reversion by side -----------------------------------------------
     rb = run.row("71b_co_reversion_side_spr", "Buy")
     rs = run.row("71b_co_reversion_side_spr", "Sell")
-    b, src = [], []
+    b, src, say = [], [], ""
     if rb is not None and rs is not None:
         vb, vs = num(rb, "spreads"), num(rs, "spreads")
-        b.append(f"Buys {'gained' if vb >= 0 else 'gave back'} {sp(vb)} spreads by the "
-                 f"next open. Sells {'gained' if vs >= 0 else 'gave back'} {sp(vs)}.")
+        b.append(f"Buys {'gained' if vb >= 0 else 'gave back'} {sp(vb)} spreads overnight. "
+                 f"Sells {'gained' if vs >= 0 else 'gave back'} {sp(vs)}.")
         if (vb > 0) != (vs > 0):
-            b.append("Opposite signs mean the market moved overnight, not our orders.")
+            b.append("That is the market moving overnight, not our orders moving the price.")
+            say = ("When buys gain and sells lose at the same time, the whole market moved "
+                   "overnight. If our orders were pushing the close, both sides would give "
+                   "back. They don't.")
         src += [cite("71b_co_reversion_side_spr", "Buy", rb),
                 cite("71b_co_reversion_side_spr", "Sell", rs)]
     ms = sized(run.rows("72_co_reversion_mkt_side_spr", 2))
@@ -382,115 +411,115 @@ def story(run: Run) -> list[dict]:
                  key=lambda kr: num(kr[1], "spreads"))
     if bad:
         (m, s_), r = bad[0]
-        b.append(f"{m} {s_.lower()}s stand out: {sp(num(r, 'spreads'))} spreads back, "
-                 f"about {bps(num(r, 'wtd mean bps'))}.")
+        b.append(f"The one to watch: {m} {s_.lower()}s, {sp(num(r, 'spreads'))} spreads back.")
         src.append(cite("72_co_reversion_mkt_side_spr", f"{m}, {s_}", r))
     S.append(slide("Close Only Orders Reversion, by Side", b,
                    ["25_close_only_reversion_market_side.png"], src,
-                   "If the market rises overnight, buys look good and sells look bad, "
-                   "whatever the algo did. When the two sides move in opposite "
-                   "directions, that is the market. Our own impact would show as a "
-                   "give-back on both sides.", ds_co))
+                   talk(say, "A rising market makes buys look good and sells look bad "
+                        "whatever the algo does.", "Next: how big were we in the auction?"),
+                   ds_co))
 
     # --- 5. close only participation ----------------------------------------------------
     pr = sized(run.rows("81_close_pr_mkt_close_only"), 10)
-    b, src = [], []
+    b, src, say = [], [], ""
     if pr:
         lo = min(pr, key=lambda kr: num(kr[1], "close PR % (mean)"))
         hi = max(pr, key=lambda kr: num(kr[1], "close PR % (mean)"))
-        b.append(f"Our close-only orders were {num(lo[1], 'close PR % (mean)'):.1f}% "
-                 f"({lo[0]}) to {num(hi[1], 'close PR % (mean)'):.1f}% ({hi[0]}) "
-                 f"of the auction.")
+        b.append("Participation is our share of the volume in the closing auction.")
+        b.append(f"Close-only orders averaged {num(lo[1], 'close PR % (mean)'):.1f}% "
+                 f"({lo[0]}) to {num(hi[1], 'close PR % (mean)'):.1f}% ({hi[0]}).")
         if num(hi[1], "close PR % (mean)") < 10 and co_held:
-            b.append("At that size they are unlikely to move the close.")
+            b.append("Too small to move the close, which is why the price held.")
+        say = (f"On average our close-only order was between "
+               f"{num(lo[1], 'close PR % (mean)'):.1f}% and "
+               f"{num(hi[1], 'close PR % (mean)'):.1f}% of the auction. At that size we are "
+               f"a price taker, and the reversion on the last two slides confirms it.")
         src += [f"`81_close_pr_mkt_close_only` [{k}]: mean {num(r, 'close PR % (mean)'):.2f}%, "
                 f"{int(num(r, 'orders')):,} orders" for k, r in pr]
     S.append(slide("Close Only Orders Participation, by Market", b,
                    ["35_close_pr_close_only.png"], src,
-                   "Participation = our shares in the close over the official close auction "
-                   "volume, averaged per order. India (PR): non-CAS names use the order's "
-                   "participation rate.", ds_co))
+                   talk(say, "Participation = our shares in the close over the official "
+                        "close volume, averaged per order. India (PR): non-CAS names use the "
+                        "order's participation rate.",
+                        "Next: the orders that started before the close."), ds_co))
 
     # --- 6. pre-traded by side --------------------------------------------------------
     first = run.row("73a_pre_firstexec_side_spr", "All")
     finish = run.row("73b_pre_close_side_spr", "All")
     rev = run.row("73c_pre_reversion_side_spr", "All")
     early_paid = first is not None and num(first, "spreads") > 0 and holds(first)
-    b, src = [], []
+    b, src, say = [], [], ""
+    b.append("Pre-traded orders start before the auction, then finish in it.")
     if first is not None:
         v = num(first, "spreads")
         b.append(f"Starting early paid: the first fill beat the close by {sp(v)} spreads."
                  if early_paid else
-                 f"The first fill was {sp(v)} spreads {'better' if v > 0 else 'worse'} "
-                 f"than the close" + (", within noise." if not holds(first) else "."))
+                 f"Starting early did not clearly pay: first fill vs close {v:+.2f} spreads.")
+        if early_paid:
+            story_points["pre"] = (f"Pre-traded orders: starting early beat the close by "
+                                   f"{sp(v)} spreads.")
         src.append(cite("73a_pre_firstexec_side_spr", "All", first))
     if finish is not None:
-        v = num(finish, "spreads")
-        b.append(f"The whole order finished {sp(v)} spreads "
-                 f"{'better' if v > 0 else 'worse'} than the close.")
+        v2 = num(finish, "spreads")
+        b.append(f"The whole order finished {sp(v2)} spreads "
+                 f"{'better' if v2 > 0 else 'worse'} than the close.")
         src.append(cite("73b_pre_close_side_spr", "All", finish))
-    rb = run.row("73c_pre_reversion_side_spr", "Buy")
-    rs = run.row("73c_pre_reversion_side_spr", "Sell")
-    if rb is not None and rs is not None and (num(rb, "spreads") > 0) != (num(rs, "spreads") > 0):
-        b.append(f"By the next open buys {num(rb, 'spreads'):+.2f}, sells "
-                 f"{num(rs, 'spreads'):+.2f}: market drift again.")
-        src += [cite("73c_pre_reversion_side_spr", "Buy", rb),
-                cite("73c_pre_reversion_side_spr", "Sell", rs)]
-    elif rev is not None:
-        b.append(f"Overnight the price moved {num(rev, 'spreads'):+.2f} spreads"
-                 + (", within noise." if not holds(rev) else "."))
+        if first is not None:
+            say = (f"Left bar: where the price was when we started, against the close. "
+                   f"{num(first, 'spreads'):+.2f} means our first fill was "
+                   f"{'better' if num(first, 'spreads') > 0 else 'worse'} than waiting for "
+                   f"the close. Middle bar: the whole order, {v2:+.2f}. Right bar: the next "
+                   f"open, which tells us whether the price came back.")
     if rev is not None:
         src.append(cite("73c_pre_reversion_side_spr", "All", rev))
     S.append(slide("Pre-traded Analysis, by Side", b, ["26_pretraded_by_side.png"], src,
-                   "First fill vs close: + means the first fill was better for the order "
-                   "than the close, so starting early helped. Execution vs close: the "
-                   "whole order. Next open: reversion. Positive is a saving.", ds_pre))
+                   talk(say, "Positive is always a saving. Next open on buys and sells "
+                        "moving in opposite directions is market drift.",
+                        "Next: does this hold market by market?"), ds_pre))
 
     # --- 7. pre-traded first fills by side and market ------------------------------------
     fe2 = sized(run.rows("74_pre_firstexec_mkt_side_spr", 2))
-    b, src = [], []
+    b, src, say = [], [], ""
     if fe2:
         def count(side):
             rows = [r for (m, s_), r in fe2 if s_ == side]
             return sum(num(r, "spreads") > 0 for r in rows), len(rows)
         (pb, nb), (ps, ns) = count("Buy"), count("Sell")
-        b.append(f"First fills beat the close in {pb}/{nb} markets for buys, "
-                 f"{ps}/{ns} for sells.")
-        best = {s_: max([(k, r) for k, r in fe2 if k[1] == s_],
-                        key=lambda kr: num(kr[1], "spreads"), default=None)
-                for s_ in ("Buy", "Sell")}
-        if best["Buy"] and best["Sell"]:
-            (mb, _), r1 = best["Buy"]
-            (ms_, _), r2 = best["Sell"]
-            if mb == ms_:
-                b.append(f"{mb} gained most: {num(r1, 'spreads'):+.2f} spreads on buys, "
-                         f"{num(r2, 'spreads'):+.2f} on sells.")
-            else:
-                b.append(f"Best: {mb} buys {num(r1, 'spreads'):+.2f}, "
-                         f"{ms_} sells {num(r2, 'spreads'):+.2f} spreads.")
-            src += [cite("74_pre_firstexec_mkt_side_spr", f"{mb}, Buy", r1),
-                    cite("74_pre_firstexec_mkt_side_spr", f"{ms_}, Sell", r2)]
+        b.append("Was the price better when we started than at the close?")
+        b.append(f"Yes in {pb} of {nb} markets for buys, {ps} of {ns} for sells.")
+        say = (f"Each bar is one market and side. Above zero, our first fill was better "
+               f"than the close: starting early helped. That was true in {pb} of {nb} "
+               f"markets for buys and {ps} of {ns} for sells.")
         worst = min(fe2, key=lambda kr: num(kr[1], "spreads"))
-        if num(worst[1], "spreads") < 0:
+        best = max(fe2, key=lambda kr: num(kr[1], "spreads"))
+        if num(worst[1], "spreads") < 0 and holds(worst[1]):
             (m, s_), r = worst
-            b.append(f"{m} {s_.lower()}s were the exception at {num(r, 'spreads'):+.2f}"
-                     + (", a clear cost." if holds(r) else ", within noise."))
+            b.append(f"The exception is {m} {s_.lower()}s, at {num(r, 'spreads'):+.2f} spreads.")
+            src.append(cite("74_pre_firstexec_mkt_side_spr", f"{m}, {s_}", r))
+        else:
+            (m, s_), r = best
+            b.append(f"{m} {s_.lower()}s gained most, {num(r, 'spreads'):+.2f} spreads.")
             src.append(cite("74_pre_firstexec_mkt_side_spr", f"{m}, {s_}", r))
     S.append(slide("Pre-traded Analysis, by Side/Market", b,
                    ["28_pretraded_first_exec_market_side.png"], src,
-                   "First fill against the close, by market, buys and sells on one scale. "
-                   "Counts use markets with at least 30 orders on that side.", ds_pre))
+                   talk(say, "Counts use markets with at least 30 orders on that side. A "
+                        "whisker crossing zero means that market's result is not "
+                        "distinguishable from zero.",
+                        "Next: did the price come back after we finished?"), ds_pre))
 
     # --- 8. pre-traded reversion by side and market --------------------------------------
     rv2 = sized(run.rows("76_pre_reversion_mkt_side_spr", 2))
-    b, src = [], []
+    b, src, say = [], [], ""
+    b.append("Next open vs close: did the price come back after we finished?")
     bad = sorted([(k, r) for k, r in rv2 if holds(r) and num(r, "spreads") < 0],
                  key=lambda kr: num(kr[1], "spreads"))
     if bad:
         (m, s_), r = bad[0]
-        again = " As in H1." if (m, s_) == ("South Korea", "Sell") else ""
-        b.append(f"{m} {s_.lower()}s gave back {sp(num(r, 'spreads'))} spreads by the "
-                 f"next open.{again}")
+        again = ", as in H1" if (m, s_) == ("South Korea", "Sell") else ""
+        b.append(f"{m} {s_.lower()}s gave back {sp(num(r, 'spreads'))} spreads{again}.")
+        say = (f"{m} {s_.lower()}s are the outlier: the price came back "
+               f"{sp(num(r, 'spreads'))} spreads, about {bps(num(r, 'wtd mean bps'))}, by "
+               f"the next morning.")
         src.append(cite("76_pre_reversion_mkt_side_spr", f"{m}, {s_}", r))
     else:
         b.append("No market and side gave back a clear amount overnight.")
@@ -500,74 +529,78 @@ def story(run: Run) -> list[dict]:
         dn = sum(num(r, "spreads") < 0 for (m, s_), r in rv2 if s_ == "Sell")
         nsell = sum(1 for (m, s_), _ in rv2 if s_ == "Sell")
         if nbuy and nsell and up / nbuy > 0.6 and dn / nsell > 0.6:
-            b.append("Elsewhere buys mostly gained and sells mostly gave back: "
-                     "market drift.")
+            b.append("Elsewhere buys gained and sells lost: that is the market, not us.")
         src.append(f"`76_pre_reversion_mkt_side_spr`: buys positive in {up}/{nbuy}, "
                    f"sells negative in {dn}/{nsell}")
     S.append(slide("Pre-traded Reversion, by Side/Market", b,
                    ["30_pretraded_reversion_market_side.png"], src,
-                   "Negative = the price came back against us by the next open. In H1 "
-                   "Korea sells stood out here. Buys up and sells down across most "
-                   "markets is the market rising overnight, not our impact.", ds_pre))
+                   talk(say, "In H1 Korea sells stood out here too. Buys up and sells down "
+                        "across most markets is the market rising overnight.",
+                        "Next: how big were these orders in the auction?"), ds_pre))
 
     # --- 9. pre-traded participation ------------------------------------------------------
     pp = sized(run.rows("82_close_pr_mkt_pretraded"), 10)
-    b, src = [], []
+    b, src, say = [], [], ""
     if pp:
         hi3 = sorted(pp, key=lambda kr: -num(kr[1], "close PR % (mean)"))[:3]
         top_co = max((num(r, "close PR % (mean)") for _, r in pr), default=math.nan)
-        b.append("Pre-traded orders took a much bigger share of the auction"
-                 + (f", up to {num(hi3[0][1], 'close PR % (mean)'):.0f}%." if hi3 else "."))
+        b.append("Pre-traded orders are bigger, so they take more of the auction.")
         b.append("Highest in " + ", ".join(
-            f"{k} ({num(r, 'close PR % (mean)'):.1f}%)" for k, r in hi3) + ".")
+            f"{k} ({num(r, 'close PR % (mean)'):.0f}%)" for k, r in hi3) + ".")
         if math.isfinite(top_co):
-            b.append(f"Close-only orders never went above {top_co:.0f}%.")
+            b.append(f"Close-only orders never took more than {top_co:.0f}%.")
+        say = ("These are the larger orders, which is why they start early: the auction "
+               "alone cannot absorb them. The more of the auction we are, the more the "
+               "close can move against us, which is the next slide.")
         src += [f"`82_close_pr_mkt_pretraded` [{k}]: mean {num(r, 'close PR % (mean)'):.2f}%, "
                 f"{int(num(r, 'orders')):,} orders" for k, r in pp]
     S.append(slide("Pre-traded Orders | Close participation by market", b,
                    ["36_close_pr_pretraded.png"], src,
-                   "Participation in the close for the part of pre-traded orders that "
-                   "reached the auction, averaged per order. These are the bigger "
-                   "orders, so a bigger share of the auction is expected.", ds_pre))
+                   talk(say, "Participation in the close for the part of the order that "
+                        "reached the auction, averaged per order.",
+                        "Next: did the auction move against these orders?"), ds_pre))
 
     # --- 10. pre-traded auction move by market -------------------------------------------
     # last continuous price vs close, + = the last trade before the auction
     # was better for the order than the close: the close printed against it.
     lc = sized(run.rows("68b_pre_lastcont_mkt_spreads"))
-    b, src = [], []
+    b, src, say = [], [], ""
+    b.append("Auction move: the close against the last trade just before the auction.")
     if lc:
         pos = [(k, r) for k, r in lc if num(r, "spreads") > 0]
-        b.append(f"In {len(pos)}/{len(lc)} markets the close printed worse than the "
-                 f"last trade before it.")
         clear = [k for k, r in pos if holds(r)]
+        b.append(f"For pre-traded orders the close printed worse in {len(pos)} of "
+                 f"{len(lc)} markets.")
         if 0 < len(clear) <= 3:
-            b.append("The gap is clear in " + ", ".join(clear[:-1])
+            b.append("Clearest in " + ", ".join(clear[:-1])
                      + (" and " if len(clear) > 1 else "") + clear[-1] + ".")
         elif clear:
-            b.append(f"The gap is clear in {len(clear)} of them.")
-        lo = min(lc, key=lambda kr: num(kr[1], "spreads"))
-        hi = max(lc, key=lambda kr: num(kr[1], "spreads"))
-        b.append(f"It ran from {num(lo[1], 'spreads'):+.2f} spreads ({lo[0]}) to "
-                 f"{num(hi[1], 'spreads'):+.2f} ({hi[0]}).")
+            b.append(f"The move is clear in {len(clear)} of them.")
+        if len(pos) > len(lc) / 2:
+            story_points["auc"] = "the auction itself moved the close against them."
+        say = ("Above zero means the last trade before the auction was a better price for "
+               "our order than the close. In other words, the auction moved the price "
+               "against us. That is the cost of finishing in the auction rather than in "
+               "continuous trading.")
         src += [cite("68b_pre_lastcont_mkt_spreads", k, r) for k, r in lc]
     S.append(slide("Pre-traded orders | Auction Move by market", b,
                    ["10c_last_cont_market.png"], src,
-                   "Last continuous price vs close. Positive = the last trade before the "
-                   "auction was better for the order than the close, so the auction "
-                   "itself moved the price against it. This is the cost of finishing in "
-                   "the auction rather than in continuous trading.", ds_pre))
+                   talk(say, "This is not the algo's execution: it is how far the auction "
+                        "print sat from the last continuous trade.",
+                        "Next: is it buys, sells or both?"), ds_pre))
 
     # --- 11. pre-traded auction move by side and market -----------------------------------
     lc2 = sized(run.rows("74b_pre_lastcont_mkt_side_spr", 2))
-    b, src = [], []
+    b, src, say = [], [], ""
     if lc2:
         def pos_count(side):
             rows = [r for (m, s_), r in lc2 if s_ == side]
             return sum(num(r, "spreads") > 0 for r in rows), len(rows)
         (pb, nb), (ps, ns) = pos_count("Buy"), pos_count("Sell")
-        b.append(f"Buys paid it in {pb}/{nb} markets, sells in {ps}/{ns}.")
+        b.append(f"Buys paid the auction move in {pb} of {nb} markets. Sells: {ps} of {ns}.")
         if nb and ns and pb / nb > ps / ns + 0.2:
-            b.append("The close tends to print higher, which costs buys and helps sells.")
+            b.append("The close tends to print high: that costs buys and helps sells.")
+            story_points["auc"] = "the auction moved the close against them, mostly on buys."
         worst_b = max([(k, r) for k, r in lc2 if k[1] == "Buy"],
                       key=lambda kr: num(kr[1], "spreads"), default=None)
         if worst_b and holds(worst_b[1]):
@@ -575,176 +608,203 @@ def story(run: Run) -> list[dict]:
             b.append(f"{m} buys paid most: {sp(num(r, 'spreads'))} spreads, "
                      f"about {bps(num(r, 'wtd mean bps'))}.")
             src.append(cite("74b_pre_lastcont_mkt_side_spr", f"{m}, Buy", r))
+        say = ("Split by side, the cost sits mostly on buys. When prices drift up into the "
+               "close, a buyer in the auction pays for it. That points to how much of a "
+               "large buy we leave for the auction.")
         src.append(f"`74b_pre_lastcont_mkt_side_spr`: buys positive {pb}/{nb}, "
                    f"sells positive {ps}/{ns}")
     S.append(slide("Pre-traded orders | Auction Move by Side/Market", b,
                    ["28b_pretraded_last_cont_market_side.png"], src,
-                   "Same measure as the slide before, buys and sells apart. Positive = "
-                   "the close printed against the order. If the close drifts up into "
-                   "the auction, buys pay and sells gain whatever the algo does.", ds_pre))
+                   talk(say, "If the whole market closes higher, buys pay and sells gain "
+                        "whatever the algo does.",
+                        "Next: two markets in more detail, Hong Kong then India."), ds_pre))
 
     # --- 12-15. Hong Kong: cash against swap ------------------------------------------------
     hk_fe = dict(run.rows("120_hk1_first_exec"))
     hk_ex = dict(run.rows("120_hk1_vs_close"))
     hk_pf = dict(run.rows("120_hk0_profile"))
-    b, src = [], []
+    b, src, say = [], [], ""
+    b.append("Same algo, two account types: did cash and swap trade differently?")
     if {"Cash", "Swap"} <= set(hk_ex):
         c, s_ = hk_ex["Cash"], hk_ex["Swap"]
         gap = abs(num(c, "spreads") - num(s_, "spreads"))
         overlap = (num(c, "CI low") <= num(s_, "CI high")
                    and num(s_, "CI low") <= num(c, "CI high"))
-        b.append(f"Cash and swap traded alike: {gap:.2f} spreads apart against the close."
+        b.append(f"No: against the close they finished {gap:.2f} spreads apart, within noise."
                  if overlap else
-                 f"Cash and swap differ by {gap:.2f} spreads against the close.")
+                 f"Yes: against the close they finished {gap:.2f} spreads apart.")
+        if overlap:
+            story_points["hk"] = "Hong Kong: cash and swap traded alike."
         src += [cite("120_hk1_vs_close", g, r) for g, r in hk_ex.items()]
     if {"Cash", "Swap"} <= set(hk_fe):
         fc, fs = num(hk_fe["Cash"], "spreads"), num(hk_fe["Swap"], "spreads")
-        both = fc > 0 and fs > 0
-        b.append((f"First fills beat the close for both: {fc:+.2f} cash, {fs:+.2f} swap."
-                  if both else
-                  f"First fill vs close: {fc:+.2f} cash, {fs:+.2f} swap."))
+        if fc > 0 and fs > 0:
+            b.append(f"Both beat the close at the first fill: {fc:+.2f} cash, {fs:+.2f} swap.")
         src += [cite("120_hk1_first_exec", g, r) for g, r in hk_fe.items()]
     if {"Cash", "Swap"} <= set(hk_pf):
         pc, ps = hk_pf["Cash"], hk_pf["Swap"]
-        b.append(f"Cash: {num(pc, 'notional (USDm)'):,.0f}m over "
-                 f"{int(num(pc, 'orders')):,} orders. Swap: "
-                 f"{num(ps, 'notional (USDm)'):,.0f}m over {int(num(ps, 'orders')):,}.")
+        say = (f"Hong Kong is the one market with real size on both account types: "
+               f"{num(pc, 'notional (USDm)'):,.0f}m cash over {int(num(pc, 'orders')):,} "
+               f"orders, {num(ps, 'notional (USDm)'):,.0f}m swap over "
+               f"{int(num(ps, 'orders')):,}. The question is whether the account type "
+               f"changes the result. Three prices, all against the close: the first fill, "
+               f"the last trade before the auction, and the whole order.")
         src += [f"`120_hk0_profile` [{g}]: {int(num(r, 'orders')):,} orders, "
                 f"{num(r, 'notional (USDm)'):,.1f}m, "
                 f"{num(r, '% pre-traded (orders)'):.0f}% pre-traded"
                 for g, r in hk_pf.items()]
     S.append(slide("Hong Kong Focus: Cash vs Swap", b, ["90_hk_measures.png"], src,
-                   "Every Hong Kong order in the review, split by client account. Three "
-                   "prices against the close: the first fill, the last continuous trade, "
-                   "and the whole order. Positive = better for the order than the close.",
-                   ds_hk))
+                   talk(say, "Cash or swap is read from the client account. Positive = "
+                        "better for the order than the close.",
+                        "Next: the same split for close-only and pre-traded orders."), ds_hk))
 
     co_rev = dict(run.rows("120_hk3co_reversion"))
-    b, src = [], []
+    b, src, say = [], [], ""
     if co_rev:
-        b.append("Close-only orders print at the close. The test is the next open.")
+        b.append("Close-only orders trade at the close, so the test is the next open.")
         parts = []
         for g in ("Cash", "Swap"):
             if g in co_rev:
-                r = co_rev[g]
-                parts.append(f"{g} {num(r, 'spreads'):+.2f}"
-                             + ("" if holds(r) else " (noise)"))
-                src.append(cite("120_hk3co_reversion", g, r))
-        b.append("Next open vs close: " + ", ".join(parts) + " spreads.")
+                v = num(co_rev[g], "spreads")
+                parts.append(f"{g if not parts else g.lower()} "
+                             f"{'gained' if v >= 0 else 'gave back'} {sp(v)}")
+                src.append(cite("120_hk3co_reversion", g, co_rev[g]))
+        b.append(", ".join(parts) + " spreads overnight.")
         gave = [(g, r) for g, r in co_rev.items() if holds(r) and num(r, "spreads") < 0]
-        if not gave:
-            b.append("Neither account shows our orders pushing the close.")
-        else:
+        if gave:
             g, r = gave[0]
-            b.append(f"{g} gave back {sp(num(r, 'spreads'))} spreads"
-                     + (": small, but clear." if num(r, "spreads") > -1 else ", a clear amount."))
+            b.append(f"{g}'s give-back is small but real: worth watching.")
+        else:
+            b.append("Neither account shows our orders pushing the close.")
+        say = ("Same test as slide 4, Hong Kong only. A give-back means the closing price "
+               "did not hold the next morning.")
     S.append(slide("Hong Kong Close Only: Cash vs Swap", b, ["90b_hk_co_measures.png"],
-                   src, "Execution vs close is zero by design for close-only orders. "
-                   "Negative next open = the price came back against us.", ds_hk_co))
+                   src, talk(say, "Execution vs close is zero by design for close-only "
+                             "orders.", "Next: pre-traded Hong Kong orders."), ds_hk_co))
 
     pre_fe = dict(run.rows("120_hk3pre_first_exec"))
     pre_ex = dict(run.rows("120_hk3pre_vs_close"))
-    b, src = [], []
+    b, src, say = [], [], ""
     if {"Cash", "Swap"} <= set(pre_fe):
         fc, fs = num(pre_fe["Cash"], "spreads"), num(pre_fe["Swap"], "spreads")
-        b.append(f"Early starts paid: first fills beat the close by {fc:.2f} cash, "
-                 f"{fs:.2f} swap." if fc > 0 and fs > 0 else
+        b.append(f"Starting early paid on both: {fc:+.2f} cash, {fs:+.2f} swap at the first fill."
+                 if fc > 0 and fs > 0 else
                  f"First fill vs close: {fc:+.2f} cash, {fs:+.2f} swap.")
         src += [cite("120_hk3pre_first_exec", g, r) for g, r in pre_fe.items()]
     if {"Cash", "Swap"} <= set(pre_ex):
         ec, es = num(pre_ex["Cash"], "spreads"), num(pre_ex["Swap"], "spreads")
-        b.append(f"The whole order finished {ec:+.2f} (cash) and {es:+.2f} (swap) "
-                 f"against the close.")
+        b.append(f"Both finished ahead of the close: {ec:+.2f} cash, {es:+.2f} swap."
+                 if ec > 0 and es > 0 else
+                 f"Whole order vs close: {ec:+.2f} cash, {es:+.2f} swap.")
         src += [cite("120_hk3pre_vs_close", g, r) for g, r in pre_ex.items()]
+        say = ("Same three prices as slide 7, Hong Kong only. Starting early helped on both "
+               "account types, and both whole orders finished at or ahead of the close.")
     S.append(slide("Hong Kong Pre-traded: Cash vs Swap", b, ["90c_hk_pre_measures.png"],
-                   src, "Pre-traded Hong Kong orders. Same three prices as the Hong Kong "
-                   "overview. Positive = better for the order than the close.", ds_hk_pre))
+                   src, talk(say, "Positive = better for the order than the close.",
+                             "Next: which Hong Kong orders gain from starting early?"),
+                   ds_hk_pre))
 
     hq = run.rows("120_hk2_first_exec_adv_q", 2)
     hk_large_only = False
-    b, src = [], []
+    b, src, say = [], [], ""
     if hq:
         bands = sorted({k[0] for k, _ in hq}, key=_band_lo)
         top = bands[-1]
+        edge = top.split("-")[0]
         small = [(k, r) for k, r in hq if k[0] != top]
         big = {k[1]: r for k, r in hq if k[0] == top}
-        edge = top.split("-")[0]
         mx = max((abs(num(r, "spreads")) for _, r in small), default=math.nan)
+        if small:
+            b.append(f"Below {edge}% ADV, first fills sat within {mx:.2f} spreads of the close."
+                     if mx < 0.25 else
+                     f"Below {edge}% ADV results were mixed, up to {mx:.2f} spreads either way.")
         if {"Cash", "Swap"} <= set(big):
             c, s_ = num(big["Cash"], "spreads"), num(big["Swap"], "spreads")
-            b.append(f"Above {edge}% ADV, first fills beat the close by {c:.2f} (cash) "
-                     f"and {s_:.2f} (swap)." if c > 0 and s_ > 0 else
-                     f"Above {edge}% ADV, first fill vs close: {c:+.2f} cash, "
-                     f"{s_:+.2f} swap.")
-        if small:
-            b.append(f"Below it they sat within {mx:.2f} spreads of the close."
-                     if mx < 0.25 else
-                     f"Below it results were mixed, up to {mx:.2f} spreads either way.")
-        if {"Cash", "Swap"} <= set(big):
-            hk_large_only = (bool(small) and mx < 0.25
-                             and min(num(r, "spreads") for r in big.values()) > 0.5)
+            b.append(f"Above it, first fills beat the close by {c:.2f} (cash) and {s_:.2f} (swap)."
+                     if c > 0 and s_ > 0 else
+                     f"Above it, first fill vs close: {c:+.2f} cash, {s_:+.2f} swap.")
+            hk_large_only = (bool(small) and mx < 0.25 and min(c, s_) > 0.5)
             if hk_large_only:
-                b.append("Starting early only pays on the larger Hong Kong orders.")
+                b.append("So in Hong Kong, starting early only pays on the larger orders.")
+        say = (f"Orders split into four equal groups by size. The small ones mostly go "
+               f"straight to the auction, so there is nothing to gain by starting early. "
+               f"Above {edge}% of ADV, starting early clearly helped, for cash and swap alike.")
         src += [cite("120_hk2_first_exec_adv_q", f"{k[0]}, {k[1]}", r) for k, r in hq]
     S.append(slide("Hong Kong: First Execution by Order Size", b,
                    ["92a_hk_adv_q_first_exec.png"], src,
-                   "Order size quartiles cut on Hong Kong's own orders, so cash and swap "
-                   "share the bands. Close-only orders sit at zero here by design, so a "
-                   "band with mostly close-only orders reads near zero.", ds_hk))
+                   talk(say, "Quartiles are cut on Hong Kong's own orders, so cash and swap "
+                        "share the bands.", "Next: India and its new closing auction."), ds_hk))
 
     # --- 16-17. India: CAS against non-CAS ----------------------------------------------------
     in_fe = dict(run.rows("130_in1_first_exec"))
     in_lc = dict(run.rows("130_in1_last_cont"))
     in_ex = dict(run.rows("130_in1_vs_close"))
-    b, src = [], []
-    if in_ex:
-        b.append("From 3 August CAS names close in an auction. Others close on a VWAP.")
+    b, src, say = [], [], ""
+    b.append("From 3 August CAS names close in an auction. Others close on a VWAP.")
     if {"CAS", "Non-CAS"} <= set(in_ex):
         c, n = in_ex["CAS"], in_ex["Non-CAS"]
-        b.append((f"CAS orders matched the close ({num(c, 'spreads'):+.2f})."
-                  if not holds(c) else
-                  f"CAS orders finished {num(c, 'spreads'):+.2f} spreads from the close.")
-                 + (f" Non-CAS paid {sp(num(n, 'spreads'))} spreads tracking the VWAP."
-                    if num(n, "spreads") < 0 else
-                    f" Non-CAS beat the VWAP by {sp(num(n, 'spreads'))} spreads."))
+        b.append(f"CAS orders matched the close, at {num(c, 'spreads'):+.2f} spreads."
+                 if not holds(c) else
+                 f"CAS orders finished {num(c, 'spreads'):+.2f} spreads from the close.")
+        b.append(f"Non-CAS orders paid {sp(num(n, 'spreads'))} spreads to track the VWAP."
+                 if num(n, "spreads") < 0 else
+                 f"Non-CAS orders beat the VWAP by {sp(num(n, 'spreads'))} spreads.")
+        story_points["in"] = "India: CAS names now close in an auction, and our orders match it."
+        say = ("Since 3 August, India's F&O names close in a 20-minute auction, like the "
+               "rest of Asia. The other names still close on the VWAP of the last half hour, "
+               "which we have to trade through to match. CAS orders hit the close; non-CAS "
+               "orders pay a little to track the VWAP, as you would expect.")
         src += [cite("130_in1_vs_close", g, r) for g, r in in_ex.items()]
-    if "CAS" in in_lc:
-        r = in_lc["CAS"]
-        b.append(f"In CAS names the close printed {sp(num(r, 'spreads'))} spreads from "
-                 f"the last trade" + (", against us." if num(r, "spreads") > 0 else "."))
-        src.append(cite("130_in1_last_cont", "CAS", r))
     src += [cite("130_in1_first_exec", g, r) for g, r in in_fe.items()]
+    src += [cite("130_in1_last_cont", g, r) for g, r in in_lc.items()]
     S.append(slide("India Focus: CAS vs Non-CAS", b, ["95_in_measures.png"], src,
-                   "India orders from 3 Aug 2026. CAS names have an AUC or ACB code in "
-                   "qatt that day; the others close on the VWAP of the last half hour, "
-                   "so for them 'the close' is that VWAP. CAS spreads are tight "
-                   "(about 2 bps), so a few bps read as many spreads. Under three months "
-                   "of data: a first look. India reports no close share, so CAS orders "
-                   "cannot be split into close-only and pre-traded.", ds_in))
+                   talk(say, "CAS names have an AUC or ACB code in qatt that day. CAS spreads "
+                        "are tight (about 2 bps), so a few bps read as many spreads. Under "
+                        "three months of data: a first look. India reports no close share, "
+                        "so CAS orders cannot be split into close-only and pre-traded.",
+                        "Next: which CAS orders gain from starting early?"), ds_in))
 
     iq = run.rows("130_in2_first_exec_adv_q", 2)
-    b, src = [], []
+    b, src, say = [], [], ""
     if "CAS" in in_fe:
         r = in_fe["CAS"]
-        b.append(f"CAS first fills beat the close by {num(r, 'spreads'):.2f} spreads, "
-                 f"about {abs(num(r, 'wtd mean bps')):.0f} bps."
+        b.append(f"CAS first fills beat the close by {num(r, 'spreads'):.2f} spreads."
                  if num(r, "spreads") > 0 else
-                 f"In CAS names the first fill was {sp(num(r, 'spreads'))} spreads "
-                 f"worse than the close.")
+                 f"CAS first fills were {sp(num(r, 'spreads'))} spreads worse than the close.")
     cas_q = sorted([(k, r) for k, r in iq if k[1] == "CAS"], key=lambda kr: _band_lo(kr[0][0]))
     if cas_q:
         (band, _), r = cas_q[-1]
-        b.append(f"Most of it is the largest orders: {num(r, 'spreads'):+.2f} spreads "
-                 f"above {band.split('-')[0]}% ADV" + ("." if holds(r) else ", within noise."))
+        b.append(f"Almost all of it is orders above {band.split('-')[0]}% ADV: "
+                 f"about {abs(num(r, 'wtd mean bps')):.0f} bps."
+                 if holds(r) else
+                 f"Above {band.split('-')[0]}% ADV: {num(r, 'spreads'):+.2f} spreads, within noise.")
         rest = cas_q[:-1]
         if rest and all(not holds(x) for _, x in rest):
             b.append("Smaller CAS orders show no clear gain from starting early.")
+        say = ("Same pattern as Hong Kong: in CAS names, starting early helps the large "
+               "orders and does little for the small ones.")
         src += [cite("130_in2_first_exec_adv_q", f"{k[0]}, {k[1]}", x) for k, x in iq]
     S.append(slide("India CAS: First Execution by Order Size", b,
                    ["97a_in_adv_q_first_exec.png"], src,
-                   "Order size quartiles cut on India's orders from 3 Aug, so CAS and "
-                   "non-CAS share the bands. Positive = the first fill was better than "
-                   "the close.", ds_in))
+                   talk(say, "Quartiles are cut on India's orders from 3 Aug. CAS spreads "
+                        "are about 2 bps, so a big number in spreads is a smaller one in "
+                        "bps. Under three months of data.", "Next: what we suggest."),
+                   ds_in))
+
+    # --- what we found: the story on one slide, right after the flow split ----------------------
+    if "auc" in story_points:
+        story_points["auc"] = (("But " if "pre" in story_points else "Pre-traded orders: ")
+                               + story_points["auc"])
+        story_points["auc"] = story_points["auc"][0].upper() + story_points["auc"][1:]
+    b = [story_points[k] for k in ("co", "pre", "auc") if k in story_points]
+    if len(b) < 3:
+        b += [story_points[k] for k in ("hk", "in") if k in story_points][:3 - len(b)]
+    S.insert(2, slide(f"{PERIOD} MOC: What We Found", b, [], [],
+                      talk("This is the story in one slide. Close-only orders are small and "
+                           "the close held for them. Larger orders start early, and that "
+                           "helped. The catch is the auction itself, which tends to print "
+                           "against our pre-traded buys. Hong Kong and India follow at the "
+                           "end.", "", "Next: close-only orders.")))
 
     # --- 18. takeaways -----------------------------------------------------------------------
     b = []
@@ -762,10 +822,13 @@ def story(run: Run) -> list[dict]:
         b.append(f"Suggest: in Hong Kong, start early only above "
                  f"{bands[-1].split('-')[0]}% ADV.")
     S.append(slide(f"{PERIOD} MOC: Takeaways", b[:3], [], [],
-                   "DRAFT - agree each line with the desk. Each Suggest: line rests on a "
-                   "slide above: close-only reversion (3-5), pre-traded participation and "
-                   "auction move (9-11), Hong Kong by order size (15). India CAS is under "
-                   "three months old: watch, do not act yet."))
+                   talk("Three changes, each resting on a slide in this deck. Small orders: "
+                        "close-only works, the close held (slides 4-6). Large orders in the "
+                        "markets where we are most of the auction: leave less for the "
+                        "auction, because that is where the close moves against us (10-12). "
+                        "Hong Kong: start early only on the larger orders (16).",
+                        "DRAFT - agree each line with the desk. India CAS is under three "
+                        "months old: watch it, do not act on it yet.", "")))
 
     # --- appendix -------------------------------------------------------------------------
     for title, charts, ds in [
