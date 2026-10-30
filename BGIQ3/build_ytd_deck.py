@@ -282,7 +282,7 @@ def talk(say: str, ask: str = "", nxt: str = "") -> str:
 
 
 def story(run: Run) -> list[dict]:
-    """The slides in the order of the client deck, then the appendix.
+    """The slides in the order of the client deck. No appendix.
 
     The story: what we traded and how (1-2), close-only orders hold at the
     close (3-5), pre-traded orders gain by starting early but the close then
@@ -832,47 +832,6 @@ def story(run: Run) -> list[dict]:
                         "DRAFT - agree each line with the desk. India CAS is under three "
                         "months old: watch it, do not act on it yet.", "")))
 
-    # --- appendix -------------------------------------------------------------------------
-    for title, charts, ds in [
-        ("Appendix: Execution vs Close, by Market", ["15_market_vs_close.png"], ds_all),
-        ("Appendix: Where the Cost Came From", ["40_decomposition_market.png"], ds_auc),
-        ("Appendix: Auction Move and Dislocation, by Market",
-         ["41_auction_move_market.png", "49_dislocation_share_market.png"], ds_auc),
-        ("Appendix: Pre-close Drift", ["42_pre_close_drift_market.png"], ds_auc),
-        ("Appendix: Close vs Last 30 Min VWAP", ["44_close_vs_vwap_market.png"], ds_auc),
-        ("Appendix: Auction Move, by Close Participation",
-         ["45a_closepr_auction_move.png", "51_impact_curve.png"], ds_auc),
-        ("Appendix: Buy vs Sell", ["48_side_gap_market.png", "46_closepr_by_side.png"],
-         ds_auc),
-        ("Appendix: Volatility",
-         ["56_vol_dislocation.png", "57_vol_close_vs_pretraded.png"], ds_auc),
-        ("Appendix: Hong Kong, Last Trade vs Close by Size",
-         ["92b_hk_adv_last_cont.png"], ds_hk),
-        ("Appendix: Hong Kong, Execution vs Close by Size",
-         ["92c_hk_adv_vs_close.png"], ds_hk),
-        ("Appendix: Hong Kong, First Execution by Spread",
-         ["91a_hk_spread_q_first_exec.png"], ds_hk),
-        ("Appendix: Hong Kong, Last Trade vs Close by Spread",
-         ["91b_hk_spread_q_last_cont.png"], ds_hk),
-        ("Appendix: Hong Kong, Execution vs Close by Spread",
-         ["91c_hk_spread_q_vs_close.png"], ds_hk),
-        ("Appendix: India Non-CAS, Close Only", ["95b_in_co_measures.png"], ds_in),
-        ("Appendix: India, Last Trade vs Close by Size",
-         ["97b_in_adv_last_cont.png"], ds_in),
-        ("Appendix: India, Execution vs Close by Size",
-         ["97c_in_adv_vs_close.png"], ds_in),
-        ("Appendix: India, First Execution by Spread",
-         ["96a_in_spread_q_first_exec.png"], ds_in),
-        ("Appendix: India, Last Trade vs Close by Spread",
-         ["96b_in_spread_q_last_cont.png"], ds_in),
-        ("Appendix: India, Execution vs Close by Spread",
-         ["96c_in_spread_q_vs_close.png"], ds_in),
-        ("Appendix: India Close, Before and After CAS", ["55_india_cas.png"], ds_all),
-        ("Appendix: Spread Relative Performance", ["16_spread_relative.png"], ds_all),
-        ("Appendix: Execution vs Close, by ADV% and Spread",
-         ["17_close_by_adv.png", "18_close_by_spread.png"], ds_auc),
-    ]:
-        S.append(slide(title, [], charts, [], "Backup. Show only if asked.", ds, True))
     return S
 
 

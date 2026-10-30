@@ -77,6 +77,7 @@ Output lands in `output/`:
 | `charts/*.png` | every exhibit standalone at 200dpi |
 | `run_log.txt` | sanity report, close-algo selection, all tables, findings |
 | `no_auction_orders.csv` | every order dropped for having no closing auction to reach, with `marketCloseSize` and `fillCloseSize` beside each |
+| `deck_charts/` | only the charts the YTD deck uses, numbered in slide order, plus the newer charts beside the slide they belong with |
 
 **What to check on the target machine:** [docs/WHAT-TO-CHECK.md](docs/WHAT-TO-CHECK.md)
 
@@ -219,13 +220,24 @@ for getting tagging into the extract.
 - The export is **already side-adjusted** — plus is good, minus is bad, on both
   sides. `SIDE_ADJUSTED = True` records that, and the by-side means are then
   printed as a result to explain rather than as a data error.
-- **Short sells keep their own label.** The house code is `SSH` and it is 13%
-  of the book. A short sell is still a sell, so the arithmetic is unchanged,
-  but locate requirements and short-sale rules can change how an order
-  executes — so buys, sells and short sells are reported as three groups
-  (`33_by_side`) rather than two. A side code the script does not know is
-  never silently dropped: it is named, and past half a percent of the book the
-  run stops and asks for it.
+- **Short sells are removed.** The house code is `SSH`. Any order whose
+  `Side` (order file) or `side` (AWS extract, `side_aws` after the join) is
+  `SSH` leaves the study straight after the join, before anything is derived.
+  The run log counts and values them under `SHORT SELLS REMOVED`. Set
+  `EXCLUDE_SHORT_SELLS = False` to keep them; they then report as their own
+  group in `33_by_side`. A side code the script does not know is never
+  silently dropped: it is named, and past half a percent of the book the run
+  stops and asks for it.
+
+## Order types
+
+`bgi_order_types.csv` (columns `OrderId`, `OrderType`) is **required**: the
+run stops with an error if it is missing. It is looked for in the working
+folder, then beside the script; `--order-types` points elsewhere. `OrderId`
+is matched to the order file's `aggrTgtId` as text, so ids such as
+`00110963175ORT01` keep their leading zeros. An order with no row in the file
+is labelled `Unknown`, kept, and counted in the run log. Chart `23b` splits
+close-only and pre-traded by order type.
 
 ## The AWS extract
 

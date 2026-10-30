@@ -1,5 +1,7 @@
 # Charts produced by moc_tca.py
 
+`output/deck_charts/` holds only the charts the YTD deck uses, numbered in slide order, with the newer charts beside the slide they belong with.
+
 Every run writes the charts to `output/charts/<folder>/` and a copy without titles and with larger type to `output/charts_deck/<folder>/`. The folders follow the sales trader's review email (points 1 to 13). Charts that answer none of those points sit in named folders at the end.
 
 ## Conventions on every chart
@@ -89,7 +91,9 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 |---|---|---|
 | `34_close_pr_all` | Average ClosePR per order, by market, all orders | Simple mean per order, not weighted by value. India uses its PR on window orders. |
 | `35_close_pr_close_only` | The same, close-only orders | Same as the H1 slide. |
+| `35b_close_pr_close_only_side` | The same, buys and sells side by side | One scale, markets in the order of 35. |
 | `36_close_pr_pretraded` | The same, pre-traded orders | Same as the H1 slide. |
+| `36b_pretraded_pr_close_cont` | Pre-traded orders: close participation (ClosePR) beside continuous participation (fPR_cont), by market | Two bars, not stacked: they are shares of different volumes (the auction's, and the market's while the order traded before it). |
 | `45a_closepr_auction_move` | Auction move by ClosePR bucket: <5, 5-10, 10-20, 20-30, 30%+ | The participation question. Execution vs close cannot answer it: an auction fill prints at the close, so it is zero by construction. |
 | `45b_closepr_reversion` | Reversion by ClosePR bucket | Did bigger participation leave a move that came back overnight? |
 
@@ -161,6 +165,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `23_flow_split` | Close-only against pre-traded: value, orders, fill, %ADV, % executed in the close | Same as the H1 slide. |
+| `23b_flow_split_order_type` | The same two bars, each stacked by order type (from `bgi_order_types.csv`) | Each segment's % is its share of that bar's value. Unknown = no row in the order-types file. |
 | `15_algo_choice` | Strategies compared inside the same market and size band | Only produced when the scope has two or more close strategies. |
 
 ## hk focus
@@ -187,4 +192,6 @@ India orders from 3 August 2026 (CAS go-live), split CAS / Non-CAS. CAS = the na
 | `95c_in_pre_measures` | Pre-traded: first execution, last continuous price, execution, each vs close | CAS names only in practice: a Non-CAS order cannot be pre-traded. |
 | `96a`/`96b`/`96c_in_spread_q_*` | By spread quartile, CAS and Non-CAS side by side | |
 | `97a`/`97b`/`97c_in_adv_*` | By ADV% band | |
+| `95d_in_cas_flow_measures` | India CAS only: close-only and pre-traded side by side. First execution, last continuous price, execution and next open, each vs close | Split by price: close only = first fill at the close. Order counts and value shares in the footnote. |
 | `97d_in_pre_adv_q_first_exec` | Pre-traded only: first execution vs close by ADV% quartile, CAS and Non-CAS | India reports no close share, so pre-traded here means the first fill was not at the close. Non-CAS names trade through the closing VWAP, so nearly all of them count. |
+| `97e_in_cas_pre_pr_adv` | India CAS, pre-traded: ClosePR beside fPR_cont, by ADV% band | Same reading as 36b. |

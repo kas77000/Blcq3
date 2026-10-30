@@ -147,6 +147,20 @@ AWS_DIR = "data/aws"
 AWS_JOIN_KEY = "aggrTgtId"
 AWS_SUFFIX = "_aws"
 
+# Order types (e.g. Discretionary, Stipulated), from a separate file of two
+# columns, OrderId and OrderType. OrderId is the order file's aggrTgtId.
+# Required: a run without it stops. --order-types points somewhere else.
+# Looked for in the working folder, then beside this script.
+ORDER_TYPES_FILE = "bgi_order_types.csv"
+ORDER_TYPE_UNMATCHED = "Unknown"
+
+# Short sells leave the study. The order file carries the side in "Side" and
+# the AWS extract in "side"; after the join the AWS one is "side_aws" (the
+# two collide on the normalised name). An order is dropped if either says SSH.
+EXCLUDE_SHORT_SELLS = True
+SHORT_SELL_CODE = "SSH"
+SHORT_SELL_COLUMNS = ["Side", "side", "side" + AWS_SUFFIX]
+
 # India has no closing auction in this period - the close is a VWAP of the
 # last half hour - so %CLOSE is reported as 0 there and cannot say whether an
 # order was aimed at the close. What can say it is WHEN the order started.
@@ -299,6 +313,7 @@ COLUMNS = {
     "market_limit":  ["marketLimit", "Market Limit", "OrderType", "Order Type"],
     "arrival_time":  ["arrivalTime", "Arrival Time"],
     "sector":        ["sector", "Sector", "Industry"],
+    "order_type":    ["OrderType"],
 }
 
 REQUIRED = ["strategy", "date", "symbol", "side", "notional", "order_shares",
@@ -586,7 +601,7 @@ CHART_FOLDERS = {
     "04_auction_vs_trend":       ["40_", "40b_", "40c_"],
     "05_pre_close_drift":        ["42_", "42b_"],
     "06_close_vs_last_vwap": ["43_", "44_"],
-    "07_participation":          ["34_", "35_", "36_", "45a_", "45b_"],
+    "07_participation":          ["34_", "35_", "35b_", "36_", "36b_", "45a_", "45b_"],
     "08_regression":             ["51_"],
     "09_normalisation":          ["16_", "17_", "18_", "52_"],
     "10_signal_vs_noise":        ["50_"],
@@ -595,13 +610,35 @@ CHART_FOLDERS = {
     "13_market_deep_dives":      ["12_", "12b_", "13_", "13b_", "13c_", "55_"],
     "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
     "reversion":                 ["11_", "21_", "22_"],
-    "flow_and_algo_choice":      ["15_algo", "23_"],
+    "flow_and_algo_choice":      ["15_algo", "23_", "23b_"],
     # Market focus folders, asked for by name.
     "hk focus":                  ["90_", "90b_", "90c_", "91a_", "91b_",
                                   "91c_", "92a_", "92b_", "92c_", "92d_"],
-    "India focus":               ["95_", "95b_", "95c_", "96a_", "96b_",
-                                  "96c_", "97a_", "97b_", "97c_", "97d_"],
+    "India focus":               ["95_", "95b_", "95c_", "95d_", "96a_", "96b_",
+                                  "96c_", "97a_", "97b_", "97c_", "97d_", "97e_"],
 }
+
+# The deck folder: output/deck_charts holds only the charts the YTD deck
+# uses (build_ytd_deck.py), in slide order, plus the newer charts asked for
+# since, each beside the deck chart it belongs with. Numbered so the folder
+# sorts in presentation order. Keep in step with build_ytd_deck.py.
+DECK_CHARTS_FOLDER = "deck_charts"
+DECK_CHART_ORDER = [
+    "13_market_notional.png", "13b_market_notional_cash.png",
+    "13c_market_notional_swap.png", "24_adv_profile.png",
+    "23_flow_split.png", "23b_flow_split_order_type.png",
+    "22_reversion_close_only.png", "25_close_only_reversion_market_side.png",
+    "35_close_pr_close_only.png", "35b_close_pr_close_only_side.png",
+    "26_pretraded_by_side.png", "28_pretraded_first_exec_market_side.png",
+    "30_pretraded_reversion_market_side.png", "36_close_pr_pretraded.png",
+    "36b_pretraded_pr_close_cont.png", "10c_last_cont_market.png",
+    "28b_pretraded_last_cont_market_side.png",
+    "90_hk_measures.png", "90b_hk_co_measures.png", "90c_hk_pre_measures.png",
+    "92a_hk_adv_first_exec.png", "92d_hk_pre_adv_q_first_exec.png",
+    "95_in_measures.png", "95d_in_cas_flow_measures.png",
+    "97a_in_adv_first_exec.png", "97d_in_pre_adv_q_first_exec.png",
+    "97e_in_cas_pre_pr_adv.png",
+]
 
 # Markets that cannot be attributed to a venue. They stay in every TABLE -
 # the money is real and the totals must still add up - but they come out of
@@ -771,6 +808,100 @@ def read_aws(folder: Path) -> pd.DataFrame:
     log(f"  {len(files)} parquet file(s) -> {len(out):,} rows x "
         f"{len(out.columns)} columns")
     return out
+
+
+def _id_text(s: pd.Series) -> pd.Series:
+    """An order id as clean text, so 12345, 12345.0 and ' 12345' all match."""
+    t = s.astype(str).str.strip()
+    return t.str.replace(r"\.0+$", "", regex=True)
+
+
+def merge_order_types(raw: pd.DataFrame, path: Path) -> pd.DataFrame:
+    """Attach OrderType from the order-types file, OrderId = aggrTgtId.
+
+    A left join: the order file stays the population. An order with no row
+    in the file is labelled Unknown rather than dropped, so totals still add
+    up and the gap is visible on every chart that uses the type.
+    """
+    if path is None or not Path(path).is_file():
+        # The file is part of every run, so its absence is an error, not a
+        # reason to carry on without the order types.
+        raise SystemExit(f"ERROR: order-types file not found at {path}. Put "
+                         f"bgi_order_types.csv there or pass --order-types.")
+    section(f"ORDER TYPES  {path}")
+    try:
+        # As text: ids like 00110963175ORT01 keep their leading zeros.
+        types = pd.read_csv(path, dtype=str)
+    except Exception as exc:                          # pragma: no cover
+        warn(f"could not read {path}: {exc} - order-type charts skipped.")
+        return raw
+    want = {_norm_name(c): c for c in types.columns}
+    if "orderid" not in want or "ordertype" not in want:
+        warn(f"{path} needs columns OrderId and OrderType; it has "
+             f"{', '.join(map(str, types.columns))}. Order-type charts skipped.")
+        return raw
+    if AWS_JOIN_KEY not in raw.columns:
+        warn(f"{AWS_JOIN_KEY} is not in the order file; cannot attach order types.")
+        return raw
+    types = types[[want["orderid"], want["ordertype"]]].copy()
+    types.columns = ["_oid", "OrderType"]
+    types["_oid"] = _id_text(types["_oid"])
+    types["OrderType"] = types["OrderType"].astype(str).str.strip()
+    dupes = types["_oid"].duplicated()
+    if dupes.any():
+        clash = types[types["_oid"].isin(types.loc[dupes, "_oid"])]
+        n_clash = int(clash.groupby("_oid")["OrderType"].nunique().gt(1).sum())
+        warn(f"{int(dupes.sum()):,} repeated OrderId values - keeping the first"
+             + (f"; {n_clash:,} of them carry two different types" if n_clash else ""))
+        types = types.drop_duplicates("_oid", keep="first")
+    out = raw.copy()
+    if "OrderType" in out.columns:
+        warn("the order file already has an OrderType column - the file's "
+             "version replaces it.")
+    out["OrderType"] = _id_text(out[AWS_JOIN_KEY]).map(
+        types.set_index("_oid")["OrderType"])
+    hit = out["OrderType"].notna()
+    log(f"  {len(types):,} order ids in the file; {int(hit.sum()):,} of "
+        f"{len(out):,} orders matched ({100 * hit.mean():.1f}%)")
+    if (~hit).any():
+        log(f"    {int((~hit).sum()):,} unmatched orders are labelled "
+            f"{ORDER_TYPE_UNMATCHED}.")
+    out["OrderType"] = out["OrderType"].fillna(ORDER_TYPE_UNMATCHED)
+    for k, n in out["OrderType"].value_counts().items():
+        log(f"    {k:<20} {n:>8,} orders")
+    return out
+
+
+def drop_short_sells(raw: pd.DataFrame) -> pd.DataFrame:
+    """Remove short-sell orders: Side (order file) or side (AWS) equal to SSH.
+
+    Run on the joined file, before anything else is derived, so no table,
+    chart or filter downstream ever sees them. Counted and valued in the log.
+    """
+    if not EXCLUDE_SHORT_SELLS:
+        return raw
+    cols = [c for c in SHORT_SELL_COLUMNS if c in raw.columns]
+    if not cols:
+        warn("no Side / side column found - short sells cannot be removed.")
+        return raw
+    code = SHORT_SELL_CODE.upper()
+    hit = pd.Series(False, index=raw.index)
+    for c in cols:
+        hit |= raw[c].astype(str).str.strip().str.upper().eq(code)
+    section("SHORT SELLS REMOVED")
+    if not hit.any():
+        log(f"  no {SHORT_SELL_CODE} orders in {', '.join(cols)}")
+        return raw
+    value = ""
+    if "$Mln" in raw:
+        mln = pd.to_numeric(raw.loc[hit, "$Mln"], errors="coerce").sum()
+        value = f", {CURRENCY} {mln:,.1f}m executed"
+    log(f"  {int(hit.sum()):,} of {len(raw):,} orders have side {SHORT_SELL_CODE} "
+        f"in {' / '.join(cols)}{value} - removed")
+    for c in cols:
+        n = int(raw[c].astype(str).str.strip().str.upper().eq(code).sum())
+        log(f"    {c}: {n:,}")
+    return raw[~hit].copy()
 
 
 def merge_aws(raw: pd.DataFrame, folder: Path) -> pd.DataFrame:
@@ -1304,7 +1435,8 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
             df[logical] = _to_num(raw[cols[logical]])
 
     for logical in ["order_id", "client", "trader", "side", "strategy",
-                    "symbol", "cap", "market_limit", "arrival_time", "sector"]:
+                    "symbol", "cap", "market_limit", "arrival_time", "sector",
+                    "order_type"]:
         if logical in cols:
             df[logical] = raw[cols[logical]].astype(str).str.strip()
 
@@ -3263,6 +3395,28 @@ def t_flow_split(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).set_index("flow").round(2) if rows else pd.DataFrame()
 
 
+def t_flow_split_type(df: pd.DataFrame) -> pd.DataFrame:
+    """Close-only and pre-traded, each split by order type: orders, value,
+    and the type's share of that flow's value (so each flow adds to 100)."""
+    if df is None or df.empty or "order_type" not in df:
+        return pd.DataFrame()
+    ncol = "notional (" + CURRENCY + "m)"
+    rows = []
+    for name, flag in (("Close-only", "close_only"), ("Pre-traded", "pretraded")):
+        p = df[_flag(df, flag)]
+        total = float(p["notional"].sum())
+        if p.empty or total <= 0:
+            continue
+        for k, g in p.groupby("order_type"):
+            n = float(g["notional"].sum())
+            rows.append({"flow": name, "order type": k, "orders": len(g),
+                         ncol: n / 1e6, "% of flow notional": 100 * n / total,
+                         "% of flow orders": 100 * len(g) / len(p)})
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).set_index(["flow", "order type"]).round(2)
+
+
 def t_adv_profile(df: pd.DataFrame) -> pd.DataFrame:
     """Orders and value by size against daily volume."""
     if df is None or df.empty or "adv_bucket" not in df:
@@ -3359,6 +3513,50 @@ def t_close_pr_market(df: pd.DataFrame) -> pd.DataFrame:
     return (pd.DataFrame(rows).set_index("market")
             .sort_values("notional (" + CURRENCY + "m)", ascending=False)
             .round(2))
+
+
+def t_pr_pair(df: pd.DataFrame, by: str) -> pd.DataFrame:
+    """Close participation (ClosePR) beside continuous participation
+    (fPR_cont) per group, both a simple mean per order like chart 36.
+
+    Two shares of two different volumes - the auction's, and the market's
+    while the order traded before it - so they sit side by side and are
+    never added up.
+    """
+    need = {"close_pr", "pr_cont", by, "notional"}
+    if df is None or df.empty or not need <= set(df.columns):
+        return pd.DataFrame()
+    rows = []
+    for k, g in df.groupby(by, observed=True):
+        cpr = pd.to_numeric(g["close_pr"], errors="coerce")
+        ipr = pd.to_numeric(g["pr_cont"], errors="coerce")
+        if cpr.notna().sum() == 0 and ipr.notna().sum() == 0:
+            continue
+        rows.append({by: k, "orders": len(g),
+                     "notional (" + CURRENCY + "m)": g["notional"].sum() / 1e6,
+                     "close PR % (mean)": float(cpr.mean()),
+                     "continuous PR % (mean)": float(ipr.mean()),
+                     "orders with close PR": int(cpr.notna().sum()),
+                     "orders with continuous PR": int(ipr.notna().sum()),
+                     "small sample": len(g) < MIN_N_FOR_CI})
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows).set_index(by)
+    if by == "market":
+        out = out.sort_values("notional (" + CURRENCY + "m)", ascending=False)
+    return out.round(2)
+
+
+def t_close_pr_market_side(df: pd.DataFrame) -> pd.DataFrame:
+    """t_close_pr_market for buys and sells apart, indexed (market, side)."""
+    if df is None or df.empty or "buy_sell" not in df:
+        return pd.DataFrame()
+    parts = []
+    for side in BUY_SELL_ORDER:
+        t = t_close_pr_market(df[df["buy_sell"] == side])
+        if not t.empty:
+            parts.append(t.assign(buy_sell=side).set_index("buy_sell", append=True))
+    return pd.concat(parts) if parts else pd.DataFrame()
 
 
 def t_reversion(df: pd.DataFrame, by: str) -> pd.DataFrame:
@@ -4302,6 +4500,101 @@ def chart_close_pr(tables: list, out: Path) -> None:
         _save(fig, out, name, bottom=room)
 
 
+def chart_pr_pair(t: pd.DataFrame, out: Path, name: str, title: str,
+                  xlabel: str, note: str) -> None:
+    """Close and continuous participation, two bars per group, one scale.
+
+    Side by side, not stacked: they are shares of two different volumes and
+    a stack would read as a total that does not exist.
+    """
+    cols = ["close PR % (mean)", "continuous PR % (mean)"]
+    d = _chartable(t)
+    if d.empty or not set(cols) <= set(d.columns):
+        return
+    d = d.head(12)
+    labels = [f"{k} (PR)" if str(k) == "India" else str(k) for k in d.index]
+    x = np.arange(len(d))
+    w = 0.38
+    fig, (ax,) = _fig((11.0, 5.8))
+    top = float(np.nanmax(d[cols].to_numpy(float))) if len(d) else 1.0
+    for i, (col, lab, color) in enumerate([
+            (cols[0], "In the close auction (ClosePR)", SERIES[0]),
+            (cols[1], "Before the auction, in continuous trading (fPR_cont)", SERIES[1])]):
+        vals = d[col].to_numpy(float)
+        pos = x + (i - 0.5) * w
+        ax.bar(pos, np.nan_to_num(vals), width=w, color=color, zorder=3, label=lab)
+        for px, v in zip(pos, vals):
+            if np.isfinite(v):
+                ax.text(px, v + top * 0.015, f"{v:.1f}%", ha="center", va="bottom",
+                        fontsize=7.5, color=INK, zorder=5)
+    ax.set_ylim(0, top * 1.22 if top > 0 else 1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right")
+    ax.legend(frameon=False, loc="upper right", fontsize=8.5)
+    _style(ax, ylabel="Participation, % of volume (mean per order)",
+           xlabel=xlabel, title=title)
+    room = _notes(fig, [note,
+                        "ClosePR: our share of the closing auction's volume. "
+                        "fPR_cont: our share of the market's volume while the order "
+                        "traded before the auction. Two different volumes, so the "
+                        "bars are never added. Simple mean per order."])
+    _save(fig, out, name, bottom=room)
+
+
+def chart_close_pr_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
+                           order: list = None) -> None:
+    """Close participation by market, a Buy panel beside a Sell panel.
+
+    One scale across both, markets in the order of the all-sides chart, so
+    a market's two bars compare by eye. A market with no orders on one side
+    says so rather than leaving a gap that reads as zero.
+    """
+    col = "close PR % (mean)"
+    d = _chartable(t)
+    if d.empty or d.index.nlevels < 2 or col not in d:
+        return
+    present = set(d.index.get_level_values(0))
+    markets = [m for m in (order or []) if m in present] or list(
+        dict.fromkeys(d.index.get_level_values(0)))
+    markets = markets[:12]
+    sides = [x for x in BUY_SELL_ORDER if x in set(d.index.get_level_values(1))]
+    if not markets or not sides:
+        return
+    top = float(d[col].max())
+    fig, axes = plt.subplots(1, len(sides), dpi=DPI, figsize=(8.5 * len(sides), 5.6))
+    axes = np.atleast_1d(axes)
+    fig.patch.set_facecolor(SURFACE)
+    x = np.arange(len(markets))
+    for k, (ax, side) in enumerate(zip(axes, sides)):
+        ax.set_facecolor(SURFACE)
+        vals = [float(d.loc[(m, side), col]) if (m, side) in d.index else np.nan
+                for m in markets]
+        ax.bar(x, np.nan_to_num(vals), width=0.62, color=SERIES[0], zorder=3)
+        ax.set_ylim(0, top * 1.18 if top > 0 else 1.0)
+        for i, v in enumerate(vals):
+            ax.text(i, (0 if np.isnan(v) else v) + top * 0.015,
+                    "no orders" if np.isnan(v) else f"{v:.1f}%", ha="center",
+                    va="bottom", fontsize=8.5,
+                    color=INK_MUTED if np.isnan(v) else INK, zorder=5)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{m} (PR)" if str(m) == "India" else str(m)
+                            for m in markets], rotation=30, ha="right")
+        _style(ax, ylabel="Close participation, % of close auction volume "
+                          "(mean per order)" if k == 0 else "",
+               xlabel="Market", title=(title + chr(10) if k == 0 else chr(10)) + side)
+        ax._panel = side
+    fig._deck_title = title
+    india = "India" in set(map(str, markets))
+    room = _notes(fig, ["ClosePR: our executed quantity as a share of the closing "
+                        "auction's volume, averaged per order, not weighted by "
+                        "value. Close-only orders. Markets in the order of the "
+                        "all-sides chart.",
+                        "India (PR): where the name had no closing auction, the "
+                        "bar uses the participation rate (PR) of the window "
+                        "orders." if india else ""])
+    _save(fig, out, name, bottom=room)
+
+
 def chart_flow_split(t: pd.DataFrame, out: Path,
                      name: str = "23_flow_split.png") -> None:
     """Close-only against pre-traded: the value in each and how it filled."""
@@ -4335,6 +4628,68 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
                         "auction. Pre-traded: part of it traded before. "
                         "Shares are of the two together; %ADV is "
                         "notional-weighted."])
+    _save(fig, out, name, bottom=room)
+
+
+def chart_flow_split_type(t: pd.DataFrame, out: Path,
+                          name: str = "23b_flow_split_order_type.png") -> None:
+    """23_flow_split with each bar stacked by order type.
+
+    Each segment carries its share of that bar's value, so the split inside
+    close-only and inside pre-traded reads directly. Colour here is the order
+    type, the same type the same colour in both bars; Unknown (no row in the
+    order-types file) is grey and last, so a gap in the file is visible.
+    """
+    if t is None or t.empty:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    flows = list(dict.fromkeys(t.index.get_level_values(0)))
+    totals = t.groupby(level=1)[ncol].sum().sort_values(ascending=False)
+    types = [k for k in totals.index if k != ORDER_TYPE_UNMATCHED]
+    if ORDER_TYPE_UNMATCHED in totals.index:
+        types.append(ORDER_TYPE_UNMATCHED)
+    colors = {k: (INK_MUTED if k == ORDER_TYPE_UNMATCHED else SERIES[i % len(SERIES)])
+              for i, k in enumerate(types)}
+    fig, (ax,) = _fig((9.0, 5.6))
+    x = np.arange(len(flows))
+    bottom = np.zeros(len(flows))
+    top = max(float(t.loc[f, ncol].sum()) for f in flows) or 1.0
+    for k in types:
+        vals = np.array([float(t.loc[(f, k), ncol]) if (f, k) in t.index else 0.0
+                         for f in flows])
+        ax.bar(x, vals, bottom=bottom, width=0.55, color=colors[k], zorder=3,
+               label=k, edgecolor=SURFACE, linewidth=1.4)
+        for i, f in enumerate(flows):
+            if (f, k) not in t.index or vals[i] <= 0:
+                continue
+            pct = float(t.loc[(f, k), "% of flow notional"])
+            # Inside the segment when it is tall enough to hold the text.
+            if vals[i] >= top * 0.07:
+                ax.text(i, bottom[i] + vals[i] / 2,
+                        f"{pct:.0f}%  ({vals[i]:,.0f}m)", ha="center",
+                        va="center", fontsize=9, color="white", zorder=5)
+        bottom += vals
+    ticks = []
+    for i, f in enumerate(flows):
+        ax.text(i, bottom[i] + top * 0.02, f"{bottom[i]:,.0f}m", ha="center",
+                va="bottom", fontsize=10, color=INK, zorder=5)
+        small = [f"{k} {float(t.loc[(f, k), '% of flow notional']):.0f}%"
+                 for k in types if (f, k) in t.index
+                 and float(t.loc[(f, k), ncol]) < top * 0.07]
+        n = int(t.loc[f, "orders"].sum())
+        ticks.append(f + chr(10) + f"{n:,} orders"
+                     + (chr(10) + ", ".join(small) if small else ""))
+    ax.set_ylim(0, top * 1.18)
+    ax.set_xticks(x)
+    ax.set_xticklabels(ticks)
+    ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.0),
+              ncol=len(types), fontsize=8.5)
+    _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="",
+           title="Pre-traded vs Close only, by Order Type" + chr(10))
+    room = _notes(fig, ["each segment's % is its share of that bar's value. "
+                        "Order type from bgi_order_types.csv, matched on the "
+                        "order id; " + ORDER_TYPE_UNMATCHED + " = no row in "
+                        "that file."])
     _save(fig, out, name, bottom=room)
 
 
@@ -5419,6 +5774,7 @@ FOCUS_CUTS = [("spread_q", "spread_q"), ("adv_bucket", "adv")]
 FE_COL = "first_exec_vs_close"
 HK_GROUPS = ["Cash", "Swap", "Other"]
 INDIA_GROUPS = ["CAS", "Non-CAS"]
+CAS_FLOWS = ["Close only", "Pre-traded"]
 
 
 def _focus_quartile(v: pd.Series, fmt: str) -> pd.Series:
@@ -5530,8 +5886,28 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
             # fires there. An order whose first fill was the close itself
             # never traded before it; any other first fill means it did.
             fe = pd.to_numeric(ind.get(FE_COL), errors="coerce")
+            pre_in = fe.notna() & (fe.abs() > 0.01)
             _focus_tables(ind, "cas_group", INDIA_GROUPS, "130_in", t,
-                          pre_mask=fe.notna() & (fe.abs() > 0.01))
+                          pre_mask=pre_in)
+            # CAS orders, close-only against pre-traded, read from the price.
+            cas = ind[fe.notna() & ind["cas_group"].eq("CAS")].copy()
+            if len(cas):
+                cas["cas_flow"] = np.where(pre_in[cas.index], "Pre-traded", "Close only")
+                prof = cas.groupby("cas_flow")["notional"].agg(["size", "sum"])
+                prof.columns = ["orders", "notional (" + CURRENCY + "m)"]
+                prof["notional (" + CURRENCY + "m)"] /= 1e6
+                prof["% of notional"] = (100 * prof["notional (" + CURRENCY + "m)"]
+                                         / prof["notional (" + CURRENCY + "m)"].sum())
+                t["130_in6_cas_flow_profile"] = prof.round(2)
+                for value, short, _ in FOCUS_MEASURES + [FOCUS_REVERSION]:
+                    if value in cas and cas[value].notna().any():
+                        t[f"130_in6_cas_flow_{short}"] = t_in_spreads(
+                            cas, "cas_flow", value, order=CAS_FLOWS)
+            cas_pre = ind[pre_in & ind["cas_group"].eq("CAS")]
+            if len(cas_pre) and "adv_pct" in cas_pre:
+                cas_pre = cas_pre.assign(adv_bucket=pd.cut(
+                    cas_pre["adv_pct"], ADV_BUCKETS, labels=ADV_LABELS))
+                t["130_in5_cas_pre_pr_pair_adv"] = t_pr_pair(cas_pre, "adv_bucket")
 
 
 def build_focus_charts(t: dict, charts: Path) -> None:
@@ -5579,6 +5955,30 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                     f"{who}: {label}, by {by}", label, note=note,
                     order=order, panels=groups, ylabel=label + ", in spreads",
                     side_by_side=True, short_panels=True)
+        if key == "130_in":
+            prof = t.get("130_in6_cas_flow_profile", E)
+            sizes = "; ".join(
+                f"{k}: {int(r['orders']):,} orders, {r['% of notional']:.0f}% of value"
+                for k, r in prof.iterrows()) if not prof.empty else ""
+            chart_measures_by_side(
+                [(label, t.get(f"130_in6_cas_flow_{short}", E))
+                 for _, short, label in FOCUS_MEASURES + [FOCUS_REVERSION]],
+                charts, "95d_in_cas_flow_measures.png",
+                "India CAS, Close Only vs Pre-traded",
+                note=("India CAS names from " + AUCTION_FROM["India"] + ". India "
+                      "reports no close share, so the split is read from the price: "
+                      "close only = the first fill was at the close, pre-traded = "
+                      "anywhere else. A close-only order's first fill is the close, "
+                      "so its first execution is zero by definition." + (chr(10) + sizes if sizes else "")
+                      + chr(10) + "Next open vs close: negative = the price came "
+                      "back against us. " + LAST_CONT_NOTE + "."),
+                xlabel="in spreads", panels=CAS_FLOWS)
+            chart_pr_pair(t.get("130_in5_cas_pre_pr_pair_adv", E), charts,
+                          "97e_in_cas_pre_pr_adv.png",
+                          "India CAS, Pre-traded: Close and Continuous Participation",
+                          "Order size (% of ADV)",
+                          "India CAS names from " + AUCTION_FROM["India"] + ", "
+                          "pre-traded orders (first fill not at the close).")
         tab = t.get(f"{key}4_pre_first_exec_adv_q", E)
         if not tab.empty:
             chart_spreads_by_side(
@@ -6053,6 +6453,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     FE, CW = "first_exec_vs_close", "cont_notional"
     t["50_exec_summary"] = t_exec_summary(df[reach])
     t["51_flow_split"] = t_flow_split(df[reach])
+    t["51b_flow_split_type"] = t_flow_split_type(df[reach])
     t["52_adv_profile"] = t_adv_profile(df)
     t["53_pre_adv_profile"] = t_adv_profile(pre)
     # Every performance chart reads one of these. "co" is close-only and
@@ -6127,7 +6528,10 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
         t["80_close_pr_mkt_all"] = t_close_pr_market(with_india)
         t["81_close_pr_mkt_close_only"] = t_close_pr_market(
             with_india[_flag(with_india, "close_only")])
+        t["81b_close_pr_mkt_side_co"] = t_close_pr_market_side(
+            with_india[_flag(with_india, "close_only")])
         t["82_close_pr_mkt_pretraded"] = t_close_pr_market(pre)
+        t["82b_pr_pair_mkt_pretraded"] = t_pr_pair(pre, "market")
     else:
         log("  no ClosePR column in the file - close participation charts "
             "skipped.")
@@ -6474,6 +6878,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # --- the H1 narrative -------------------------------------------------
     # Opens the way Q1 did: where the flow went and how big it was.
     chart_flow_split(t.get("51_flow_split", E), charts)
+    chart_flow_split_type(t.get("51b_flow_split_type", E), charts)
     # Green, at the desk's request - it sits beside the blue-and-red value
     # chart on the summary slide and should not read as a saving.
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
@@ -6593,6 +6998,15 @@ def build_charts(t: dict, out_dir: Path) -> None:
          "Pre-traded Orders | Close participation by market",
          "Close participation, mean per order (%)"),
     ], charts)
+    chart_pr_pair(t.get("82b_pr_pair_mkt_pretraded", E), charts,
+                  "36b_pretraded_pr_close_cont.png",
+                  "Pre-traded Orders | Close and Continuous Participation by Market",
+                  "Market", "pre-traded orders, markets ordered by value traded.")
+    co_pr = t.get("81_close_pr_mkt_close_only")
+    chart_close_pr_by_side(
+        t.get("81b_close_pr_mkt_side_co", E), charts,
+        "35b_close_pr_close_only_side.png", "Close Only Participation, by Side",
+        order=list(_chartable(co_pr).index) if co_pr is not None else None)
     chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
                       "31_pretraded_adv_profile.png",
                       "Pre-traded Orders, by ADV%", with_orders=True)
@@ -6623,6 +7037,34 @@ def build_charts(t: dict, out_dir: Path) -> None:
         for name in stale:
             (charts / name).unlink(missing_ok=True)
             log(f"      {name}")
+
+    copy_deck_charts(charts, out_dir / DECK_CHARTS_FOLDER)
+
+
+def copy_deck_charts(charts: Path, dest: Path) -> None:
+    """Copy the deck's charts into one folder, numbered in slide order.
+
+    Emptied first, so it only ever holds this run's charts. A chart the run
+    did not draw (too few orders, a column missing) is named, not skipped
+    quietly.
+    """
+    import shutil
+    if dest.exists():
+        for old in dest.glob("*.png"):
+            old.unlink()
+    dest.mkdir(parents=True, exist_ok=True)
+    found = {p.name: p for p in charts.rglob("*.png")}
+    missing = []
+    for i, name in enumerate(DECK_CHART_ORDER, start=1):
+        src = found.get(name)
+        if src is None:
+            missing.append(name)
+            continue
+        shutil.copy2(src, dest / f"{i:02d}_{name}")
+    log(f"  deck charts ({len(DECK_CHART_ORDER) - len(missing)} of "
+        f"{len(DECK_CHART_ORDER)}) -> {dest}")
+    if missing:
+        log("    not drawn this run: " + ", ".join(missing))
 
 
 def write_excel(t: dict, out_dir: Path) -> None:
@@ -7544,6 +7986,24 @@ def self_test() -> int:
         check("no unexplained order carries a limit excuse",
               bool(df.loc[unex, "market_limit"].str.lower().ne("limit").all()))
 
+    import tempfile
+    tf = Path(tempfile.mkdtemp()) / "types.csv"
+    pd.DataFrame({"OrderId": [1, 2, 2, 4], "OrderType": ["Discretionary", "Stipulated",
+                                                        "Stipulated", " Stipulated "]}
+                 ).to_csv(tf, index=False)
+    ot = merge_order_types(pd.DataFrame({AWS_JOIN_KEY: ["1", "2.0", "3", " 4"]}), tf)
+    check("order types join on OrderId = aggrTgtId, unmatched = Unknown",
+          list(ot["OrderType"]) == ["Discretionary", "Stipulated",
+                                     ORDER_TYPE_UNMATCHED, "Stipulated"],
+          list(ot["OrderType"]))
+
+    ss = pd.DataFrame({"Side": ["Buy", "SSH", "Sell", " ssh", "Sell"],
+                       "side_aws": [None, None, "SSH", None, "S"],
+                       "$Mln": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    kept = drop_short_sells(ss)
+    check("short sells dropped on Side or AWS side = SSH",
+          list(kept["$Mln"]) == [1.0, 5.0], list(kept["$Mln"]))
+
     strategy_profile(df)
     close = choose_close_strategies(df)
     check("close strategies were identified", len(close) > 0, close)
@@ -7562,9 +8022,13 @@ def self_test() -> int:
         "notional": rng.uniform(1e5, 1e6, 2 * n),
         "spread_bps": rng.uniform(1, 20, 2 * n),
         "adv_pct": rng.uniform(0.1, 10, 2 * n),
-        "first_exec_vs_close": rng.normal(0, 10, 2 * n),
+        # Every fourth order's first fill is the close: close-only by price.
+        "first_exec_vs_close": np.where(np.arange(2 * n) % 4 == 0, 0.0,
+                                        rng.normal(0, 10, 2 * n)),
         "last_cont_vs_close_bps": rng.normal(0, 10, 2 * n),
         "slip_close": rng.normal(0, 5, 2 * n),
+        "close_pr": rng.uniform(0, 20, 2 * n),
+        "pr_cont": rng.uniform(0, 20, 2 * n),
     })
     ft = {}
     build_focus_tables(foc, ft)
@@ -7580,6 +8044,13 @@ def self_test() -> int:
     check("India pre-traded first execution has ADV quartiles for CAS and non-CAS",
           not q4.empty and set(q4.index.get_level_values(1)) == {"CAS", "Non-CAS"},
           q4.index.tolist() if not q4.empty else "empty")
+    cf = ft.get("130_in6_cas_flow_first_exec", pd.DataFrame())
+    check("India CAS splits into close only and pre-traded",
+          not cf.empty and set(cf.index) == set(CAS_FLOWS), cf.index.tolist() if not cf.empty else "empty")
+    pp = ft.get("130_in5_cas_pre_pr_pair_adv", pd.DataFrame())
+    check("India CAS pre-traded participation: close and continuous, by ADV% band",
+          not pp.empty and {"close PR % (mean)", "continuous PR % (mean)"} <= set(pp.columns)
+          and set(pp.index) <= set(ADV_LABELS), pp.shape)
     check("India focus uses the fixed ADV% bands",
           set(q.index.get_level_values(0)) <= set(ADV_LABELS) and len(q) == 8, len(q))
 
@@ -7593,7 +8064,12 @@ def self_test() -> int:
 # ===========================================================================
 
 def run(path: Path, out_dir: Path, sample: bool = False,
-        focus: str = None) -> None:
+        focus: str = None, order_types: Path = None) -> None:
+    order_types = Path(order_types or ORDER_TYPES_FILE)
+    if not order_types.is_file() and not order_types.is_absolute():
+        beside = Path(__file__).resolve().parent / order_types
+        if beside.is_file():
+            order_types = beside
     if sample:
         section("SAMPLE DATA")
         raw = make_sample()
@@ -7601,6 +8077,13 @@ def run(path: Path, out_dir: Path, sample: bool = False,
         sample_path = out_dir / "sample_orders.csv"
         raw.to_csv(sample_path, index=False)
         log(f"  synthetic file written to {sample_path}")
+        # A synthetic order-types file too, so the join and its charts run.
+        rng = np.random.default_rng(SEED + 1)
+        order_types = out_dir / "sample_order_types.csv"
+        pd.DataFrame({"OrderId": raw[AWS_JOIN_KEY],
+                      "OrderType": rng.choice(["Discretionary", "Stipulated"],
+                                              len(raw), p=[0.4, 0.6])}
+                     ).iloc[: int(len(raw) * 0.97)].to_csv(order_types, index=False)
         log("  EVERY NUMBER BELOW IS SYNTHETIC. Nothing here is client data.")
     else:
         raw = read_file(path)
@@ -7608,6 +8091,8 @@ def run(path: Path, out_dir: Path, sample: bool = False,
         log(f"  {len(raw):,} rows x {len(raw.columns)} columns")
 
     raw = merge_aws(raw, Path(AWS_DIR))
+    raw = drop_short_sells(raw)
+    raw = merge_order_types(raw, order_types)
     cols = resolve_columns(raw)
     df = normalise(raw, cols)
     df = filter_cas_eligible(df, out_dir)
@@ -8216,6 +8701,8 @@ def main(argv=None) -> int:
     p.add_argument("--data", type=Path, help="order extract (.csv or .xlsx)")
     p.add_argument("--out", type=Path, default=Path("output"),
                    help="output directory (default: output)")
+    p.add_argument("--order-types", type=Path, dest="order_types", default=None,
+                   help=f"OrderId/OrderType file (default {ORDER_TYPES_FILE})")
     p.add_argument("--probe", action="store_true",
                    help="audit the file and stop")
     p.add_argument("--sample", action="store_true",
@@ -8269,11 +8756,13 @@ def main(argv=None) -> int:
                 p.error("--probe needs --data")
             probe(args.data)
         elif args.sample:
-            run(None, args.out, sample=True, focus=args.focus)
+            run(None, args.out, sample=True, focus=args.focus,
+                order_types=args.order_types)
         else:
             if not args.data:
                 p.error("give --data, --sample or --self-test")
-            run(args.data, args.out, focus=args.focus)
+            run(args.data, args.out, focus=args.focus,
+                order_types=args.order_types)
     finally:
         try:
             args.out.mkdir(parents=True, exist_ok=True)
