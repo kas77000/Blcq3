@@ -3774,6 +3774,20 @@ DECK_FONT_SCALE = 1.45
 DECK_TITLES: dict = {}
 
 
+def _guard(fn, *args, **kwargs):
+    """Draw one chart, or name it in the log if it fails, and carry on."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:                          # pragma: no cover
+        import traceback
+        warn(f"chart step {getattr(fn, '__name__', fn)} failed: "
+             f"{type(exc).__name__}: {exc}")
+        for line in traceback.format_exc().splitlines()[-6:]:
+            log("    " + line)
+        plt.close("all")
+        return None
+
+
 def chart_folder(name: str) -> str:
     """The CHART_FOLDERS folder a chart file belongs in, other/ if none."""
     for folder, prefixes in CHART_FOLDERS.items():
@@ -6822,7 +6836,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
         chart_market_notional(close_df, charts)
         for part, name in [("Cash", "13b_market_notional_cash.png"),
                            ("Swap", "13c_market_notional_swap.png")]:
-            chart_market_notional_type(close_df, charts, part, name)
+            _guard(chart_market_notional_type, close_df, charts, part, name)
     chart_algo_choice(t.get("36_algo_choice", pd.DataFrame()), charts)
     chart_spread_relative(t.get("06b_spreads_market", pd.DataFrame()), charts)
 
@@ -6878,7 +6892,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # --- the H1 narrative -------------------------------------------------
     # Opens the way Q1 did: where the flow went and how big it was.
     chart_flow_split(t.get("51_flow_split", E), charts)
-    chart_flow_split_type(t.get("51b_flow_split_type", E), charts)
+    _guard(chart_flow_split_type, t.get("51b_flow_split_type", E), charts)
     # Green, at the desk's request - it sits beside the blue-and-red value
     # chart on the summary slide and should not read as a saving.
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
@@ -6998,12 +7012,12 @@ def build_charts(t: dict, out_dir: Path) -> None:
          "Pre-traded Orders | Close participation by market",
          "Close participation, mean per order (%)"),
     ], charts)
-    chart_pr_pair(t.get("82b_pr_pair_mkt_pretraded", E), charts,
+    _guard(chart_pr_pair, t.get("82b_pr_pair_mkt_pretraded", E), charts,
                   "36b_pretraded_pr_close_cont.png",
                   "Pre-traded Orders | Close and Continuous Participation by Market",
                   "Market", "pre-traded orders, markets ordered by value traded.")
     co_pr = t.get("81_close_pr_mkt_close_only")
-    chart_close_pr_by_side(
+    _guard(chart_close_pr_by_side,
         t.get("81b_close_pr_mkt_side_co", E), charts,
         "35b_close_pr_close_only_side.png", "Close Only Participation, by Side",
         order=list(_chartable(co_pr).index) if co_pr is not None else None)
@@ -7011,8 +7025,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
                       "31_pretraded_adv_profile.png",
                       "Pre-traded Orders, by ADV%", with_orders=True)
 
-    build_focus_charts(t, charts)
-    build_review_charts(t, charts)
+    _guard(build_focus_charts, t, charts)
+    _guard(build_review_charts, t, charts)
 
     # Anything this run did not write is left over from an older version of
     # the analysis. A retired chart that stays in the folder looks exactly
@@ -7037,8 +7051,6 @@ def build_charts(t: dict, out_dir: Path) -> None:
         for name in stale:
             (charts / name).unlink(missing_ok=True)
             log(f"      {name}")
-
-    copy_deck_charts(charts, out_dir / DECK_CHARTS_FOLDER)
 
 
 def copy_deck_charts(charts: Path, dest: Path) -> None:
@@ -8183,7 +8195,13 @@ def run(path: Path, out_dir: Path, sample: bool = False,
     tables = build_tables(df, close_strats)
     write_excel(tables, out_dir)
     write_excel_unified(tables, out_dir)
-    build_charts(tables, out_dir)
+    try:
+        build_charts(tables, out_dir)
+    finally:
+        # Always, even if a chart failed: the folder then holds what was drawn
+        # and the log names what was not.
+        if _HAS_MPL:
+            copy_deck_charts(out_dir / "charts", out_dir / DECK_CHARTS_FOLDER)
 
     section("TABLES")
     for name, tab in tables.items():
