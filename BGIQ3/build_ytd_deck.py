@@ -704,36 +704,39 @@ def story(run: Run) -> list[dict]:
                              "Next: which Hong Kong orders gain from starting early?"),
                    ds_hk_pre))
 
-    hq = run.rows("120_hk2_first_exec_adv_q", 2)
-    hk_large_only = False
+    hq = run.rows("120_hk2_first_exec_adv", 2)
+    hk_from = pays_from(hq, ("Cash", "Swap"))
+    hk_large_only = hk_from is not None
     b, src, say = [], [], ""
     if hq:
         bands = sorted({k[0] for k, _ in hq}, key=_band_lo)
-        top = bands[-1]
-        edge = top.split("-")[0]
-        small = [(k, r) for k, r in hq if k[0] != top]
-        big = {k[1]: r for k, r in hq if k[0] == top}
-        mx = max((abs(num(r, "spreads")) for _, r in small), default=math.nan)
-        if small:
-            b.append(f"Below {edge}% ADV, first fills sat within {mx:.2f} spreads of the close."
-                     if mx < 0.25 else
-                     f"Below {edge}% ADV results were mixed, up to {mx:.2f} spreads either way.")
-        if {"Cash", "Swap"} <= set(big):
-            c, s_ = num(big["Cash"], "spreads"), num(big["Swap"], "spreads")
-            b.append(f"Above it, first fills beat the close by {c:.2f} (cash) and {s_:.2f} (swap)."
-                     if c > 0 and s_ > 0 else
-                     f"Above it, first fill vs close: {c:+.2f} cash, {s_:+.2f} swap.")
-            hk_large_only = (bool(small) and mx < 0.25 and min(c, s_) > 0.5)
-            if hk_large_only:
-                b.append("So in Hong Kong, starting early only pays on the larger orders.")
-        say = (f"Orders split into four equal groups by size. The small ones mostly go "
-               f"straight to the auction, so there is nothing to gain by starting early. "
-               f"Above {edge}% of ADV, starting early clearly helped, for cash and swap alike.")
-        src += [cite("120_hk2_first_exec_adv_q", f"{k[0]}, {k[1]}", r) for k, r in hq]
+        if hk_from:
+            edge = _band_edge(hk_from)
+            below = [(k, r) for k, r in hq if _band_lo(k[0]) < _band_lo(hk_from)
+                     and not thin(r)]
+            mx = max((abs(num(r, "spreads")) for _, r in below), default=math.nan)
+            if math.isfinite(mx):
+                b.append(f"Below {edge}% ADV, first fills sat within {mx:.2f} spreads "
+                         f"of the close.")
+            b.append(f"From {edge}% ADV up, first fills beat the close for cash and swap.")
+            b.append("So in Hong Kong, starting early only pays on the larger orders.")
+            say = (f"Orders grouped by size, as on the first slide. Small orders mostly go "
+                   f"straight to the auction, so there is nothing to gain by starting "
+                   f"early. From {edge}% of ADV, starting early beat the close in every "
+                   f"band, for cash and swap alike.")
+        else:
+            good = sum(all(num(r, "spreads") > 0 for k, r in hq if k[0] == band)
+                       for band in bands)
+            b.append(f"First fills beat the close in {good} of {len(bands)} size bands.")
+            b.append("No size where starting early clearly pays for both accounts.")
+            say = ("Orders grouped by size, as on the first slide. There is no clear size "
+                   "above which starting early pays for both account types.")
+        src += [cite("120_hk2_first_exec_adv", f"{k[0]}, {k[1]}", r) for k, r in hq]
     S.append(slide("Hong Kong: First Execution by Order Size", b,
-                   ["92a_hk_adv_q_first_exec.png"], src,
-                   talk(say, "Quartiles are cut on Hong Kong's own orders, so cash and swap "
-                        "share the bands.", "Next: India and its new closing auction."), ds_hk))
+                   ["92a_hk_adv_first_exec.png"], src,
+                   talk(say, "Size bands are the deck's usual ADV% bands. A thin band shows "
+                        "as a wide whisker.", "Next: India and its new closing auction."),
+                   ds_hk))
 
     # --- 16-17. India: CAS against non-CAS ----------------------------------------------------
     in_fe = dict(run.rows("130_in1_first_exec"))
@@ -764,31 +767,32 @@ def story(run: Run) -> list[dict]:
                         "so CAS orders cannot be split into close-only and pre-traded.",
                         "Next: which CAS orders gain from starting early?"), ds_in))
 
-    iq = run.rows("130_in2_first_exec_adv_q", 2)
+    iq = run.rows("130_in2_first_exec_adv", 2)
+    in_from = pays_from(iq, ("CAS",))
     b, src, say = [], [], ""
     if "CAS" in in_fe:
         r = in_fe["CAS"]
         b.append(f"CAS first fills beat the close by {num(r, 'spreads'):.2f} spreads."
                  if num(r, "spreads") > 0 else
                  f"CAS first fills were {sp(num(r, 'spreads'))} spreads worse than the close.")
-    cas_q = sorted([(k, r) for k, r in iq if k[1] == "CAS"], key=lambda kr: _band_lo(kr[0][0]))
-    if cas_q:
-        (band, _), r = cas_q[-1]
-        b.append(f"Almost all of it is orders above {band.split('-')[0]}% ADV: "
-                 f"about {abs(num(r, 'wtd mean bps')):.0f} bps."
-                 if holds(r) else
-                 f"Above {band.split('-')[0]}% ADV: {num(r, 'spreads'):+.2f} spreads, within noise.")
-        rest = cas_q[:-1]
-        if rest and all(not holds(x) for _, x in rest):
-            b.append("Smaller CAS orders show no clear gain from starting early.")
-        say = ("Same pattern as Hong Kong: in CAS names, starting early helps the large "
-               "orders and does little for the small ones.")
-        src += [cite("130_in2_first_exec_adv_q", f"{k[0]}, {k[1]}", x) for k, x in iq]
+    if iq:
+        if in_from:
+            b.append(f"The gain comes from orders of {_band_edge(in_from)}% ADV and up.")
+            if _band_lo(in_from) > 0:
+                b.append("Smaller CAS orders show no clear gain from starting early.")
+            say = ("Same pattern as Hong Kong: in CAS names, starting early helps the large "
+                   "orders and does little for the small ones.")
+        else:
+            b.append("No size band shows a clear gain on its own yet.")
+            say = ("In CAS names no size band stands out yet. Under three months of data, "
+                   "so this is a first look.")
+        src += [cite("130_in2_first_exec_adv", f"{k[0]}, {k[1]}", x) for k, x in iq]
     S.append(slide("India CAS: First Execution by Order Size", b,
-                   ["97a_in_adv_q_first_exec.png"], src,
-                   talk(say, "Quartiles are cut on India's orders from 3 Aug. CAS spreads "
-                        "are about 2 bps, so a big number in spreads is a smaller one in "
-                        "bps. Under three months of data.", "Next: what we suggest."),
+                   ["97a_in_adv_first_exec.png"], src,
+                   talk(say, "Size bands are the deck's usual ADV% bands, India orders from "
+                        "3 Aug. CAS spreads are about 2 bps, so a big number in spreads is a "
+                        "smaller one in bps. Under three months of data.",
+                        "Next: what we suggest."),
                    ds_in))
 
     # --- what we found: the story on one slide, right after the flow split ----------------------
@@ -817,10 +821,8 @@ def story(run: Run) -> list[dict]:
         if hit:
             b.append(f"Suggest: in {' and '.join(hit)}, cap our share of the "
                      f"closing auction.")
-    if hq and hk_large_only:
-        bands = sorted({k[0] for k, _ in hq}, key=_band_lo)
-        b.append(f"Suggest: in Hong Kong, start early only above "
-                 f"{bands[-1].split('-')[0]}% ADV.")
+    if hk_large_only:
+        b.append(f"Suggest: in Hong Kong, start early only from {_band_edge(hk_from)}% ADV.")
     S.append(slide(f"{PERIOD} MOC: Takeaways", b[:3], [], [],
                    talk("Three changes, each resting on a slide in this deck. Small orders: "
                         "close-only works, the close held (slides 4-6). Large orders in the "
@@ -845,9 +847,9 @@ def story(run: Run) -> list[dict]:
         ("Appendix: Volatility",
          ["56_vol_dislocation.png", "57_vol_close_vs_pretraded.png"], ds_auc),
         ("Appendix: Hong Kong, Last Trade vs Close by Size",
-         ["92b_hk_adv_q_last_cont.png"], ds_hk),
+         ["92b_hk_adv_last_cont.png"], ds_hk),
         ("Appendix: Hong Kong, Execution vs Close by Size",
-         ["92c_hk_adv_q_vs_close.png"], ds_hk),
+         ["92c_hk_adv_vs_close.png"], ds_hk),
         ("Appendix: Hong Kong, First Execution by Spread",
          ["91a_hk_spread_q_first_exec.png"], ds_hk),
         ("Appendix: Hong Kong, Last Trade vs Close by Spread",
@@ -856,9 +858,9 @@ def story(run: Run) -> list[dict]:
          ["91c_hk_spread_q_vs_close.png"], ds_hk),
         ("Appendix: India Non-CAS, Close Only", ["95b_in_co_measures.png"], ds_in),
         ("Appendix: India, Last Trade vs Close by Size",
-         ["97b_in_adv_q_last_cont.png"], ds_in),
+         ["97b_in_adv_last_cont.png"], ds_in),
         ("Appendix: India, Execution vs Close by Size",
-         ["97c_in_adv_q_vs_close.png"], ds_in),
+         ["97c_in_adv_vs_close.png"], ds_in),
         ("Appendix: India, First Execution by Spread",
          ["96a_in_spread_q_first_exec.png"], ds_in),
         ("Appendix: India, Last Trade vs Close by Spread",
@@ -874,12 +876,39 @@ def story(run: Run) -> list[dict]:
     return S
 
 
+def _band_edge(label) -> str:
+    """The lower edge of a band label, as text: '1-3%' -> '1', '25%+' -> '25'."""
+    return str(label).split("-")[0].rstrip("%+")
+
+
 def _band_lo(label) -> float:
-    """The lower edge of a quartile label such as '0.32-28.11%'."""
     try:
-        return float(str(label).split("-")[0].rstrip("%"))
+        return float(_band_edge(label))
     except ValueError:
         return math.inf
+
+
+def pays_from(rows, groups) -> str | None:
+    """The smallest size band from which starting early paid in every band
+    above it: each group's first fill beat the close, and at least one of
+    them clearly. Bands where a group is too thin to read are skipped. None if no
+    such band, or if it is the smallest one (then size does not matter)."""
+    by_band: dict = {}
+    for (band, g), r in rows:
+        if g in groups and not thin(r):
+            by_band.setdefault(band, {})[g] = r
+    # A band is read only where every group has enough orders in it.
+    bands = sorted((b for b in by_band if set(groups) <= set(by_band[b])), key=_band_lo)
+    def pays(band):
+        rs = by_band[band]
+        return (all(num(r, "spreads") > 0 for r in rs.values())
+                and any(holds(r) for r in rs.values()))
+    start = None
+    for band in reversed(bands):
+        if not pays(band):
+            break
+        start = band
+    return start if start is not None and start != bands[0] else None
 
 
 # ===========================================================================

@@ -3997,7 +3997,6 @@ AXIS_NAMES = {
     "month": "Month",
     "India": "India population",
     "spread_q": "Spread quartile (bps)",
-    "adv_q": "Order size quartile (% of ADV)",
 }
 
 
@@ -5370,6 +5369,8 @@ FOCUS_FLOW_NOTES = {
            "negative means the price came back against us by the next open."),
     "pre": "pre-traded: part of the order traded before the close.",
 }
+# (column, name in table keys and chart files): spread quartiles, ADV% bands.
+FOCUS_CUTS = [("spread_q", "spread_q"), ("adv_bucket", "adv")]
 HK_GROUPS = ["Cash", "Swap", "Other"]
 INDIA_GROUPS = ["CAS", "Non-CAS"]
 
@@ -5409,7 +5410,12 @@ def _focus_profile(d: pd.DataFrame, group: str, groups: list) -> pd.DataFrame:
 
 def _focus_tables(d: pd.DataFrame, group: str, groups: list, key: str,
                   t: dict) -> None:
-    """Measures by group, then by spread and ADV% quartile and group.
+    """Measures by group, then by spread quartile and by ADV% band, and group.
+
+    Spread is cut in quartiles of the market's own orders. Size uses the
+    book's fixed ADV% bands instead: most orders are tiny, so size quartiles
+    put three bands under a third of a percent and every large order in the
+    fourth, which hides the range where the result changes.
 
     Notional-weighted throughout, first execution included: an India order
     on a VWAP close has an imputed continuous share of zero, so weighting by
@@ -5421,15 +5427,15 @@ def _focus_tables(d: pd.DataFrame, group: str, groups: list, key: str,
     if "spread_bps" in d:
         d["spread_q"] = _focus_quartile(d["spread_bps"], "{:.1f}-{:.1f}")
     if "adv_pct" in d:
-        d["adv_q"] = _focus_quartile(d["adv_pct"], "{:.2f}-{:.2f}%")
+        d["adv_bucket"] = pd.cut(d["adv_pct"], ADV_BUCKETS, labels=ADV_LABELS)
     t[f"{key}0_profile"] = _focus_profile(d, group, groups)
     for value, short, _ in FOCUS_MEASURES:
         if value not in d or d[value].isna().all():
             continue
         t[f"{key}1_{short}"] = t_in_spreads(d, group, value, order=groups)
-        for q in ("spread_q", "adv_q"):
+        for q, qk in FOCUS_CUTS:
             if q in d and d[q].notna().any():
-                t[f"{key}2_{short}_{q}"] = t_in_spreads(d, [q, group], value)
+                t[f"{key}2_{short}_{qk}"] = t_in_spreads(d, [q, group], value)
     for flag, fs, _, _, measures in FOCUS_FLOWS:
         for value, short, _ in measures:
             if value in d and d[value].notna().any():
@@ -5495,16 +5501,16 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                 charts, f"{n0}{letter}_{tag}_{fs}_measures.png",
                 f"{who}, {flow}", note=FOCUS_FLOW_NOTES[fs] + chr(10) + note,
                 xlabel="in spreads", panels=groups)
-        for q, nn in zip(("spread_q", "adv_q"), nq):
-            by = "Spread" if q == "spread_q" else "ADV%"
+        for (_, qk), nn in zip(FOCUS_CUTS, nq):
+            by = "Spread Quartile" if qk == "spread_q" else "ADV%"
             for (_, short, label), letter in zip(FOCUS_MEASURES, "abc"):
-                tab = t.get(f"{key}2_{short}_{q}", E)
+                tab = t.get(f"{key}2_{short}_{qk}", E)
                 if tab.empty:
                     continue
                 order = list(dict.fromkeys(tab.index.get_level_values(0)))
                 chart_spreads_by_side(
-                    tab, charts, f"{nn}{letter}_{tag}_{q}_{short}.png",
-                    f"{who}: {label}, by {by} Quartile", label, note=note,
+                    tab, charts, f"{nn}{letter}_{tag}_{qk}_{short}.png",
+                    f"{who}: {label}, by {by}", label, note=note,
                     order=order, panels=groups, ylabel=label + ", in spreads",
                     side_by_side=True, short_panels=True)
 
@@ -7488,9 +7494,9 @@ def self_test() -> int:
     check("India focus splits CAS and non-CAS, post go-live, known names only",
           list(in_fe.index) == ["CAS", "Non-CAS"]
           and int(in_fe["orders"].sum()) == n - 6, in_fe.get("orders"))
-    q = ft.get("130_in2_vs_close_adv_q", pd.DataFrame())
-    check("India focus has four ADV quartiles per group",
-          len(q) == 8, len(q))
+    q = ft.get("130_in2_vs_close_adv", pd.DataFrame())
+    check("India focus uses the fixed ADV% bands",
+          set(q.index.get_level_values(0)) <= set(ADV_LABELS) and len(q) == 8, len(q))
 
     log("")
     log(f"  {len(failures)} failure(s)")

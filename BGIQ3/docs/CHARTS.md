@@ -164,7 +164,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 
 ## hk focus
 
-Hong Kong, every order in the review, split Cash / Swap by client account (`CASH_CLIENTS`, `SWAP_CLIENTS`). An HK account in neither list shows as a third panel, Other, and the run log names it. Quartiles are cut on Hong Kong's own orders, so Cash and Swap sit in the same bands. Everything is notional-weighted. Tables `120_hk*` in `tables.xlsx`, with `120_hk0_profile` giving orders, value, % pre-traded, spread and median %ADV per group.
+Hong Kong, every order in the review, split Cash / Swap by client account (`CASH_CLIENTS`, `SWAP_CLIENTS`). An HK account in neither list shows as a third panel, Other, and the run log names it. Spread quartiles are cut on Hong Kong's own orders, so Cash and Swap sit in the same bands; size uses the fixed ADV% bands. Everything is notional-weighted. Tables `120_hk*` in `tables.xlsx`, with `120_hk0_profile` giving orders, value, % pre-traded, spread and median %ADV per group.
 
 | Chart | What it shows | How to read it |
 |---|---|---|
@@ -172,7 +172,7 @@ Hong Kong, every order in the review, split Cash / Swap by client account (`CASH
 | `90b_hk_co_measures` | Close-only orders: last continuous price vs close, execution vs close, next open vs close (reversion); Cash panel, Swap panel | Execution vs close sits at zero by design; reversion is the measure that moves. |
 | `90c_hk_pre_measures` | Pre-traded orders: first execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | Orders with nothing printed in the close are in neither 90b nor 90c. |
 | `91a`/`91b`/`91c_hk_spread_q_*` | Each of the three by spread quartile, Cash and Swap side by side | Does the gap between Cash and Swap hold in names that trade alike? |
-| `92a`/`92b`/`92c_hk_adv_q_*` | The same by %ADV quartile | The same question for order size. |
+| `92a`/`92b`/`92c_hk_adv_*` | The same by ADV% band (0-1, 1-3, 3-5, 5-10, 10-25, 25%+) | The same question for order size. Fixed bands, not quartiles: most orders are tiny, so quartiles would put every large order in one band. |
 
 ## India focus
 
@@ -184,4 +184,4 @@ India orders from 3 August 2026 (CAS go-live), split CAS / Non-CAS. CAS = the na
 | `95b_in_co_measures` | Close-only: last continuous price vs close, execution vs close, reversion; CAS panel, Non-CAS panel | Non-CAS window orders count as close-only (their close share is imputed at 100). |
 | `95c_in_pre_measures` | Pre-traded: first execution, last continuous price, execution, each vs close | CAS names only in practice: a Non-CAS order cannot be pre-traded. |
 | `96a`/`96b`/`96c_in_spread_q_*` | By spread quartile, CAS and Non-CAS side by side | |
-| `97a`/`97b`/`97c_in_adv_q_*` | By %ADV quartile | |
+| `97a`/`97b`/`97c_in_adv_*` | By ADV% band | |
