@@ -77,6 +77,7 @@ Output lands in `output/`:
 | `charts/*.png` | every exhibit standalone at 200dpi |
 | `run_log.txt` | sanity report, close-algo selection, all tables, findings |
 | `no_auction_orders.csv` | every order dropped for having no closing auction to reach, with `marketCloseSize` and `fillCloseSize` beside each |
+| `orders_without_order_type.csv` | every order in the extract with no row in `bgi_order_types.csv`: id, date, symbol, side, strategy, client, value |
 | `deck_charts/` | only the charts the YTD deck uses, numbered in slide order, plus the newer charts beside the slide they belong with |
 
 **What to check on the target machine:** [docs/WHAT-TO-CHECK.md](docs/WHAT-TO-CHECK.md)

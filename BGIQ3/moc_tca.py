@@ -816,7 +816,8 @@ def _id_text(s: pd.Series) -> pd.Series:
     return t.str.replace(r"\.0+$", "", regex=True)
 
 
-def merge_order_types(raw: pd.DataFrame, path: Path) -> pd.DataFrame:
+def merge_order_types(raw: pd.DataFrame, path: Path,
+                      out_dir: Path = None) -> pd.DataFrame:
     """Attach OrderType from the order-types file, OrderId = aggrTgtId.
 
     A left join: the order file stays the population. An order with no row
@@ -866,10 +867,34 @@ def merge_order_types(raw: pd.DataFrame, path: Path) -> pd.DataFrame:
     if (~hit).any():
         log(f"    {int((~hit).sum()):,} unmatched orders are labelled "
             f"{ORDER_TYPE_UNMATCHED}.")
+    if (~hit).any() and out_dir is not None:
+        write_unmatched_order_types(out[~hit], Path(out_dir))
     out["OrderType"] = out["OrderType"].fillna(ORDER_TYPE_UNMATCHED)
     for k, n in out["OrderType"].value_counts().items():
         log(f"    {k:<20} {n:>8,} orders")
     return out
+
+
+ORDER_TYPE_MISSING_CSV = "orders_without_order_type.csv"
+
+
+def write_unmatched_order_types(rows: pd.DataFrame, out_dir: Path) -> None:
+    """Every order with no row in the order-types file, one line each.
+
+    Taken from the whole extract, before the strategy scope and the period
+    filter, so it is the full list to send back to whoever builds the file.
+    The identifying columns come first, in the order file's own names.
+    """
+    cols = resolve_columns(rows)
+    first = [AWS_JOIN_KEY] + [cols[k] for k in
+                              ("date", "symbol", "side", "strategy", "client",
+                               "notional", "order_shares")
+                              if k in cols and cols[k] != AWS_JOIN_KEY]
+    first = list(dict.fromkeys(c for c in first if c in rows.columns))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / ORDER_TYPE_MISSING_CSV
+    rows[first].to_csv(path, index=False)
+    log(f"    listed in {path}")
 
 
 def drop_short_sells(raw: pd.DataFrame) -> pd.DataFrame:
@@ -8104,7 +8129,7 @@ def run(path: Path, out_dir: Path, sample: bool = False,
 
     raw = merge_aws(raw, Path(AWS_DIR))
     raw = drop_short_sells(raw)
-    raw = merge_order_types(raw, order_types)
+    raw = merge_order_types(raw, order_types, out_dir)
     cols = resolve_columns(raw)
     df = normalise(raw, cols)
     df = filter_cas_eligible(df, out_dir)
