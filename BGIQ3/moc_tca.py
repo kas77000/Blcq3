@@ -609,12 +609,13 @@ CHART_FOLDERS = {
     "12_liquidity_buckets":      ["24_", "31_", "54_"],
     "13_market_deep_dives":      ["12_", "12b_", "13_", "13b_", "13c_", "55_"],
     "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
-    "reversion":                 ["11_", "21_", "22_"],
+    "reversion":                 ["11_", "21_", "22_", "22b_", "25b_"],
     "flow_and_algo_choice":      ["15_algo", "23_", "23b_"],
+    "australia focus":           ["98a_", "98b_", "98c_"],
     # Market focus folders, asked for by name.
     "hk focus":                  ["90_", "90b_", "90c_", "91a_", "91b_",
                                   "91c_", "92a_", "92b_", "92c_", "92d_"],
-    "India focus":               ["95_", "95b_", "95c_", "95d_", "96a_", "96b_",
+    "India focus":               ["95_", "95b_", "95c_", "95d_", "95e_", "96a_", "96b_",
                                   "96c_", "97a_", "97b_", "97c_", "97d_", "97e_"],
 }
 
@@ -627,8 +628,9 @@ DECK_CHART_ORDER = [
     "13_market_notional.png", "13b_market_notional_cash.png",
     "13c_market_notional_swap.png", "24_adv_profile.png",
     "23_flow_split.png", "23b_flow_split_order_type.png",
-    "22_reversion_close_only.png", "25_close_only_reversion_market_side.png",
-    "35_close_pr_close_only.png", "35b_close_pr_close_only_side.png",
+    "22b_close_only_reversion_participation.png",
+    "25b_close_only_reversion_participation_side.png",
+    "35b_close_pr_close_only_side.png",
     "26_pretraded_by_side.png", "28_pretraded_first_exec_market_side.png",
     "30_pretraded_reversion_market_side.png", "36_close_pr_pretraded.png",
     "36b_pretraded_pr_close_cont.png", "10c_last_cont_market.png",
@@ -636,8 +638,11 @@ DECK_CHART_ORDER = [
     "90_hk_measures.png", "90b_hk_co_measures.png", "90c_hk_pre_measures.png",
     "92a_hk_adv_first_exec.png", "92d_hk_pre_adv_q_first_exec.png",
     "95_in_measures.png", "95d_in_cas_flow_measures.png",
+    "95e_in_cas_flow_order_type.png",
     "97a_in_adv_first_exec.png", "97d_in_pre_adv_q_first_exec.png",
     "97e_in_cas_pre_pr_adv.png",
+    "98a_au_pre_start_profile.png", "98b_au_pre_perf_by_start.png",
+    "98c_au_pre_pr_by_start.png",
 ]
 
 # Markets that cannot be attributed to a venue. They stay in every TABLE -
@@ -1783,9 +1788,12 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
         df["auction_participated"] = ours.fillna(0) > 0
 
     # 2. How late the order arrived, against its own market's close.
-    if "first_start_time_min" in df and "market" in df and "date" in df:
+    # fstart_time from the AWS extract, else the order file's own start time.
+    starts = [df[c] for c in ("first_start_time_min", "start_time_min") if c in df]
+    if starts and "market" in df and "date" in df:
         close_at = continuous_end_min(df["market"], df["date"])
-        df["mins_to_close_at_start"] = close_at - df["first_start_time_min"]
+        started = starts[0] if len(starts) == 1 else starts[0].fillna(starts[1])
+        df["mins_to_close_at_start"] = close_at - started
 
     # 3. Was the limit ever going to cross? A buy limit below the close, or a
     #    sell limit above it, could not have traded in the auction. This is
@@ -3870,8 +3878,8 @@ def _save_bare(fig, out_dir: Path, name: str) -> None:
     # A chart whose labels are stacked by fixed offsets opts out: bigger type
     # there collides instead of reading better.
     scale = getattr(fig, "_deck_scale", DECK_FONT_SCALE)
-    if len(axes) > 1 and len({round(ax.get_position().x0, 2)
-                              for ax in axes}) == 1:
+    if (len(axes) > 1 and not getattr(fig, "_deck_overlay", False)
+            and len({round(ax.get_position().x0, 2) for ax in axes}) == 1):
         from matplotlib.gridspec import GridSpec
         grid = GridSpec(1, len(axes), figure=fig)
         for i, ax in enumerate(axes):
@@ -4142,8 +4150,9 @@ def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
     ax.set_xticklabels(list(totals.index), rotation=30, ha="right")
     ax.grid(axis="y", zorder=0)
     ax.set_axisbelow(True)
-    _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="Market",
-           title=f"{PERIOD_LABEL} MOC TCA Overview, {part}")
+    # No title on the picture, at the desk's request. The deck still gets one.
+    _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="Market")
+    fig._deck_title = f"{PERIOD_LABEL} MOC TCA Overview, {part}"
     ax.text(0.0, -0.30, f"{part} only, by client account: {grand:,.0f}m in all. "
             f"The percentage is the market's share of the {part.lower()} value.",
             transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
@@ -4278,6 +4287,7 @@ AXIS_NAMES = {
     "buy_sell": "Side",
     "month": "Month",
     "India": "India population",
+    "start_band": "Time from the order's start to the close",
     "spread_q": "Spread quartile (bps)",
 }
 
@@ -4580,6 +4590,172 @@ def chart_pr_pair(t: pd.DataFrame, out: Path, name: str, title: str,
     _save(fig, out, name, bottom=room)
 
 
+# The share of the plot each measure keeps on the reversion/participation
+# charts: they stay apart, so the two scales never have to be read together.
+REV_SHARE, PR_SHARE = 0.66, 0.26
+
+
+def _pr_overlay(ax, prs: list, top: float, right_label: bool) -> None:
+    """Participation hanging from the top of ax, on a reversed right axis."""
+    from matplotlib.ticker import MaxNLocator
+    ax2 = ax.twinx()
+    reach = top * 1.18 / PR_SHARE
+    ax2.set_ylim(reach, 0)
+    ax2.bar(np.arange(len(prs)), np.nan_to_num(prs), width=0.62,
+            color=SERIES[2], zorder=3)
+    for i, v in enumerate(prs):
+        if np.isfinite(v):
+            ax2.text(i, v + reach * 0.012, f"{v:.1f}%", ha="center", va="top",
+                     fontsize=8.5, color=INK, zorder=5)
+    ax2.set_yticks([t for t in MaxNLocator(4).tick_values(0, top)
+                    if 0 <= t <= top * 1.001])
+    if right_label:
+        ax2.set_ylabel("Close participation, % (mean per order)",
+                       color=INK_SECOND, fontsize=9, loc="top")
+    for spine in ("top", "left", "bottom"):
+        ax2.spines[spine].set_visible(False)
+    ax2.spines["right"].set_color(BASELINE)
+    ax2.spines["right"].set_linewidth(0.8)
+    ax2.tick_params(colors=INK_SECOND, labelsize=8, length=3, width=0.8)
+    ax2.grid(False)
+
+
+def _make_room(ax, lo: float, hi: float) -> None:
+    """Keep reversion in the lower part of ax, for the bars hanging above it."""
+    ticks = [t for t in ax.get_yticks() if lo <= t <= hi]
+    ax.set_ylim(lo, lo + (hi - lo) / REV_SHARE)
+    ax.set_yticks(ticks)
+
+
+def _rev_pr_notes(fig, india: bool) -> float:
+    return _notes(fig, [
+        CO_NOTE,
+        "Green bars, right axis (reads downward from the top): our share of "
+        "the closing auction's volume, averaged per order.",
+        "India (PR): where the name had no closing auction, the participation "
+        "rate of the window orders." if india else "",
+        SPREAD_NOTE, CI_NOTE])
+
+
+def chart_reversion_with_pr(rev: pd.DataFrame, pr: pd.DataFrame, out: Path,
+                            name: str, title: str) -> None:
+    """Close-only reversion by market, with participation hanging from the top.
+
+    The one family of charts here on two scales, at the desk's request. It
+    stays readable because the two never share space: reversion keeps the
+    lower part of the plot on the left axis, participation hangs from the top
+    edge on a reversed right axis, and each bar carries its own number. No
+    title on the picture, at the desk's request; the deck still gets one.
+    """
+    col = "close PR % (mean)"
+    d = _chartable(rev)
+    p_t = _chartable(pr)
+    if d.empty or p_t.empty or col not in p_t:
+        return
+    d = d.sort_values("notional (" + CURRENCY + "m)", ascending=False).head(12)
+    markets = list(d.index)
+    prs = [float(p_t.loc[m, col]) if m in p_t.index else float("nan")
+           for m in markets]
+    labels = [_spread_label(f"{m} (PR)" if str(m) == "India" else m,
+                            float(sp), True)
+              for m, sp in zip(markets, d["spread bps (wtd)"])]
+    fig, (ax,) = _fig((11.0, 6.6))
+    _diverging_barv(ax, labels, [float(v) for v in d["spreads"]],
+                    ci=list(zip(d["CI low"].astype(float), d["CI high"].astype(float))),
+                    unit="spreads", tight=True)
+    _style(ax, ylabel=REV_YLABEL.format(unit="spreads"), xlabel="Market")
+    _make_room(ax, *ax.get_ylim())
+    _pr_overlay(ax, prs, max([v for v in prs if np.isfinite(v)] or [1.0]) or 1.0, True)
+    fig._deck_title = title
+    fig._deck_overlay = True
+    fig._deck_scale = 1.2
+    _save(fig, out, name, bottom=_rev_pr_notes(fig, "India" in set(map(str, markets))))
+
+
+def chart_reversion_with_pr_by_side(rev: pd.DataFrame, pr: pd.DataFrame, out: Path,
+                                    name: str, title: str) -> None:
+    """chart_reversion_with_pr with a Buy panel beside a Sell panel.
+
+    One scale per measure across both panels, markets in the same order, so
+    a market's two sides compare by eye. A market with no orders on a side
+    says so. No title on the picture; the panels are headed Buy and Sell.
+    """
+    col = "close PR % (mean)"
+    d, p_t = _chartable(rev), _chartable(pr)
+    if d.empty or p_t.empty or d.index.nlevels < 2 or col not in p_t:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    markets = (d.groupby(level=0, observed=True)[ncol].sum()
+                 .sort_values(ascending=False).head(12).index.tolist())
+    sides = [x for x in BUY_SELL_ORDER if x in set(d.index.get_level_values(1))]
+    if not markets or not sides:
+        return
+    nan = float("nan")
+    prs = {x: [float(p_t.loc[(m, x), col]) if (m, x) in p_t.index else nan
+               for m in markets] for x in sides}
+    top = max([v for x in sides for v in prs[x] if np.isfinite(v)] or [1.0]) or 1.0
+    fig, axes = plt.subplots(1, len(sides), dpi=DPI, figsize=(8.5 * len(sides), 6.6))
+    axes = np.atleast_1d(axes)
+    fig.patch.set_facecolor(SURFACE)
+    for k, (ax, side) in enumerate(zip(axes, sides)):
+        ax.set_facecolor(SURFACE)
+        labels, vals, ci = [], [], []
+        for m in markets:
+            shown = f"{m} (PR)" if str(m) == "India" else m
+            if (m, side) in d.index:
+                r = d.loc[(m, side)]
+                labels.append(_spread_label(shown, float(r["spread bps (wtd)"]), True))
+                vals.append(float(r["spreads"]))
+                ci.append((float(r["CI low"]), float(r["CI high"])))
+            else:
+                labels.append(str(shown) + chr(10) + "no orders")
+                vals.append(nan)
+                ci.append((nan, nan))
+        _diverging_barv(ax, labels, vals, ci=ci, unit="spreads", tight=True)
+        _style(ax, ylabel=REV_YLABEL.format(unit="spreads") if k == 0 else "",
+               xlabel="Market", title=side)
+        ax._panel = side
+    _share_ylim(axes)
+    lo, hi = axes[0].get_ylim()
+    for k, (ax, side) in enumerate(zip(axes, sides)):
+        _make_room(ax, lo, hi)
+        _pr_overlay(ax, prs[side], top, k == len(sides) - 1)
+    fig._deck_title = title
+    fig._deck_overlay = True
+    fig._deck_scale = 1.2
+    _save(fig, out, name, bottom=_rev_pr_notes(fig, "India" in set(map(str, markets))))
+
+
+def chart_start_profile(t: pd.DataFrame, out: Path, name: str, title: str) -> None:
+    """Share of pre-traded value by start time: the market against the others."""
+    cols = ["% of Australia value", "% of other markets value"]
+    if t is None or t.empty or not set(cols) <= set(t.columns):
+        return
+    x = np.arange(len(t))
+    w = 0.38
+    fig, (ax,) = _fig((11.0, 5.8))
+    top = float(np.nanmax(t[cols].to_numpy(float))) or 1.0
+    for i, (col, lab, color) in enumerate([(cols[0], "Australia", SERIES[0]),
+                                           (cols[1], "Other auction markets", SERIES[3])]):
+        vals = t[col].to_numpy(float)
+        pos = x + (i - 0.5) * w
+        ax.bar(pos, np.nan_to_num(vals), width=w, color=color, zorder=3, label=lab)
+        for px, v in zip(pos, vals):
+            if np.isfinite(v):
+                ax.text(px, v + top * 0.015, f"{v:.0f}%", ha="center", va="bottom",
+                        fontsize=8.5, color=INK, zorder=5)
+    ax.set_ylim(0, top * 1.18)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{k}{chr(10)}{int(n):,} order{'' if int(n) == 1 else 's'}"
+                        for k, n in zip(t.index, t["orders"])])
+    ax.legend(frameon=False, loc="upper right", fontsize=8.5)
+    _style(ax, ylabel="% of pre-traded value", title=title,
+           xlabel=AXIS_NAMES["start_band"])
+    room = _notes(fig, ["pre-traded orders. Start: the first start time on the order. "
+                        "Order counts under each band are Australia's."])
+    _save(fig, out, name, bottom=room)
+
+
 def chart_close_pr_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
                            order: list = None) -> None:
     """Close participation by market, a Buy panel beside a Sell panel.
@@ -4671,8 +4847,12 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
 
 
 def chart_flow_split_type(t: pd.DataFrame, out: Path,
-                          name: str = "23b_flow_split_order_type.png") -> None:
+                          name: str = "23b_flow_split_order_type.png",
+                          title: str = "Pre-traded vs Close only, by Order Type",
+                          note: str = "", under: dict = None) -> None:
     """23_flow_split with each bar stacked by order type.
+
+    under adds a line below a bar's name, keyed by flow.
 
     Each segment carries its share of that bar's value, so the split inside
     close-only and inside pre-traded reads directly. Colour here is the order
@@ -4717,6 +4897,7 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
                  and float(t.loc[(f, k), ncol]) < top * 0.07]
         n = int(t.loc[f, "orders"].sum())
         ticks.append(f + chr(10) + f"{n:,} orders"
+                     + (chr(10) + under[f] if under and f in under else "")
                      + (chr(10) + ", ".join(small) if small else ""))
     ax.set_ylim(0, top * 1.18)
     ax.set_xticks(x)
@@ -4724,8 +4905,8 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.0),
               ncol=len(types), fontsize=8.5)
     _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="",
-           title="Pre-traded vs Close only, by Order Type" + chr(10))
-    room = _notes(fig, ["each segment's % is its share of that bar's value. "
+           title=title + chr(10))
+    room = _notes(fig, [note, "each segment's % is its share of that bar's value. "
                         "Order type from bgi_order_types.csv, matched on the "
                         "order id; " + ORDER_TYPE_UNMATCHED + " = no row in "
                         "that file."])
@@ -5814,6 +5995,7 @@ FE_COL = "first_exec_vs_close"
 HK_GROUPS = ["Cash", "Swap", "Other"]
 INDIA_GROUPS = ["CAS", "Non-CAS"]
 CAS_FLOWS = ["Close only", "Pre-traded"]
+EXEC_IN_CLOSE = "% of executed qty in the close (wtd)"
 
 
 def _focus_quartile(v: pd.Series, fmt: str) -> pd.Series:
@@ -5937,7 +6119,29 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
                 prof["notional (" + CURRENCY + "m)"] /= 1e6
                 prof["% of notional"] = (100 * prof["notional (" + CURRENCY + "m)"]
                                          / prof["notional (" + CURRENCY + "m)"].sum())
+                if "close_pr" in cas:
+                    prof["close PR % (mean)"] = pd.to_numeric(
+                        cas["close_pr"], errors="coerce").groupby(cas["cas_flow"]).mean()
+                # Share of the executed quantity that printed in the close,
+                # order by order, then value-weighted like 23_flow_split.
+                if {"fill_close_size", "exec_shares"} <= set(cas.columns):
+                    done = pd.to_numeric(cas["exec_shares"], errors="coerce")
+                    share = (100.0 * pd.to_numeric(cas["fill_close_size"], errors="coerce")
+                             / done.where(done > 0)).clip(0, 100)
+                    prof[EXEC_IN_CLOSE] = pd.Series({
+                        k: wmean(share[g.index], g["notional"], winsor=False)
+                        for k, g in cas.groupby("cas_flow")})
                 t["130_in6_cas_flow_profile"] = prof.round(2)
+                if "order_type" in cas:
+                    ty = (cas.groupby(["cas_flow", "order_type"])["notional"]
+                          .agg(["size", "sum"]))
+                    ty.columns = ["orders", "notional (" + CURRENCY + "m)"]
+                    ty["notional (" + CURRENCY + "m)"] /= 1e6
+                    ty.index.names = ["flow", "order type"]
+                    ty["% of flow notional"] = (
+                        100 * ty["notional (" + CURRENCY + "m)"]
+                        / ty.groupby(level=0)["notional (" + CURRENCY + "m)"].transform("sum"))
+                    t["130_in6_cas_flow_order_type"] = ty.round(2)
                 for value, short, _ in FOCUS_MEASURES + [FOCUS_REVERSION]:
                     if value in cas and cas[value].notna().any():
                         t[f"130_in6_cas_flow_{short}"] = t_in_spreads(
@@ -5947,6 +6151,69 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
                 cas_pre = cas_pre.assign(adv_bucket=pd.cut(
                     cas_pre["adv_pct"], ADV_BUCKETS, labels=ADV_LABELS))
                 t["130_in5_cas_pre_pr_pair_adv"] = t_pr_pair(cas_pre, "adv_bucket")
+
+
+# Australia, pre-traded orders: does starting late cost? Time from the order's
+# start to the market's close (AEDT handled), wide enough bands to hold orders.
+START_EDGES = [0, 15, 30, 60, 120, 240, np.inf]
+START_LABELS = ["under 15 min", "15-30 min", "30-60 min", "1-2 h", "2-4 h", "over 4 h"]
+FOCUS_START_MARKET = "Australia"
+
+
+def build_australia_tables(df: pd.DataFrame, t: dict) -> None:
+    """Pre-traded orders by how long before the close they started.
+
+    Three questions. Do they start late, against the other auction markets
+    (140_au0)? Does the result change with the start (140_au1)? Do late
+    starters trade harder (140_au2)? Order size travels with the start time,
+    so 140_au0 carries median %ADV: read it before calling a band's cost
+    a timing cost.
+    """
+    need = {"market", "mins_to_close_at_start", "has_auction"}
+    if not need <= set(df.columns):
+        log("  Australia focus skipped: no order start time in the file.")
+        return
+    pre = df[df["has_auction"] & _flag(df, "pretraded")
+             & df["mins_to_close_at_start"].notna()].copy()
+    is_au = pre["market"].eq(FOCUS_START_MARKET)
+    after = is_au & (pre["mins_to_close_at_start"] <= 0)
+    if after.any():
+        warn(f"Australia focus: {int(after.sum()):,} pre-traded orders start after "
+             "the close time in MARKET_CLOSE_HKT - left out. Check that time.")
+    pre = pre[pre["mins_to_close_at_start"] > 0]
+    pre["start_band"] = pd.cut(pre["mins_to_close_at_start"], START_EDGES,
+                               labels=START_LABELS)
+    au = pre[pre["market"].eq(FOCUS_START_MARKET)]
+    rest = pre[~pre["market"].eq(FOCUS_START_MARKET)]
+    if au.empty:
+        log("  Australia focus skipped: no pre-traded Australia orders.")
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    rows = []
+    for band in START_LABELS:
+        g = au[au["start_band"] == band]
+        r_val = rest.loc[rest["start_band"] == band, "notional"].sum()
+        row = {"start_band": band, "orders": len(g), ncol: g["notional"].sum() / 1e6,
+               "% of Australia value": 100 * g["notional"].sum() / au["notional"].sum(),
+               "% of other markets value": (100 * r_val / rest["notional"].sum()
+                                            if len(rest) else np.nan)}
+        if len(g):
+            row["median %ADV"] = (float(g["adv_pct"].median())
+                                  if "adv_pct" in g else np.nan)
+            row["% in the close (wtd)"] = (wmean(g["pct_close"], g["notional"], winsor=False)
+                                           if "pct_close" in g else np.nan)
+        rows.append(row)
+    t["140_au0_start_profile"] = pd.DataFrame(rows).set_index("start_band").round(2)
+    parts = []
+    for value, label, w in [("first_exec_vs_close", "First execution vs close", "cont_notional"),
+                            ("slip_close", "Execution vs close", "notional"),
+                            ("slip_arrival", "Arrival slippage", "notional")]:
+        tab = t_in_spreads(au, "start_band", value, w)
+        if not tab.empty:
+            parts.append(tab.assign(measure=label).set_index("measure", append=True))
+    if parts:
+        t["140_au1_perf_by_start"] = pd.concat(parts)
+    t["140_au2_pr_by_start"] = t_pr_pair(au, "start_band")
 
 
 def build_focus_charts(t: dict, charts: Path) -> None:
@@ -6012,6 +6279,26 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                       + chr(10) + "Next open vs close: negative = the price came "
                       "back against us. " + LAST_CONT_NOTE + "."),
                 xlabel="in spreads", panels=CAS_FLOWS)
+            pr_col = "close PR % (mean)"
+            under = {}
+            for k, r in prof.iterrows():
+                bits = []
+                if pr_col in prof and pd.notna(r[pr_col]):
+                    bits.append(f"close participation {r[pr_col]:.1f}%")
+                if EXEC_IN_CLOSE in prof and pd.notna(r[EXEC_IN_CLOSE]):
+                    bits.append(f"{r[EXEC_IN_CLOSE]:.0f}% of executed qty in the close")
+                if bits:
+                    under[k] = chr(10).join(bits)
+            _guard(chart_flow_split_type, t.get("130_in6_cas_flow_order_type", E),
+                   charts, "95e_in_cas_flow_order_type.png",
+                   "India CAS, Close Only vs Pre-traded, by Order Type",
+                   note="India CAS names from " + AUCTION_FROM["India"] + ". Close "
+                        "only = the first fill was at the close, pre-traded = "
+                        "anywhere else. Close participation (ClosePR): our share "
+                        "of the closing auction's volume, mean per order. % of "
+                        "executed qty in the close: fillCloseSize over executed "
+                        "shares, weighted by value.",
+                   under=under)
             chart_pr_pair(t.get("130_in5_cas_pre_pr_pair_adv", E), charts,
                           "97e_in_cas_pre_pr_adv.png",
                           "India CAS, Pre-traded: Close and Continuous Participation",
@@ -6577,6 +6864,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
 
     build_review_tables(df, auc, t)
     build_focus_tables(df, t)
+    build_australia_tables(df, t)
     t["_close_df"] = df
     t["_auction_df"] = auc
     return t
@@ -7042,6 +7330,14 @@ def build_charts(t: dict, out_dir: Path) -> None:
                   "Pre-traded Orders | Close and Continuous Participation by Market",
                   "Market", "pre-traded orders, markets ordered by value traded.")
     co_pr = t.get("81_close_pr_mkt_close_only")
+    _guard(chart_reversion_with_pr, t.get("71_co_reversion_mkt_spreads", E),
+           co_pr if co_pr is not None else E, charts,
+           "22b_close_only_reversion_participation.png",
+           "Close Only Reversion and Participation, by Market")
+    _guard(chart_reversion_with_pr_by_side, t.get("72_co_reversion_mkt_side_spr", E),
+           t.get("81b_close_pr_mkt_side_co", E), charts,
+           "25b_close_only_reversion_participation_side.png",
+           "Close Only Reversion and Participation, by Side")
     _guard(chart_close_pr_by_side,
         t.get("81b_close_pr_mkt_side_co", E), charts,
         "35b_close_pr_close_only_side.png", "Close Only Participation, by Side",
@@ -7051,6 +7347,23 @@ def build_charts(t: dict, out_dir: Path) -> None:
                       "Pre-traded Orders, by ADV%", with_orders=True)
 
     _guard(build_focus_charts, t, charts)
+    _guard(chart_start_profile, t.get("140_au0_start_profile", E), charts,
+           "98a_au_pre_start_profile.png",
+           "Australia Pre-traded: When the Orders Start")
+    _guard(chart_spreads_by_side, t.get("140_au1_perf_by_start", E), charts,
+           "98b_au_pre_perf_by_start.png",
+           "Australia Pre-traded: Performance by Start Time", "",
+           order=START_LABELS, side_by_side=True, short_panels=True,
+           panels=["First execution vs close", "Execution vs close", "Arrival slippage"],
+           ylabel="Result, in spreads", xlabel=AXIS_NAMES["start_band"],
+           note="pre-traded Australia orders. Positive = a saving against that "
+                "benchmark. First execution weighted by the part traded before the "
+                "auction, the others by value. Order size moves with the start "
+                "time: see median %ADV in 140_au0_start_profile.")
+    _guard(chart_pr_pair, t.get("140_au2_pr_by_start", E), charts,
+           "98c_au_pre_pr_by_start.png",
+           "Australia Pre-traded: Participation by Start Time",
+           AXIS_NAMES["start_band"], "pre-traded Australia orders.")
     _guard(build_review_charts, t, charts)
 
     # Anything this run did not write is left over from an older version of
@@ -8066,6 +8379,9 @@ def self_test() -> int:
         "slip_close": rng.normal(0, 5, 2 * n),
         "close_pr": rng.uniform(0, 20, 2 * n),
         "pr_cont": rng.uniform(0, 20, 2 * n),
+        "order_type": ["Discretionary", "Stipulated"] * n,
+        "exec_shares": 1000.0,
+        "fill_close_size": 400.0,
     })
     ft = {}
     build_focus_tables(foc, ft)
@@ -8084,6 +8400,29 @@ def self_test() -> int:
     cf = ft.get("130_in6_cas_flow_first_exec", pd.DataFrame())
     check("India CAS splits into close only and pre-traded",
           not cf.empty and set(cf.index) == set(CAS_FLOWS), cf.index.tolist() if not cf.empty else "empty")
+    aud = pd.DataFrame({"market": ["Australia"] * 40 + ["Japan"] * 40,
+                        "has_auction": True, "pretraded": True,
+                        "mins_to_close_at_start": np.tile([5, 20, 45, 90, 180, 300, -3, 10], 10),
+                        "notional": 1e6, "cont_notional": 5e5, "spread_bps": 5.0,
+                        "adv_pct": 2.0, "pct_close": 40.0, "close_pr": 8.0, "pr_cont": 10.0,
+                        "first_exec_vs_close": rng.normal(0, 5, 80),
+                        "slip_close": rng.normal(0, 5, 80),
+                        "slip_arrival": rng.normal(0, 5, 80)})
+    at = {}
+    build_australia_tables(aud, at)
+    ap = at.get("140_au0_start_profile", pd.DataFrame())
+    check("Australia start bands: other markets left out, after-close orders dropped",
+          not ap.empty and int(ap["orders"].sum()) == 35
+          and abs(ap["% of Australia value"].sum() - 100) < 0.1, ap.get("orders"))
+    check("India CAS flow carries the share of executed qty in the close",
+          ft.get("130_in6_cas_flow_profile", pd.DataFrame())
+            .get(EXEC_IN_CLOSE, pd.Series([0.0])).round(1).eq(40.0).all())
+    cft = ft.get("130_in6_cas_flow_order_type", pd.DataFrame())
+    cpf = ft.get("130_in6_cas_flow_profile", pd.DataFrame())
+    check("India CAS flow by order type adds to 100 per flow, with close participation",
+          not cft.empty and "close PR % (mean)" in cpf
+          and bool((cft.groupby(level=0)["% of flow notional"].sum() - 100).abs().max() < 0.05),
+          cft.shape)
     pp = ft.get("130_in5_cas_pre_pr_pair_adv", pd.DataFrame())
     check("India CAS pre-traded participation: close and continuous, by ADV% band",
           not pp.empty and {"close PR % (mean)", "continuous PR % (mean)"} <= set(pp.columns)

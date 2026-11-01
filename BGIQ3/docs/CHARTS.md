@@ -42,6 +42,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `25_close_only_reversion_market_side` | Close-only reversion by market, Buy panel and Sell panel | Same as the H1 slide. |
+| `25b_close_only_reversion_participation_side` | The same with close participation for that side hanging from the top on a reversed right axis, Buy and Sell side by side | Takes the place of 25 in `deck_charts`. One scale per measure across both panels. No title. |
 | `26_pretraded_by_side` | Pre-traded orders: first execution, execution vs close, next open vs close; All / Buy / Sell | Same as the H1 slide. |
 | `28_pretraded_first_exec_market_side` | Pre-traded first execution vs close, by market, buys and sells | Was starting before the close the right call, per market and side? |
 | `28b_pretraded_last_cont_market_side` | Pre-traded last continuous price vs close, by market, buys and sells (+ = the last continuous trade was better for the order than the close) | How far did the close move from where the session ended, per market and side? |
@@ -159,6 +160,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `11_reversion` | Reversion by strategy | Did the auction print come back by the next open? |
 | `21_reversion_pretraded` | Reversion by market, pre-traded orders | |
 | `22_reversion_close_only` | Reversion by market, close-only orders | Same as the H1 slide. |
+| `22b_close_only_reversion_participation` | Close-only reversion by market on the left axis, with close participation hanging from the top on a reversed right axis | Takes the place of 22 and 35 in `deck_charts`. Blue/red bars read up and down from zero; green bars read down from the top. |
 
 ## flow_and_algo_choice
 
@@ -193,5 +195,17 @@ India orders from 3 August 2026 (CAS go-live), split CAS / Non-CAS. CAS = the na
 | `96a`/`96b`/`96c_in_spread_q_*` | By spread quartile, CAS and Non-CAS side by side | |
 | `97a`/`97b`/`97c_in_adv_*` | By ADV% band | |
 | `95d_in_cas_flow_measures` | India CAS only: close-only and pre-traded side by side. First execution, last continuous price, execution and next open, each vs close | Split by price: close only = first fill at the close. Order counts and value shares in the footnote. |
+| `95e_in_cas_flow_order_type` | India CAS: close only and pre-traded, each bar stacked by order type, with mean close participation (ClosePR) and the % of executed quantity in the close under the bar | Each segment's % is its share of that bar's value. |
 | `97d_in_pre_adv_q_first_exec` | Pre-traded only: first execution vs close by ADV% quartile, CAS and Non-CAS | India reports no close share, so pre-traded here means the first fill was not at the close. Non-CAS names trade through the closing VWAP, so nearly all of them count. |
 | `97e_in_cas_pre_pr_adv` | India CAS, pre-traded: ClosePR beside fPR_cont, by ADV% band | Same reading as 36b. |
+
+## australia focus
+
+Pre-traded Australia orders, by the time from the order's first start to the close (AEDT handled). Tables `140_au*`. Orders that appear to start after the close are left out and counted in the run log.
+
+| Chart | What it shows | How to read it |
+|---|---|---|
+| `98a_au_pre_start_profile` | Share of pre-traded value by start band, Australia against the other auction markets | Do Australia's orders start later than the rest of the book? |
+| `98b_au_pre_perf_by_start` | First execution, execution and arrival slippage, each vs its benchmark, by start band | Does the result get worse for late starters? Size moves with the start time, so read it with median %ADV in `140_au0_start_profile`. |
+| `98c_au_pre_pr_by_start` | ClosePR beside continuous participation, by start band | Do late starters trade harder? Two different volumes, so never added. |
+
