@@ -3912,6 +3912,28 @@ def chart_folder(name: str) -> str:
     return "other"
 
 
+# The grey notes under a chart. Off at the desk's request (3 Nov 2026): they
+# are lifted off every picture before it is saved and still reach the deck's
+# speaker notes. True puts them back under the charts/ pictures.
+CHART_FOOTERS = False
+
+
+def _lift_footers(fig) -> list:
+    """Remove a chart's footnotes - figure text, and axis text below the axis -
+    and return their lines."""
+    notes = [line.strip() for t in fig.texts
+             for line in t.get_text().split(chr(10)) if line.strip()]
+    for t in list(fig.texts):
+        t.remove()
+    for ax in fig.get_axes():
+        for t in list(ax.texts):
+            if t.get_transform() == ax.transAxes and t.get_position()[1] < 0:
+                notes += [x.strip() for x in t.get_text().split(chr(10))
+                          if x.strip()]
+                t.remove()
+    return notes
+
+
 def _save(fig, out_dir: Path, name: str, bottom: float = 0.0,
           deck: bool = True) -> None:
     # Only the chart folders are sorted; the focus charts keep their own place.
@@ -3921,6 +3943,9 @@ def _save(fig, out_dir: Path, name: str, bottom: float = 0.0,
     path.parent.mkdir(parents=True, exist_ok=True)
     if deck:
         _WRITTEN_CHARTS.add(rel)
+    if not CHART_FOOTERS:
+        fig._lifted_notes = _lift_footers(fig)
+        bottom = 0.0
     fig.tight_layout(rect=(0, bottom, 1, 1) if bottom else None)
     fig.savefig(path, facecolor=SURFACE, dpi=DPI, bbox_inches="tight")
     if deck:
@@ -3944,7 +3969,9 @@ def _save_bare(fig, out_dir: Path, name: str) -> None:
     titles = [ax.get_title(loc="left").strip() for ax in axes]
     title = getattr(fig, "_deck_title", None) or next((t for t in titles if t), "")
     # One note per line, so a caveat shared by two charts can be printed once.
-    notes = [line.strip() for t in fig.texts
+    # Footers already lifted off by _save come first.
+    notes = list(getattr(fig, "_lifted_notes", []))
+    notes += [line.strip() for t in fig.texts
              for line in t.get_text().split(chr(10)) if line.strip()]
     for t in list(fig.texts):
         t.remove()
@@ -4593,7 +4620,7 @@ def chart_measures_by_market(specs: list, out: Path, name: str, title: str,
         top_ax._panel = label
         if label in bold:
             top_ax._panel_bold = True
-            top_ax.title.set_fontweight("bold")
+            top_ax._left_title.set_fontweight("bold")  # _style titles on the left
             ax.yaxis.label.set_fontweight("bold")
     fig._deck_title = title
     fig._deck_scale = 1.1
@@ -4833,7 +4860,7 @@ def chart_measures_by_market_side(specs: list, out: Path, name: str, title: str,
             ax._panel = f"{label}: {side}"
             if label in bold:
                 ax._panel_bold = True
-                ax.title.set_fontweight("bold")
+                ax._left_title.set_fontweight("bold")  # _style titles on the left
                 ax.yaxis.label.set_fontweight("bold")
         _share_ylim(list(axes[r]))
     fig._deck_title = title
