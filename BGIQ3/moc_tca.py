@@ -161,6 +161,12 @@ EXCLUDE_SHORT_SELLS = True
 SHORT_SELL_CODE = "SSH"
 SHORT_SELL_COLUMNS = ["Side", "side", "side" + AWS_SUFFIX]
 
+# Australia orders that took more than this share of the market's volume
+# while trading continuously (fPR_cont, in %) leave the study - the desk's
+# call (3 Nov 2026). An order with no fPR_cont stays. None turns it off.
+AU_MAX_PR_CONT = 50.0
+AU_PR_CONT_MARKETS = {"Australia"}
+
 # India has no closing auction in this period - the close is a VWAP of the
 # last half hour - so %CLOSE is reported as 0 there and cannot say whether an
 # order was aimed at the close. What can say it is WHEN the order started.
@@ -594,7 +600,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "26b_", "28_", "28b_", "28c_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "26b_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
                                   "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
@@ -634,7 +640,9 @@ DECK_CHART_ORDER = [
     "25b_close_only_reversion_participation_side.png",
     "35b_close_pr_close_only_side.png",
     "26_pretraded_by_side.png", "26b_pretraded_order_type_market.png",
-    "28c_pretraded_measures_market_side.png",
+    "28f_pretraded_close_reversion_market.png",
+    "28e_pretraded_measures_market.png",
+    "28d_pretraded_close_best_worst.png",
     "28_pretraded_first_exec_market_side.png",
     "30_pretraded_reversion_market_side.png", "36_close_pr_pretraded.png",
     "36b_pretraded_pr_close_cont.png", "10c_last_cont_market.png",
@@ -936,6 +944,35 @@ def drop_short_sells(raw: pd.DataFrame) -> pd.DataFrame:
         n = int(raw[c].astype(str).str.strip().str.upper().eq(code).sum())
         log(f"    {c}: {n:,}")
     return raw[~hit].copy()
+
+
+def filter_au_pr_cont(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop Australia orders whose fPR_cont is above AU_MAX_PR_CONT.
+
+    Run after normalise, so pr_cont is already in percent. Counted and valued
+    in the log; every other market is untouched.
+    """
+    if AU_MAX_PR_CONT is None:
+        return df
+    section("AUSTRALIA: HIGH CONTINUOUS PARTICIPATION REMOVED")
+    if "pr_cont" not in df or "market" not in df:
+        warn("no fPR_cont or market column - the Australia fPR_cont filter "
+             "was not applied.")
+        return df
+    au = df["market"].isin(AU_PR_CONT_MARKETS)
+    pr = pd.to_numeric(df["pr_cont"], errors="coerce")
+    hit = au & (pr > AU_MAX_PR_CONT)
+    log(f"  rule: Australia orders with fPR_cont above {AU_MAX_PR_CONT:g}% leave "
+        f"the study")
+    log(f"  {int(au.sum()):,} Australia orders, {int((au & pr.isna()).sum()):,} "
+        f"with no fPR_cont (kept)")
+    if not hit.any():
+        log("  none above the limit")
+        return df
+    value = (f", {CURRENCY} {df.loc[hit, 'notional'].sum() / 1e6:,.1f}m"
+             if "notional" in df else "")
+    log(f"  {int(hit.sum()):,} removed{value}")
+    return df[~hit].copy()
 
 
 def merge_aws(raw: pd.DataFrame, folder: Path) -> pd.DataFrame:
@@ -3307,6 +3344,48 @@ def t_early_start_waste(df: pd.DataFrame) -> pd.DataFrame:
 # IMPACT AND VENUE CHOICE
 # ===========================================================================
 
+BEST_WORST_N = 5
+
+
+def t_best_worst_orders(df: pd.DataFrame, value: str = "slip_close",
+                        n: int = BEST_WORST_N) -> pd.DataFrame:
+    """The n best and n worst single orders on one measure, in spreads.
+
+    Each order's result over its own spread. Order by order, so a name with a
+    very tight spread can reach a large number of spreads: the bps column
+    sits beside it to show the size of the move. Best first, worst last.
+    """
+    need = [value, "spread_bps", "notional"]
+    if df is None or df.empty or any(c not in df.columns for c in need):
+        return pd.DataFrame()
+    d = df[df[value].notna() & (df["spread_bps"] > 0)]
+    if "market" in d:
+        d = d[~d["market"].astype(str).isin(EXCLUDE_MARKETS_FROM_CHARTS)]
+    if d.empty:
+        return pd.DataFrame()
+    d = d.assign(_spr=d[value] / d["spread_bps"]).sort_values("_spr",
+                                                               ascending=False)
+    pick = d if len(d) <= 2 * n else pd.concat([d.head(n), d.tail(n)])
+    rows = []
+    for i, (_, r) in enumerate(pick.iterrows()):
+        rows.append({
+            "group": "best" if (len(d) > 2 * n and i < n) or
+                     (len(d) <= 2 * n and r["_spr"] >= 0) else "worst",
+            "symbol": r.get("symbol", ""),
+            "market": r.get("market", ""),
+            "side": r.get("buy_sell", ""),
+            "date": (pd.Timestamp(r["date"]).date()
+                     if "date" in r and pd.notna(r["date"]) else None),
+            "order_id": r.get("order_id", ""),
+            "notional (" + CURRENCY + "m)": float(r["notional"]) / 1e6,
+            "% close": r.get("pct_close", np.nan),
+            "spread bps": float(r["spread_bps"]),
+            "vs Close bps": float(r[value]),
+            "vs Close spreads": float(r["_spr"]),
+        })
+    return pd.DataFrame(rows)
+
+
 def t_in_spreads(df: pd.DataFrame, by, value: str, weight: str = "notional",
                  order=None, ci: bool = True) -> pd.DataFrame:
     """A result in bps AND in spreads, per group, with a CI on each.
@@ -3870,7 +3949,9 @@ def _save_bare(fig, out_dir: Path, name: str) -> None:
     for t in list(fig.texts):
         t.remove()
     for ax in axes:
-        ax.set_title(getattr(ax, "_panel", ""), loc="left")
+        ax.set_title(getattr(ax, "_panel", ""), loc="left",
+                     **({"fontweight": "bold"} if getattr(ax, "_panel_bold", False)
+                        else {}))
         # Axis-relative footnotes sit inside the axes' own text list.
         for t in list(ax.texts):
             if t.get_transform() == ax.transAxes and t.get_position()[1] < 0:
@@ -4198,7 +4279,7 @@ def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
         inside = 100.0 * v / grand >= PIE_CODE_INSIDE_PCT
         r = 0.72 if inside else 1.1
         ax.text(r * np.cos(mid), r * np.sin(mid), c, ha="center", va="center",
-                fontsize=10 if inside else 9, fontweight="bold",
+                fontsize=15 if inside else 12, fontweight="bold",
                 color=_ink_on(col) if inside else INK)
     ax.legend(wedges, labels, loc="center left", bbox_to_anchor=(1.02, 0.5),
               frameon=False, fontsize=10.5, labelcolor=INK, labelspacing=0.9)
@@ -4408,6 +4489,143 @@ def _notes(fig, notes: list) -> float:
     return 0.04 + 0.03 * len(lines)
 
 
+PR_LINES = [("close PR % (mean)", "Close participation %", INK),
+            ("continuous PR % (mean)", "Continuous participation %", SERIES[1])]
+
+
+def chart_measures_by_market(specs: list, out: Path, name: str, title: str,
+                             note: str = "", limit: int = 12,
+                             bold: tuple = (), lines: pd.DataFrame = None) -> None:
+    """Several measures by market, buys and sells together: one panel per
+    measure in a two-column grid, the same markets in the same order in every
+    panel (biggest by value first). Each panel has its own scale, because the
+    measures differ in size.
+
+    specs is [(measure label, table indexed by market), ...]. bold names the
+    measures whose panel titles and axis labels are set in bold.
+
+    lines, a table indexed by market with the PR_LINES columns, adds a strip
+    above every panel with close and continuous participation as two lines,
+    the markets in the same columns as the bars. Each is a simple mean per
+    order. A strip of its own, so the lines never cross the bar labels.
+    """
+    unit = CHART_UNIT
+    spreads = unit == "spreads"
+    vcol, lo, hi = _unit_cols(unit)
+    specs = [(lab, _chartable(tb)) for lab, tb in specs]
+    specs = [(lab, tb) for lab, tb in specs if not tb.empty and tb.index.nlevels == 1]
+    lines = _chartable(lines) if lines is not None else pd.DataFrame()
+    pr_lines = [c for c in PR_LINES if c[0] in lines.columns]
+    if not specs:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    markets = (specs[-1][1][ncol].sort_values(ascending=False)
+               .head(limit).index.tolist())
+    if not markets:
+        return
+    from matplotlib.gridspec import GridSpec
+    ncols = 2 if len(specs) > 1 else 1
+    nrows = math.ceil(len(specs) / ncols)
+    strip = 1.0 if pr_lines else 0.0
+    fig = plt.figure(dpi=DPI, figsize=(8.5 * ncols, (4.6 + 1.9 * strip) * nrows))
+    fig.patch.set_facecolor(SURFACE)
+    per = 2 if pr_lines else 1
+    grid = GridSpec(nrows * per, ncols, figure=fig,
+                    height_ratios=([1.0, 2.6] if pr_lines else [1.0]) * nrows,
+                    hspace=0.08 if pr_lines else 0.35)
+    nan = float("nan")
+    xs = list(range(len(markets)))
+    for i, (label, tb) in enumerate(specs):
+        r, c = i // ncols, i % ncols
+        ax = fig.add_subplot(grid[r * per + per - 1, c])
+        ax.set_facecolor(SURFACE)
+        labels, vals, ci = [], [], []
+        for m in markets:
+            if m in tb.index:
+                row = tb.loc[m]
+                labels.append(_spread_label(m, float(row["spread bps (wtd)"]),
+                                            spreads))
+                vals.append(float(row[vcol]))
+                ci.append((float(row[lo]), float(row[hi])))
+            else:
+                labels.append(str(m) + chr(10) + "no orders")
+                vals.append(nan)
+                ci.append((nan, nan))
+        _diverging_barv(ax, labels, vals, ci=ci,
+                        unit="spreads" if spreads else "bps", tight=True)
+        head = ((title + chr(10)) if i == 0 else "") + label
+        _style(ax, ylabel=label + ", " + ("in spreads" if spreads else "bps"),
+               xlabel="", title="" if pr_lines else head)
+        top_ax = ax
+        if pr_lines:
+            top_ax = fig.add_subplot(grid[r * per, c], sharex=ax)
+            top_ax.set_facecolor(SURFACE)
+            peak = 0.0
+            series = {col: [float(lines.loc[m, col]) if m in lines.index else nan
+                            for m in markets] for col, _, _ in pr_lines}
+            for col, name_, colr in pr_lines:
+                ys = series[col]
+                top_ax.plot(xs, ys, color=colr, linewidth=2.0, marker="o",
+                            markersize=5, label=name_, zorder=3)
+                for j, (x, y) in enumerate(zip(xs, ys)):
+                    if not np.isfinite(y):
+                        continue
+                    # The higher of the two points labels above, the lower
+                    # below, so the numbers stay off the other line.
+                    other = [series[k][j] for k in series if k != col]
+                    up = not other or not np.isfinite(other[0]) or y >= other[0]
+                    top_ax.annotate(f"{y:.1f}%", (x, y),
+                                    xytext=(0, 7 if up else -8),
+                                    textcoords="offset points", ha="center",
+                                    va="bottom" if up else "top",
+                                    fontsize=8, color=colr)
+                peak = max([peak] + [y for y in ys if np.isfinite(y)])
+            top_ax.set_ylim(0, (peak or 1.0) * 1.3)
+            _style(top_ax, ylabel="participation, %", xlabel="", title=head)
+            top_ax.tick_params(axis="x", labelbottom=False, length=0)
+            top_ax.spines["bottom"].set_visible(False)
+            # On the last panel's strip: the first carries the long title.
+            if i == len(specs) - 1:
+                top_ax.legend(loc="lower right", ncol=len(pr_lines), frameon=False,
+                              fontsize=8.5, labelcolor=INK,
+                              bbox_to_anchor=(1.0, 1.0), borderaxespad=0.2)
+            ax._panel = ""
+        top_ax._panel = label
+        if label in bold:
+            top_ax._panel_bold = True
+            top_ax.title.set_fontweight("bold")
+            ax.yaxis.label.set_fontweight("bold")
+    fig._deck_title = title
+    fig._deck_scale = 1.1
+    room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
+    _save(fig, out, name, bottom=room / nrows)
+
+
+def chart_best_worst_orders(t: pd.DataFrame, out: Path, name: str, title: str,
+                            measure: str, note: str = "") -> None:
+    """One bar per order, best on the left and worst on the right, in spreads.
+    Each bar is named by stock, side and date, with its spread underneath."""
+    if t is None or t.empty:
+        return
+    labels = []
+    for _, r in t.iterrows():
+        when = pd.Timestamp(r["date"]).strftime("%d %b") if r["date"] else ""
+        labels.append(f"{r['symbol']}" + chr(10) + f"{r['side']} {when}".strip()
+                      + chr(10) + f"[{r['spread bps']:.1f} bps]")
+    fig, (ax,) = _fig((12.0, 6.0))
+    _diverging_barv(ax, labels, [float(v) for v in t["vs Close spreads"]],
+                    unit="spreads")
+    best = int((t["group"] == "best").sum())
+    if 0 < best < len(t):
+        ax.axvline(best - 0.5, color=GRID, linewidth=1.0, linestyle="--",
+                   zorder=1)
+    _style(ax, ylabel=f"{measure}, in spreads", xlabel="", title=title)
+    fig._deck_title = title
+    room = _notes(fig, [note, "one bar per order: its own result divided by "
+                        "its own spread, the [x bps] under the bar"])
+    _save(fig, out, name, bottom=room)
+
+
 def chart_spreads(t: pd.DataFrame, out: Path, name: str, title: str,
                   measure: str, note: str = "", by_notional: bool = False,
                   limit: int = 12, unit: str = None, ylabel: str = None,
@@ -4558,7 +4776,8 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
 
 
 def chart_measures_by_market_side(specs: list, out: Path, name: str, title: str,
-                                  note: str = "", limit: int = 12) -> None:
+                                  note: str = "", limit: int = 12,
+                                  bold: tuple = ()) -> None:
     """Several measures by market and side: one row per measure, Buy on the
     left and Sell on the right, the same markets in the same order throughout.
 
@@ -4566,6 +4785,9 @@ def chart_measures_by_market_side(specs: list, out: Path, name: str, title: str,
     ordered by value traded in the last table. Buy and Sell share a scale
     within a row; the rows do not, because the measures differ in size and a
     shared scale would flatten the smaller ones.
+
+    bold names the measures whose panel titles and axis label are set in bold,
+    to point the reader at them.
     """
     unit = CHART_UNIT
     spreads = unit == "spreads"
@@ -4609,6 +4831,10 @@ def chart_measures_by_market_side(specs: list, out: Path, name: str, title: str,
                    title=((title + chr(10)) if r == 0 and c == 0 else "")
                    + f"{label}: {side}")
             ax._panel = f"{label}: {side}"
+            if label in bold:
+                ax._panel_bold = True
+                ax.title.set_fontweight("bold")
+                ax.yaxis.label.set_fontweight("bold")
         _share_ylim(list(axes[r]))
     fig._deck_title = title
     fig._deck_scale = 1.1
@@ -7119,6 +7345,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["76_pre_reversion_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], "reversion_bps")
     t["77_pre_close_mkt_spreads"] = t_in_spreads(pre, "market", "slip_close")
+    t["75c_pre_close_best_worst"] = t_best_worst_orders(pre, "slip_close")
     LC = "last_cont_vs_close_bps"
     if LC in pre and pre[LC].notna().any():
         t["68b_pre_lastcont_mkt_spreads"] = t_in_spreads(pre, "market", LC)
@@ -7557,7 +7784,27 @@ def build_charts(t: dict, out_dir: Path) -> None:
             ("Execution vs close", t.get("75_pre_close_mkt_side_spr", E)),
             ("Next open vs close", t.get("76_pre_reversion_mkt_side_spr", E))],
            charts, "28c_pretraded_measures_market_side.png",
-           "Pre-traded Analysis, by Side/Market", note=PRE_NOTE)
+           "Pre-traded Analysis, by Side/Market", note=PRE_NOTE,
+           bold=("Execution vs close",))
+    _guard(chart_measures_by_market,
+           [("First execution vs close", t.get("68_pre_firstexec_mkt_spreads", E)),
+            ("vs PVWAP", t.get("78_pre_pvwap_mkt_spreads", E)),
+            ("Execution vs close", t.get("77_pre_close_mkt_spreads", E)),
+            ("Next open vs close", t.get("70_pre_reversion_mkt_spreads", E))],
+           charts, "28e_pretraded_measures_market.png",
+           "Pre-traded Analysis, by Market", note=PRE_NOTE,
+           bold=("Execution vs close",))
+    _guard(chart_measures_by_market,
+           [("Execution vs close", t.get("77_pre_close_mkt_spreads", E)),
+            ("Next open vs close", t.get("70_pre_reversion_mkt_spreads", E))],
+           charts, "28f_pretraded_close_reversion_market.png",
+           "Pre-traded Analysis, by Market", note=PRE_NOTE,
+           bold=("Execution vs close",),
+           lines=t.get("82b_pr_pair_mkt_pretraded"))
+    _guard(chart_best_worst_orders, t.get("75c_pre_close_best_worst", E), charts,
+           "28d_pretraded_close_best_worst.png",
+           f"Pre-traded: {BEST_WORST_N} Best and {BEST_WORST_N} Worst Orders, "
+           "Execution vs Close", "Execution vs close", note=PRE_NOTE)
     chart_spreads(t.get("77_pre_close_mkt_spreads", E), charts,
                   "27_pretraded_close_market.png",
                   "Pre-traded Execution vs Close, by Market",
@@ -8805,6 +9052,7 @@ def run(path: Path, out_dir: Path, sample: bool = False,
     df = normalise(raw, cols)
     df = filter_cas_eligible(df, out_dir)
     df = filter_india_close_window(df)
+    df = filter_au_pr_cont(df)
     df = mark_close_opportunity(df)
     if DROP_NO_CLOSE_OPPORTUNITY and "reached_close_window" in df:
         gone = ~df["reached_close_window"]

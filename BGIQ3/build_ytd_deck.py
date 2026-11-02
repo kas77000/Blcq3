@@ -498,36 +498,55 @@ def story(run: Run) -> list[dict]:
                         "moving in opposite directions is market drift.",
                         "Next: does this hold market by market?"), ds_pre))
 
-    # --- 7. pre-traded first fills by side and market ------------------------------------
-    fe2 = sized(run.rows("74_pre_firstexec_mkt_side_spr", 2))
+    # --- 7. pre-traded execution vs close and reversion, by market ----------------------
+    # Buys and sells together. Left panel: where we finished against the close;
+    # right panel: whether the close held overnight. The side split follows.
+    ec = sized(run.rows("77_pre_close_mkt_spreads"))
+    rvm = sized(run.rows("70_pre_reversion_mkt_spreads"))
     b, src, say = [], [], ""
-    if fe2:
-        def count(side):
-            rows = [r for (m, s_), r in fe2 if s_ == side]
-            return sum(num(r, "spreads") > 0 for r in rows), len(rows)
-        (pb, nb), (ps, ns) = count("Buy"), count("Sell")
-        b.append("Was the price better when we started than at the close?")
-        b.append(f"Yes in {pb} of {nb} markets for buys, {ps} of {ns} for sells.")
-        say = (f"The same four measures as the last slide, one row each, buys on the "
-               f"left and sells on the right. Top row: above zero, our first fill was "
-               f"better than the close, so starting early helped. That was true in {pb} "
-               f"of {nb} markets for buys and {ps} of {ns} for sells.")
-        worst = min(fe2, key=lambda kr: num(kr[1], "spreads"))
-        best = max(fe2, key=lambda kr: num(kr[1], "spreads"))
+    if ec:
+        pos = sum(num(r, "spreads") > 0 for _, r in ec)
+        b.append(f"Our average price beat the close in {pos} of {len(ec)} markets.")
+        say = (f"Pre-traded orders by market, buys and sells together. Left: "
+               f"execution vs close. Above zero, our average price beat the close, "
+               f"so trading before the auction helped. That was true in {pos} of "
+               f"{len(ec)} markets.")
+        src.append(f"`77_pre_close_mkt_spreads`: positive in {pos}/{len(ec)} markets")
+        worst = min(ec, key=lambda kr: num(kr[1], "spreads"))
+        best = max(ec, key=lambda kr: num(kr[1], "spreads"))
         if num(worst[1], "spreads") < 0 and holds(worst[1]):
-            (m, s_), r = worst
-            b.append(f"The exception is {m} {s_.lower()}s, at {num(r, 'spreads'):+.2f} spreads.")
-            src.append(cite("74_pre_firstexec_mkt_side_spr", f"{m}, {s_}", r))
+            m, r = worst
+            b.append(f"The exception is {m}, at {num(r, 'spreads'):+.2f} spreads.")
+            src.append(cite("77_pre_close_mkt_spreads", m, r))
+        elif num(best[1], "spreads") > 0:
+            m, r = best
+            b.append(f"{m} gained most, {num(r, 'spreads'):+.2f} spreads.")
+            src.append(cite("77_pre_close_mkt_spreads", m, r))
+    if rvm:
+        bad = sorted([(k, r) for k, r in rvm if holds(r) and num(r, "spreads") < 0],
+                     key=lambda kr: num(kr[1], "spreads"))
+        if bad:
+            m, r = bad[0]
+            b.append(f"Overnight, {m} gave back {sp(num(r, 'spreads'))} spreads.")
+            say += (f" Right: next open vs close. {m} is the one market where the "
+                    f"price clearly came back, {sp(num(r, 'spreads'))} spreads, about "
+                    f"{bps(num(r, 'wtd mean bps'))}, by the next morning.")
+            src.append(cite("70_pre_reversion_mkt_spreads", m, r))
         else:
-            (m, s_), r = best
-            b.append(f"{m} {s_.lower()}s gained most, {num(r, 'spreads'):+.2f} spreads.")
-            src.append(cite("74_pre_firstexec_mkt_side_spr", f"{m}, {s_}", r))
-    S.append(slide("Pre-traded Analysis, by Side/Market", b,
-                   ["28c_pretraded_measures_market_side.png"], src,
-                   talk(say, "Counts use markets with at least 30 orders on that side. A "
-                        "whisker crossing zero means that market's result is not "
-                        "distinguishable from zero.",
-                        "Next: did the price come back after we finished?"), ds_pre))
+            b.append("No market gave back a clear amount overnight.")
+            say += (" Right: next open vs close. No market shows a give-back we can "
+                    "tell apart from zero.")
+        src.append(f"`70_pre_reversion_mkt_spreads`: {len(rvm)} markets with 30+ orders")
+    S.append(slide("Pre-traded Analysis, by Market", b,
+                   ["28f_pretraded_close_reversion_market.png"], src,
+                   talk(say + " The two lines are our participation, right-hand axis: "
+                        "our share of the closing auction, and our share of the market "
+                        "while the order traded before it. Two different volumes, so "
+                        "the lines are never added.",
+                        "Positive is always a saving. Counts use markets with at "
+                        "least 30 pre-traded orders. A whisker crossing zero means "
+                        "that market's result is not distinguishable from zero.",
+                        "Next: the overnight move, buys and sells apart."), ds_pre))
 
     # --- 8. pre-traded reversion by side and market --------------------------------------
     rv2 = sized(run.rows("76_pre_reversion_mkt_side_spr", 2))
