@@ -376,7 +376,7 @@ def story(run: Run) -> list[dict]:
     story_points = {}
 
     # --- 3. auction only reversion by market -------------------------------------------
-    # A auction-only order prints at the close by design, so the only test of
+    # An auction-only order prints at the close by design, so the only test of
     # the price it got is whether that price held overnight.
     rv = sized(run.rows("71_co_reversion_mkt_spreads"))
     allc = run.row("71b_co_reversion_side_spr", "All")
@@ -591,13 +591,13 @@ def story(run: Run) -> list[dict]:
                         "Next: did the auction move against these orders?"), ds_pre))
 
     # --- 10. pre-traded auction move by market -------------------------------------------
-    # last continuous price vs close, + = the last trade before the auction
-    # was better for the order than the close: the close printed against it.
+    # last continuous price vs close, + = the close was better for the order
+    # than the last trade before the auction, - = the close printed against it.
     lc = sized(run.rows("68b_pre_lastcont_mkt_spreads"))
     b, src, say = [], [], ""
     b.append("Auction move: the close against the last trade just before the auction.")
     if lc:
-        pos = [(k, r) for k, r in lc if num(r, "spreads") > 0]
+        pos = [(k, r) for k, r in lc if num(r, "spreads") < 0]
         clear = [k for k, r in pos if holds(r)]
         b.append(f"For pre-traded orders the close printed worse in {len(pos)} of "
                  f"{len(lc)} markets.")
@@ -608,10 +608,10 @@ def story(run: Run) -> list[dict]:
             b.append(f"The move is clear in {len(clear)} of them.")
         if len(pos) > len(lc) / 2:
             story_points["auc"] = "the auction itself moved the close against them."
-        say = ("Above zero means the last trade before the auction was a better price for "
-               "our order than the close. In other words, the auction moved the price "
-               "against us. That is the cost of finishing in the auction rather than in "
-               "continuous trading.")
+        say = ("Below zero means the close was a worse price for our order than the last "
+               "trade before the auction: the auction moved the price against us. That is "
+               "the cost of finishing in the auction rather than in continuous trading. "
+               "Above zero, the auction moved our way.")
         src += [cite("68b_pre_lastcont_mkt_spreads", k, r) for k, r in lc]
     S.append(slide("Pre-traded orders | Auction Move by market", b,
                    ["10c_last_cont_market.png"], src,
@@ -625,15 +625,15 @@ def story(run: Run) -> list[dict]:
     if lc2:
         def pos_count(side):
             rows = [r for (m, s_), r in lc2 if s_ == side]
-            return sum(num(r, "spreads") > 0 for r in rows), len(rows)
+            return sum(num(r, "spreads") < 0 for r in rows), len(rows)
         (pb, nb), (ps, ns) = pos_count("Buy"), pos_count("Sell")
         b.append(f"Buys paid the auction move in {pb} of {nb} markets. Sells: {ps} of {ns}.")
         if nb and ns and pb / nb > ps / ns + 0.2:
             b.append("The close tends to print high: that costs buys and helps sells.")
             story_points["auc"] = "the auction moved the close against them, mostly on buys."
-        worst_b = max([(k, r) for k, r in lc2 if k[1] == "Buy"],
+        worst_b = min([(k, r) for k, r in lc2 if k[1] == "Buy"],
                       key=lambda kr: num(kr[1], "spreads"), default=None)
-        if worst_b and holds(worst_b[1]):
+        if worst_b and holds(worst_b[1]) and num(worst_b[1], "spreads") < 0:
             (m, _), r = worst_b
             b.append(f"{m} buys paid most: {sp(num(r, 'spreads'))} spreads, "
                      f"about {bps(num(r, 'wtd mean bps'))}.")
@@ -641,8 +641,8 @@ def story(run: Run) -> list[dict]:
         say = ("Split by side, the cost sits mostly on buys. When prices drift up into the "
                "close, a buyer in the auction pays for it. That points to how much of a "
                "large buy we leave for the auction.")
-        src.append(f"`74b_pre_lastcont_mkt_side_spr`: buys positive {pb}/{nb}, "
-                   f"sells positive {ps}/{ns}")
+        src.append(f"`74b_pre_lastcont_mkt_side_spr`: buys negative {pb}/{nb}, "
+                   f"sells negative {ps}/{ns}")
     S.append(slide("Pre-traded orders | Auction Move by Side/Market", b,
                    ["28b_pretraded_last_cont_market_side.png"], src,
                    talk(say, "If the whole market closes higher, buys pay and sells gain "
@@ -684,8 +684,9 @@ def story(run: Run) -> list[dict]:
                 f"{num(r, '% pre-traded (orders)'):.0f}% pre-traded"
                 for g, r in hk_pf.items()]
     S.append(slide("Hong Kong Focus: Cash vs Swap", b, ["90_hk_measures.png"], src,
-                   talk(say, "Cash or swap is read from the client account. Positive = "
-                        "better for the order than the close.",
+                   talk(say, "Cash or swap is read from the client account. Positive is "
+                        "always good for the order. Last continuous vs close: "
+                        "positive = the auction moved our way.",
                         "Next: the same split for auction-only and pre-traded orders."), ds_hk))
 
     co_rev = dict(run.rows("120_hk3co_reversion"))
@@ -727,10 +728,11 @@ def story(run: Run) -> list[dict]:
                  if ec > 0 and es > 0 else
                  f"Whole order vs close: {ec:+.2f} cash, {es:+.2f} swap.")
         src += [cite("120_hk3pre_vs_close", g, r) for g, r in pre_ex.items()]
-        say = ("Same three prices as slide 7, Hong Kong only. Starting early helped on both "
+        say = ("The slide 7 prices, Hong Kong only. Starting early helped on both "
                "account types, and both whole orders finished at or ahead of the close.")
     S.append(slide("Hong Kong Pre-traded: Cash vs Swap", b, ["90c_hk_pre_measures.png"],
-                   src, talk(say, "Positive = better for the order than the close.",
+                   src, talk(say, "Positive is always good for the order. Last continuous vs "
+                             "close: positive = the auction moved our way.",
                              "Next: which Hong Kong orders gain from starting early?"),
                    ds_hk_pre))
 

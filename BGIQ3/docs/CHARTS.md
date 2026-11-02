@@ -46,7 +46,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `26_pretraded_by_side` | Pre-traded orders: first execution vs close, vs PVWAP, execution vs close, next open vs close; All / Buy / Sell | In the desk's order. |
 | `28c_pretraded_measures_market_side` | Pre-traded orders, the same four measures by market: one row per measure, Buy left, Sell right | Buy and Sell share a scale within a row; rows do not. On slide 8. |
 | `28_pretraded_first_exec_market_side` | Pre-traded first execution vs close, by market, buys and sells | Was starting before the close the right call, per market and side? |
-| `28b_pretraded_last_cont_market_side` | Pre-traded last continuous price vs close, by market, buys and sells (+ = the last continuous trade was better for the order than the close) | How far did the close move from where the session ended, per market and side? |
+| `28b_pretraded_last_cont_market_side` | Pre-traded last continuous price vs close, by market, buys and sells (+ = the auction moved our way, - = against us) | How far did the close move from where the session ended, per market and side? |
 | `29_pretraded_close_market_side` | Pre-traded execution vs close, by market, buys and sells | |
 | `30_pretraded_reversion_market_side` | Pre-traded reversion, by market, buys and sells | Same as the H1 slide (Korea sells stood out in H1). |
 | `33_pretraded_pvwap_market_side` | Pre-traded vs PVWAP, by market, buys and sells | |
@@ -179,7 +179,7 @@ Hong Kong, every order in the review, split Cash / Swap by client account (`CASH
 
 | Chart | What it shows | How to read it |
 |---|---|---|
-| `90_hk_measures` | First execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | Same sign on all three: + = better for the order than the close. |
+| `90_hk_measures` | First execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | + is always good for the order: better than the close, and for last continuous vs close, the auction moved our way. |
 | `90b_hk_co_measures` | Auction-only orders: last continuous price vs close, execution vs close, next open vs close (reversion); Cash panel, Swap panel | Execution vs close sits at zero by design; reversion is the measure that moves. |
 | `90c_hk_pre_measures` | Pre-traded orders: first execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | Orders with nothing printed in the close are in neither 90b nor 90c. |
 | `91a`/`91b`/`91c_hk_spread_q_*` | Each of the three by spread quartile, Cash and Swap side by side | Does the gap between Cash and Swap hold in names that trade alike? |

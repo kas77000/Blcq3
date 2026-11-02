@@ -3734,10 +3734,10 @@ COST_SAVE_NOTE = "← cost   |   savings →"
 # Every first-execution chart is on pre-traded orders only, and every one of
 # them says so. The measure is undefined for an order that only ever printed
 # in the auction, and a reader has no way to know that from the title.
-LAST_CONT_NOTE = ("Positive: the last continuous trade "
-                  "was better for the order than the close (a buy: below it; "
-                  "a sell: above it). The same gap as the auction move, read "
-                  "the other way round. CAS names: qatt's last trade before "
+LAST_CONT_NOTE = ("Positive: the auction moved the price our way, the "
+                  "close better for the order than the last continuous trade "
+                  "(a buy: the close below it; a sell: above it). Negative: it "
+                  "moved against us. CAS names: qatt's last trade before "
                   "the auction")
 CO_ARRIVAL_NOTE = ("auction-only: 99.5% or more of the order printed in the "
                    "auction. Arrival slippage: average price against the price "
@@ -5599,10 +5599,10 @@ def add_price_measures(df: pd.DataFrame) -> pd.DataFrame:
             df["auction_move_abs_spreads"] = (df["auction_move_abs_bps"]
                                               / df["spread_bps"].where(df["spread_bps"] > 0))
         if "is_buy" in df:
-            # The first-execution measure with the last continuous trade in
-            # place of the first fill: + = that trade was better for the
-            # order than the close. The auction move, the other way round.
-            df["last_cont_vs_close_bps"] = first_exec_from_prices(
+            # The close against the last continuous trade, read like every
+            # other measure: + = the close was the better price for the
+            # order (the auction moved our way), - = it moved against us.
+            df["last_cont_vs_close_bps"] = -first_exec_from_prices(
                 df["close_price"], df["px_cont_last"], df["is_buy"])
         if "wait_cost_bps" in df:
             # The rest of arrival -> close, so the three legs add up exactly.
@@ -6467,7 +6467,7 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                 note=("India CAS names from " + AUCTION_FROM["India"] + ". India "
                       "reports no close share, so the split is read from the price: "
                       "auction only = the first fill was at the close, pre-traded = "
-                      "anywhere else. A auction-only order's first fill is the close, "
+                      "anywhere else. An auction-only order's first fill is the close, "
                       "so its first execution is zero by definition." + (chr(10) + sizes if sizes else "")
                       + chr(10) + "Next open vs close: negative = the price came "
                       "back against us. " + LAST_CONT_NOTE + "."),
@@ -8401,10 +8401,10 @@ def self_test() -> int:
         "is_buy": [True, False], "px_cont_last": [99.0, 99.0],
         "close_price": [100.0, 100.0]}))
     check("last continuous vs close: a buy whose last trade was below the "
-          "close is +, a sell -, the mirror of the auction move",
-          np.allclose(lc["last_cont_vs_close_bps"], [100.0, -100.0])
+          "close is - (the close moved against it), a sell +, as the auction move",
+          np.allclose(lc["last_cont_vs_close_bps"], [-100.0, 100.0])
           and (np.sign(lc["last_cont_vs_close_bps"])
-               == -np.sign(lc["auction_move_bps"])).all(),
+               == np.sign(lc["auction_move_bps"])).all(),
           lc[["last_cont_vs_close_bps", "auction_move_bps"]].to_dict("records"))
     bk = add_price_measures(pd.DataFrame({"close_pr": [0.0, 4.9, 5.0, 30.0]}))
     check("ClosePR buckets: <5 / 5-10 / 30+, and no auction fill is no bucket",
