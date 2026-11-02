@@ -6397,6 +6397,39 @@ START_LABELS = ["under 15 min", "15-30 min", "30-60 min", "1-2 h", "2-4 h", "ove
 FOCUS_START_MARKET = "Australia"
 
 
+LATE_START_MIN = 20     # "arrived late": started this close to the close or closer
+
+
+def log_late_starts(df: pd.DataFrame, t: dict) -> None:
+    """The share of Australia's orders that started in the last LATE_START_MIN
+    minutes before the close, in orders and in value: all orders, then
+    auction-only and pre-traded. Written to the log and to 140_au3."""
+    au = df[df["market"].eq(FOCUS_START_MARKET) & df["has_auction"]
+            & df["mins_to_close_at_start"].notna()]
+    if au.empty:
+        return
+    rows = []
+    for name, part in [("All", au), ("Auction-only", au[_flag(au, "close_only")]),
+                       ("Pre-traded", au[_flag(au, "pretraded")])]:
+        if part.empty:
+            continue
+        late = part["mins_to_close_at_start"] <= LATE_START_MIN
+        val = float(part["notional"].sum())
+        rows.append({"flow": name, "orders": len(part), "late orders": int(late.sum()),
+                     "% of orders": 100.0 * late.mean(),
+                     "% of value": (100.0 * float(part.loc[late, "notional"].sum()) / val
+                                    if val > 0 else np.nan)})
+    tab = pd.DataFrame(rows).set_index("flow").round(2)
+    t["140_au3_late_starts"] = tab
+    log("")
+    log(f"  Australia: orders that started {LATE_START_MIN} min or less before "
+        "the close")
+    log(f"    {'':<14}{'orders':>9}{'late':>8}{'% orders':>10}{'% value':>10}")
+    for name, r in tab.iterrows():
+        log(f"    {name:<14}{int(r['orders']):>9,}{int(r['late orders']):>8,}"
+            f"{r['% of orders']:>9.1f}%{r['% of value']:>9.1f}%")
+
+
 def build_australia_tables(df: pd.DataFrame, t: dict) -> None:
     """Pre-traded orders by how long before the close they started.
 
@@ -6410,6 +6443,7 @@ def build_australia_tables(df: pd.DataFrame, t: dict) -> None:
     if not need <= set(df.columns):
         log("  Australia focus skipped: no order start time in the file.")
         return
+    log_late_starts(df, t)
     pre = df[df["has_auction"] & _flag(df, "pretraded")
              & df["mins_to_close_at_start"].notna()].copy()
     is_au = pre["market"].eq(FOCUS_START_MARKET)
@@ -8677,6 +8711,11 @@ def self_test() -> int:
     check("Australia start bands: other markets left out, after-close orders dropped",
           not ap.empty and int(ap["orders"].sum()) == 35
           and abs(ap["% of Australia value"].sum() - 100) < 0.1, ap.get("orders"))
+    ls = at.get("140_au3_late_starts", pd.DataFrame())
+    # Australia's 40 rows: 5, 20, 10 and -3 minutes are within 20, so 4 in 8.
+    check("Australia late starts: share of orders started 20 min or less before the close",
+          not ls.empty and np.isclose(ls.loc["Pre-traded", "% of orders"], 50.0),
+          ls.to_dict() if not ls.empty else "empty")
     check("India CAS flow carries the share of executed qty in the close",
           ft.get("130_in6_cas_flow_profile", pd.DataFrame())
             .get(EXEC_IN_CLOSE, pd.Series([0.0])).round(1).eq(40.0).all())
