@@ -4611,23 +4611,34 @@ def chart_pr_pair(t: pd.DataFrame, out: Path, name: str, title: str,
 
 # The share of the plot each measure keeps on the reversion/participation
 # charts: they stay apart, so the two scales never have to be read together.
-REV_SHARE, PR_SHARE = 0.66, 0.26
+REV_SHARE, PR_SHARE = 0.66, 0.22
+PR_HEADROOM = 0.07      # above the line's highest point, for its label
 
 
 def _pr_overlay(ax, prs: list, top: float, right_label: bool) -> None:
-    """Participation hanging from the top of ax, on a reversed right axis."""
+    """Participation as a line across the top of ax, on the right axis.
+
+    The axis is scaled so zero sits above the reversion bars: the line keeps
+    the top band of the plot and the two sets of marks never meet. A market
+    with no figure leaves a gap in the line.
+    """
     from matplotlib.ticker import MaxNLocator
     ax2 = ax.twinx()
-    reach = top * 1.18 / PR_SHARE
-    ax2.set_ylim(reach, 0)
-    ax2.bar(np.arange(len(prs)), np.nan_to_num(prs), width=0.62,
-            color=SERIES[2], zorder=3)
+    span = top / PR_SHARE
+    low = -span * (1.0 - PR_SHARE - PR_HEADROOM)
+    ax2.set_ylim(low, low + span)
+    x = np.arange(len(prs))
+    ax2.plot(x, prs, color=SERIES[2], linewidth=2.0, marker="o", markersize=6,
+             zorder=3)
     for i, v in enumerate(prs):
         if np.isfinite(v):
-            ax2.text(i, v + reach * 0.012, f"{v:.1f}%", ha="center", va="top",
+            ax2.text(i, v + span * 0.022, f"{v:.1f}%", ha="center", va="bottom",
                      fontsize=8.5, color=INK, zorder=5)
+    # Up to the first tick past the line, so the scale covers every point.
     ax2.set_yticks([t for t in MaxNLocator(4).tick_values(0, top)
-                    if 0 <= t <= top * 1.001])
+                    if 0 <= t <= top * 1.25])
+    # A market with no orders draws nothing, so autoscale would drop its slot.
+    ax.set_xlim(-0.6, len(prs) - 0.4)
     if right_label:
         ax2.set_ylabel("Close participation, % (mean per order)",
                        color=INK_SECOND, fontsize=9, loc="top")
@@ -4640,7 +4651,7 @@ def _pr_overlay(ax, prs: list, top: float, right_label: bool) -> None:
 
 
 def _make_room(ax, lo: float, hi: float) -> None:
-    """Keep reversion in the lower part of ax, for the bars hanging above it."""
+    """Keep reversion in the lower part of ax, for the line above it."""
     ticks = [t for t in ax.get_yticks() if lo <= t <= hi]
     ax.set_ylim(lo, lo + (hi - lo) / REV_SHARE)
     ax.set_yticks(ticks)
@@ -4649,8 +4660,9 @@ def _make_room(ax, lo: float, hi: float) -> None:
 def _rev_pr_notes(fig, india: bool) -> float:
     return _notes(fig, [
         CO_NOTE,
-        "Green bars, right axis (reads downward from the top): our share of "
-        "the closing auction's volume, averaged per order.",
+        "Green line, right axis: our share of the closing auction's volume, "
+        "averaged per order. The line joins markets to make them easy to read "
+        "across; it is not a trend.",
         "India (PR): where the name had no closing auction, the participation "
         "rate of the window orders." if india else "",
         SPREAD_NOTE, CI_NOTE])
@@ -4658,13 +4670,13 @@ def _rev_pr_notes(fig, india: bool) -> float:
 
 def chart_reversion_with_pr(rev: pd.DataFrame, pr: pd.DataFrame, out: Path,
                             name: str, title: str) -> None:
-    """Close-only reversion by market, with participation hanging from the top.
+    """Close-only reversion by market, with participation as a line above it.
 
     The one family of charts here on two scales, at the desk's request. It
     stays readable because the two never share space: reversion keeps the
-    lower part of the plot on the left axis, participation hangs from the top
-    edge on a reversed right axis, and each bar carries its own number. No
-    title on the picture, at the desk's request; the deck still gets one.
+    lower part of the plot on the left axis, participation runs across the
+    top on the right axis, and every mark carries its own number. No title
+    on the picture, at the desk's request; the deck still gets one.
     """
     col = "close PR % (mean)"
     d = _chartable(rev)
@@ -4909,8 +4921,9 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
         bottom += vals
     ticks = []
     for i, f in enumerate(flows):
-        ax.text(i, bottom[i] + top * 0.02, f"{bottom[i]:,.0f}m", ha="center",
-                va="bottom", fontsize=10, color=INK, zorder=5)
+        share = 100.0 * bottom[i] / bottom.sum()
+        ax.text(i, bottom[i] + top * 0.02, f"{bottom[i]:,.0f}m  ({share:.0f}%)",
+                ha="center", va="bottom", fontsize=10, color=INK, zorder=5)
         small = [f"{k} {float(t.loc[(f, k), '% of flow notional']):.0f}%"
                  for k in types if (f, k) in t.index
                  and float(t.loc[(f, k), ncol]) < top * 0.07]
@@ -4925,7 +4938,8 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
               ncol=len(types), fontsize=8.5)
     _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="",
            title=title + chr(10))
-    room = _notes(fig, [note, "each segment's % is its share of that bar's value. "
+    room = _notes(fig, [note, "the % on top is the bar's share of the two together; "
+                        "each segment's % is its share of that bar's value. "
                         "Order type from bgi_order_types.csv, matched on the "
                         "order id; " + ORDER_TYPE_UNMATCHED + " = no row in "
                         "that file."])

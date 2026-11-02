@@ -405,9 +405,9 @@ def story(run: Run) -> list[dict]:
         lo = min(pr, key=lambda kr: num(kr[1], "close PR % (mean)"))
         hi = max(pr, key=lambda kr: num(kr[1], "close PR % (mean)"))
         pl, ph = num(lo[1], "close PR % (mean)"), num(hi[1], "close PR % (mean)")
-        b.append(f"Green bars: our share of the auction, {pl:.1f}% to {ph:.1f}%."
+        b.append(f"Green line: our share of the auction, {pl:.1f}% to {ph:.1f}%."
                  + (" Too small to matter." if ph < 10 and co_held else ""))
-        say += (f" The green bars from the top are our share of the closing auction: "
+        say += (f" The green line along the top is our share of the closing auction: "
                 f"{pl:.1f}% in {lo[0]} to {ph:.1f}% in {hi[0]} on average.")
         src += [f"`81_close_pr_mkt_close_only` [{k}]: mean {num(r, 'close PR % (mean)'):.2f}%, "
                 f"{int(num(r, 'orders')):,} orders" for k, r in pr]
@@ -416,7 +416,7 @@ def story(run: Run) -> list[dict]:
                    talk(say,
                         "Execution vs close is zero by design for these orders, which is "
                         "why we use reversion. Small markets such as the Philippines swing "
-                        "on a handful of orders: the whisker shows it. Green bars: our "
+                        "on a handful of orders: the whisker shows it. Green line: our "
                         "shares in the close over the official close volume, averaged per "
                         "order. India (PR): non-CAS names use the order's participation rate.",
                         "Next: does it look the same for buys and sells?"), ds_co))
