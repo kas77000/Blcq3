@@ -4632,21 +4632,60 @@ def t_order_type_market(df: pd.DataFrame) -> pd.DataFrame:
     return out.round(2)
 
 
+def _drop_unknown_type(t: pd.DataFrame, share: str):
+    """An order-type table without its Unknown rows, each group's shares
+    worked out again over the types that are left. Returns the table and the
+    value taken out (USDm), so the footnote can say how much. The tables
+    themselves keep Unknown: only the charts leave it out."""
+    if t is None or t.empty or t.index.nlevels < 2:
+        return t, 0.0
+    ncol = "notional (" + CURRENCY + "m)"
+    unk = t.index.get_level_values(1) == ORDER_TYPE_UNMATCHED
+    if not unk.any():
+        return t, 0.0
+    gone = float(t.loc[unk, ncol].sum())
+    k = t[~unk].copy()
+    tot = k.groupby(level=0)[ncol].transform("sum")
+    k[share] = (100 * k[ncol] / tot.where(tot > 0)).round(2)
+    return k, gone
+
+
+def _whole_pcts(shares: dict) -> dict:
+    """Shares rounded to whole percents that still add up to exactly 100:
+    the points lost to rounding go to the largest remainders."""
+    tot = sum(v for v in shares.values() if v > 0)
+    if tot <= 0:
+        return {k: 0 for k in shares}
+    exact = {k: 100.0 * max(v, 0.0) / tot for k, v in shares.items()}
+    out = {k: int(math.floor(v)) for k, v in exact.items()}
+    for k in sorted(exact, key=lambda k: out[k] - exact[k])[:100 - sum(out.values())]:
+        out[k] += 1
+    return out
+
+
+def _unknown_note(gone: float) -> str:
+    return (f" Orders with no row in that file ({gone:,.1f}m) are left out."
+            if gone > 0 else "")
+
+
 def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
                             note: str = "", limit: int = 12) -> None:
     """Discretionary against stipulated, by market: one 100% bar per market.
 
-    Colour is the order type, as on 23b; Unknown (no row in the order-types
-    file) is grey and on top. Each segment carries its share of the market.
+    Colour is the order type, as on 23b. Orders with no row in the
+    order-types file are left out and the shares worked out over the rest;
+    the footnote says how much. Each segment carries its share of the market.
     """
-    d = _chartable(t)
-    if d.empty or d.index.nlevels < 2:
+    d, gone = _drop_unknown_type(_chartable(t), "% of market notional")
+    if d is None or d.empty or d.index.nlevels < 2:
         return
     ncol = "notional (" + CURRENCY + "m)"
     pcol = "% of market notional"
     markets = list(dict.fromkeys(d.index.get_level_values(0)))[:limit]
     totals = d.groupby(level=1)[ncol].sum().sort_values(ascending=False)
-    types = [k for k in totals.index if k != ORDER_TYPE_UNMATCHED]
+    # A fixed order, so a type keeps its colour on every chart:
+    # Discretionary blue, Stipulated orange.
+    types = sorted(k for k in totals.index if k != ORDER_TYPE_UNMATCHED)
     if ORDER_TYPE_UNMATCHED in totals.index:
         types.append(ORDER_TYPE_UNMATCHED)
     colors = {k: (INK_MUTED if k == ORDER_TYPE_UNMATCHED else SERIES[i % len(SERIES)])
@@ -4654,6 +4693,8 @@ def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
     fig, (ax,) = _fig((11.0, 5.8))
     x = np.arange(len(markets))
     bottom = np.zeros(len(markets))
+    whole = {m: _whole_pcts({k: float(d.loc[(m, k), pcol]) for k in types
+                             if (m, k) in d.index}) for m in markets}
     for k in types:
         vals = np.array([float(d.loc[(m, k), pcol]) if (m, k) in d.index else 0.0
                          for m in markets])
@@ -4661,7 +4702,7 @@ def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
                label=k, edgecolor=SURFACE, linewidth=1.2)
         for i, v in enumerate(vals):
             if v >= 8:
-                ax.text(i, bottom[i] + v / 2, f"{v:.0f}%", ha="center",
+                ax.text(i, bottom[i] + v / 2, f"{whole[markets[i]][k]}%", ha="center",
                         va="center", fontsize=8.5, color=_ink_on(colors[k]),
                         zorder=5)
         bottom += vals
@@ -4679,8 +4720,7 @@ def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
     room = _notes(fig, [note, "Each bar is one market's value, split by order "
                         "type; the figure on top is the market's value traded. "
                         "Order type from bgi_order_types.csv, matched on the "
-                        "order id; " + ORDER_TYPE_UNMATCHED + " = no row in "
-                        "that file."])
+                        "order id." + _unknown_note(gone)])
     _save(fig, out, name, bottom=room)
 
 
@@ -5047,15 +5087,18 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
 
     Each segment carries its share of that bar's value, so the split inside
     auction-only and inside pre-traded reads directly. Colour here is the order
-    type, the same type the same colour in both bars; Unknown (no row in the
-    order-types file) is grey and last, so a gap in the file is visible.
+    type, the same type the same colour in both bars. Orders with no row in
+    the order-types file are left out; the footnote says how much.
     """
+    t, gone = _drop_unknown_type(t, "% of flow notional")
     if t is None or t.empty:
         return
     ncol = "notional (" + CURRENCY + "m)"
     flows = list(dict.fromkeys(t.index.get_level_values(0)))
     totals = t.groupby(level=1)[ncol].sum().sort_values(ascending=False)
-    types = [k for k in totals.index if k != ORDER_TYPE_UNMATCHED]
+    # A fixed order, so a type keeps its colour on every chart:
+    # Discretionary blue, Stipulated orange.
+    types = sorted(k for k in totals.index if k != ORDER_TYPE_UNMATCHED)
     if ORDER_TYPE_UNMATCHED in totals.index:
         types.append(ORDER_TYPE_UNMATCHED)
     colors = {k: (INK_MUTED if k == ORDER_TYPE_UNMATCHED else SERIES[i % len(SERIES)])
@@ -5064,6 +5107,8 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
     x = np.arange(len(flows))
     bottom = np.zeros(len(flows))
     top = max(float(t.loc[f, ncol].sum()) for f in flows) or 1.0
+    whole = {f: _whole_pcts({k: float(t.loc[(f, k), ncol]) for k in types
+                             if (f, k) in t.index}) for f in flows}
     for k in types:
         vals = np.array([float(t.loc[(f, k), ncol]) if (f, k) in t.index else 0.0
                          for f in flows])
@@ -5072,19 +5117,19 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
         for i, f in enumerate(flows):
             if (f, k) not in t.index or vals[i] <= 0:
                 continue
-            pct = float(t.loc[(f, k), "% of flow notional"])
+            pct = whole[f][k]
             # Inside the segment when it is tall enough to hold the text.
             if vals[i] >= top * 0.07:
                 ax.text(i, bottom[i] + vals[i] / 2,
-                        f"{pct:.0f}%  ({vals[i]:,.0f}m)", ha="center",
+                        f"{pct}%  ({vals[i]:,.0f}m)", ha="center",
                         va="center", fontsize=9, color="white", zorder=5)
         bottom += vals
     ticks = []
+    shares = _whole_pcts({f: float(bottom[i]) for i, f in enumerate(flows)})
     for i, f in enumerate(flows):
-        share = 100.0 * bottom[i] / bottom.sum()
-        ax.text(i, bottom[i] + top * 0.02, f"{bottom[i]:,.0f}m  ({share:.0f}%)",
+        ax.text(i, bottom[i] + top * 0.02, f"{bottom[i]:,.0f}m  ({shares[f]}%)",
                 ha="center", va="bottom", fontsize=10, color=INK, zorder=5)
-        small = [f"{k} {float(t.loc[(f, k), '% of flow notional']):.0f}%"
+        small = [f"{k} {whole[f][k]}%"
                  for k in types if (f, k) in t.index
                  and float(t.loc[(f, k), ncol]) < top * 0.07]
         n = int(t.loc[f, "orders"].sum())
@@ -5101,8 +5146,7 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
     room = _notes(fig, [note, "the % on top is the bar's share of the two together; "
                         "each segment's % is its share of that bar's value. "
                         "Order type from bgi_order_types.csv, matched on the "
-                        "order id; " + ORDER_TYPE_UNMATCHED + " = no row in "
-                        "that file."])
+                        "order id." + _unknown_note(gone)])
     _save(fig, out, name, bottom=room)
 
 
@@ -8397,6 +8441,10 @@ def self_test() -> int:
                       ["d1"] * 4 + ["d2"] * 4, list("ABCDEFGH"))
     check("standard error is clustered by date (two days moving together)",
           np.isclose(st["SE bps (date-clustered)"], 1.0), st)
+    wp = [_whole_pcts({"a": 50.5, "b": 49.5}),
+          _whole_pcts({"a": 33.4, "b": 33.3, "c": 33.3})]
+    check("whole percents on the order-type bars always add up to 100",
+          all(sum(w.values()) == 100 for w in wp), wp)
     lc = add_price_measures(pd.DataFrame({
         "is_buy": [True, False], "px_cont_last": [99.0, 99.0],
         "close_price": [100.0, 100.0]}))
