@@ -4120,6 +4120,24 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
 PIE_MIN_PCT = 3.0
 
 
+# The desk's two-letter market codes, written on each pie slice and in front
+# of the name in the legend. Others has none.
+PIE_MARKET_CODES = {
+    "Australia": "AU", "Hong Kong": "HK", "Indonesia": "IJ", "India": "IN",
+    "Japan": "JP", "South Korea": "KS", "Malaysia": "MK", "New Zealand": "NZ",
+    "Philippines": "PM", "Singapore": "SP", "Thailand": "TB", "Taiwan": "TT",
+}
+# Below this share of the pie a slice's code goes just outside the rim.
+PIE_CODE_INSIDE_PCT = 3.5
+
+
+def _ink_on(color) -> str:
+    """White or dark text, whichever reads on this fill."""
+    from matplotlib.colors import to_rgb
+    r, g, b = to_rgb(color)
+    return INK if 0.299 * r + 0.587 * g + 0.114 * b > 0.6 else "white"
+
+
 def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
                                name: str) -> None:
     """Value traded by market for one account type (Cash or Swap), as a pie.
@@ -4162,11 +4180,22 @@ def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
     def tag(v: float) -> str:
         return f"{v:,.0f}m" if v >= 1 else "<1m"
 
-    labels = [f"{m}  {100.0 * v / grand:.0f}%  ({tag(v)})"
-              for m, v in zip(names, vals)]
+    codes = [PIE_MARKET_CODES.get(m, "") for m in names]
+    labels = [f"{c + ' ' if c else ''}{m}  {100.0 * v / grand:.0f}%  ({tag(v)})"
+              for c, m, v in zip(codes, names, vals)]
     fig, (ax,) = _fig((10.0, 6.2))
     wedges, _ = ax.pie(vals, colors=colors, startangle=90, counterclock=False,
                        wedgeprops={"edgecolor": SURFACE, "linewidth": 1.4})
+    for w, c, v, col in zip(wedges, codes, vals, colors):
+        if not c:
+            continue
+        mid = np.deg2rad((w.theta1 + w.theta2) / 2)
+        # A slice too thin for its code carries it just outside the rim.
+        inside = 100.0 * v / grand >= PIE_CODE_INSIDE_PCT
+        r = 0.72 if inside else 1.1
+        ax.text(r * np.cos(mid), r * np.sin(mid), c, ha="center", va="center",
+                fontsize=10 if inside else 9, fontweight="bold",
+                color=_ink_on(col) if inside else INK)
     ax.legend(wedges, labels, loc="center left", bbox_to_anchor=(1.02, 0.5),
               frameon=False, fontsize=10.5, labelcolor=INK, labelspacing=0.9)
     note = (f"{part} only, by client account: {grand:,.0f}m in all. The percentage "
