@@ -238,7 +238,7 @@ folder, then beside the script; `--order-types` points elsewhere. `OrderId`
 is matched to the order file's `aggrTgtId` as text, so ids such as
 `00110963175ORT01` keep their leading zeros. An order with no row in the file
 is labelled `Unknown`, kept, and counted in the run log. Chart `23b` splits
-close-only and pre-traded by order type.
+auction-only and pre-traded by order type.
 
 ## The AWS extract
 
@@ -574,9 +574,9 @@ Same opening as the Q1 deck, then the two populations taken separately:
 
 | Chart | What it answers |
 |---|---|
-| `23_flow_split` | close-only vs pre-traded: value, fill, %ADV, share in the close |
+| `23_flow_split` | auction-only vs pre-traded: value, fill, %ADV, share in the close |
 | `24_adv_profile` | value by order size |
-| `22_reversion_close_only` | close-only reversion by market (its close slippage is 0 by design) |
+| `22_reversion_close_only` | auction-only reversion by market (its close slippage is 0 by design) |
 | `25_close_only_reversion_market_side` | the same, Buy panel over Sell panel |
 | `26_pretraded_by_side` | pre-traded: first exec vs close, exec vs close, reversion - All, Buy, Sell |
 | `27_pretraded_close_market` | pre-traded vs close, by market |
@@ -585,9 +585,9 @@ Same opening as the Q1 deck, then the two populations taken separately:
 | `32_pretraded_pvwap_market` | pre-traded vs PVWAP, by market |
 | `33_pretraded_pvwap_market_side` | pre-traded vs PVWAP, by market and side |
 | `31_pretraded_adv_profile` | pre-traded orders and value by ADV% |
-| `34`/`35`/`36_close_pr_*` | close participation (ClosePR), simple mean per order, by market - all, close-only, pre-traded; one scale. India's window orders use `PR` instead: no closing auction in H1, so ClosePR is zero there |
+| `34`/`35`/`36_close_pr_*` | close participation (ClosePR), simple mean per order, by market - all, auction-only, pre-traded; one scale. India's window orders use `PR` instead: no closing auction in H1, so ClosePR is zero there |
 
-Close-only includes India's 17:30-17:45 orders (counted as close). India cannot
+Auction-only includes India's 17:30-17:45 orders (counted as close). India cannot
 be pre-traded. The run log's `H1 NARRATIVE` block prints the summary, the
 weakest markets and the widest Buy/Sell gaps, each marked "holds" only when its
 95% interval stays on one side of zero.
@@ -603,8 +603,8 @@ python build_h1_deck.py --results output_h1 --cover
 `tables.xlsx` and `charts/`, and nothing else. No figure is typed into the
 script: each number is looked up at build time, and every sentence that takes
 a side - beat or lagged, cost or gained, clear or not - is picked from the sign
-and the 95% interval of that number. Slides: executive summary, close-only vs
-pre-traded, close-only reversion, pre-traded start vs finish, by side, by size,
+and the 95% interval of that number. Slides: executive summary, auction-only vs
+pre-traded, auction-only reversion, pre-traded start vs finish, by side, by size,
 what we will change, then appendix.
 
 Charts come from `charts_deck/`, which `moc_tca.py` writes beside `charts/`: the same figures with no title, no footnotes and larger type, Buy|Sell panels side by side. The deck prints each title above its chart and the footnotes once along the bottom of the slide. `charts/` keeps the full versions for reading on their own.

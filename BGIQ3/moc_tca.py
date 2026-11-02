@@ -594,7 +594,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "28_", "28b_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "28_", "28b_", "28c_", "29_", "30_", "33_",
                                   "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
@@ -609,8 +609,8 @@ CHART_FOLDERS = {
     "12_liquidity_buckets":      ["24_", "31_", "54_"],
     "13_market_deep_dives":      ["12_", "12b_", "13_", "13b_", "13c_", "55_"],
     "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
-    "reversion":                 ["11_", "21_", "22_", "22b_", "25b_"],
-    "flow_and_algo_choice":      ["15_algo", "23_", "23b_"],
+    "reversion":                 ["11_", "21_", "22_", "22b_", "22c_", "25b_"],
+    "flow_and_algo_choice":      ["15_algo", "23_", "23b_", "23c_"],
     "australia focus":           ["98a_", "98b_", "98c_"],
     # Market focus folders, asked for by name.
     "hk focus":                  ["90_", "90b_", "90c_", "91a_", "91b_",
@@ -628,10 +628,13 @@ DECK_CHART_ORDER = [
     "13_market_notional.png", "13b_market_notional_cash.png",
     "13c_market_notional_swap.png", "24_adv_profile.png",
     "23_flow_split.png", "23b_flow_split_order_type.png",
+    "23c_order_type_market.png",
     "22b_close_only_reversion_participation.png",
+    "22c_auction_only_order_type_market.png",
     "25b_close_only_reversion_participation_side.png",
     "35b_close_pr_close_only_side.png",
-    "26_pretraded_by_side.png", "28_pretraded_first_exec_market_side.png",
+    "26_pretraded_by_side.png", "28c_pretraded_measures_market_side.png",
+    "28_pretraded_first_exec_market_side.png",
     "30_pretraded_reversion_market_side.png", "36_close_pr_pretraded.png",
     "36b_pretraded_pr_close_cont.png", "10c_last_cont_market.png",
     "28b_pretraded_last_cont_market_side.png",
@@ -3393,7 +3396,7 @@ def _flag(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 def t_flow_split(df: pd.DataFrame) -> pd.DataFrame:
-    """Close-only against pre-traded: how much of each, and how each filled.
+    """Auction-only against pre-traded: how much of each, and how each filled.
 
     Shares are of the two together - the orders that reached the close - so
     they add to 100, the way the Q1 slide did. An order that never printed in
@@ -3401,7 +3404,7 @@ def t_flow_split(df: pd.DataFrame) -> pd.DataFrame:
     """
     if df is None or df.empty:
         return pd.DataFrame()
-    pops = [("Close-only", df[_flag(df, "close_only")]),
+    pops = [("Auction-only", df[_flag(df, "close_only")]),
             ("Pre-traded", df[_flag(df, "pretraded")])]
     base = sum(float(p["notional"].sum()) for _, p in pops)
     rows = []
@@ -3429,13 +3432,13 @@ def t_flow_split(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def t_flow_split_type(df: pd.DataFrame) -> pd.DataFrame:
-    """Close-only and pre-traded, each split by order type: orders, value,
+    """Auction-only and pre-traded, each split by order type: orders, value,
     and the type's share of that flow's value (so each flow adds to 100)."""
     if df is None or df.empty or "order_type" not in df:
         return pd.DataFrame()
     ncol = "notional (" + CURRENCY + "m)"
     rows = []
-    for name, flag in (("Close-only", "close_only"), ("Pre-traded", "pretraded")):
+    for name, flag in (("Auction-only", "close_only"), ("Pre-traded", "pretraded")):
         p = df[_flag(df, flag)]
         total = float(p["notional"].sum())
         if p.empty or total <= 0:
@@ -3467,7 +3470,7 @@ def t_exec_summary(df: pd.DataFrame) -> pd.DataFrame:
     """The Q1 executive summary, recomputed for this window.
 
     The same facts the Q1 deck opened on - where the value went, how small
-    the orders were against volume, fill, spread, and the close-only against
+    the orders were against volume, fill, spread, and the auction-only against
     pre-traded split - so the two reviews read side by side.
     """
     if df is None or df.empty:
@@ -3736,7 +3739,7 @@ LAST_CONT_NOTE = ("Positive: the last continuous trade "
                   "a sell: above it). The same gap as the auction move, read "
                   "the other way round. CAS names: qatt's last trade before "
                   "the auction")
-CO_ARRIVAL_NOTE = ("close-only: 99.5% or more of the order printed in the "
+CO_ARRIVAL_NOTE = ("auction-only: 99.5% or more of the order printed in the "
                    "auction. Arrival slippage: average price against the price "
                    "when the order arrived; positive = saving, negative = cost")
 PRE_ARRIVAL_NOTE = ("pre-traded: part of the order traded before the auction. "
@@ -4349,7 +4352,7 @@ def _axis_name(index) -> str:
 def _measure_axis(measure: str, unit: str) -> str:
     return (f"{MEASURE_NAMES.get(measure, measure)}, "
             f"{unit} (notional-weighted)")
-CO_NOTE = ("close-only: 99.5% or more of the order printed in the auction, so "
+CO_NOTE = ("auction-only: 99.5% or more of the order printed in the auction, so "
            "its close slippage is zero by design and reversion is the "
            "measure. Negative means the price came back against us by the "
            "next open.")
@@ -4523,7 +4526,7 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
                      for _, tb in specs)]
     if not panels:
         return
-    fig, axes = _fig((12.5, 5.6), ncols=len(panels))
+    fig, axes = _fig((12.5 if len(specs) <= 3 else 16.0, 5.6), ncols=len(panels))
     nan = float("nan")
     for i, (ax, p) in enumerate(zip(axes, panels)):
         labels, vals, ci = [], [], []
@@ -4553,8 +4556,136 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
     _save(fig, out, name, bottom=room)
 
 
+def chart_measures_by_market_side(specs: list, out: Path, name: str, title: str,
+                                  note: str = "", limit: int = 12) -> None:
+    """Several measures by market and side: one row per measure, Buy on the
+    left and Sell on the right, the same markets in the same order throughout.
+
+    specs is [(measure label, table indexed (market, side)), ...]. Markets are
+    ordered by value traded in the last table. Buy and Sell share a scale
+    within a row; the rows do not, because the measures differ in size and a
+    shared scale would flatten the smaller ones.
+    """
+    unit = CHART_UNIT
+    spreads = unit == "spreads"
+    vcol, lo, hi = _unit_cols(unit)
+    specs = [(lab, _chartable(tb)) for lab, tb in specs]
+    specs = [(lab, tb) for lab, tb in specs if not tb.empty and tb.index.nlevels == 2]
+    if not specs:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    base = specs[-1][1]
+    markets = (base.groupby(level=0, observed=True)[ncol].sum()
+                   .sort_values(ascending=False).head(limit).index.tolist())
+    sides = [s for s in BUY_SELL_ORDER
+             if any(s in set(tb.index.get_level_values(1)) for _, tb in specs)]
+    if not markets or not sides:
+        return
+    fig, axes = plt.subplots(len(specs), len(sides), dpi=DPI, squeeze=False,
+                             figsize=(8.5 * len(sides), 4.4 * len(specs)))
+    fig.patch.set_facecolor(SURFACE)
+    nan = float("nan")
+    for r, (label, tb) in enumerate(specs):
+        for c, side in enumerate(sides):
+            ax = axes[r, c]
+            ax.set_facecolor(SURFACE)
+            labels, vals, ci = [], [], []
+            for m in markets:
+                if (m, side) in tb.index:
+                    row = tb.loc[(m, side)]
+                    labels.append(_spread_label(m, float(row["spread bps (wtd)"]),
+                                                spreads))
+                    vals.append(float(row[vcol]))
+                    ci.append((float(row[lo]), float(row[hi])))
+                else:
+                    labels.append(str(m) + chr(10) + "no orders")
+                    vals.append(nan)
+                    ci.append((nan, nan))
+            _diverging_barv(ax, labels, vals, ci=ci,
+                            unit="spreads" if spreads else "bps", tight=True)
+            _style(ax, ylabel=(label + ", " + ("in spreads" if spreads else "bps"))
+                   if c == 0 else "", xlabel="",
+                   title=((title + chr(10)) if r == 0 and c == 0 else "")
+                   + f"{label}: {side}")
+            ax._panel = f"{label}: {side}"
+        _share_ylim(list(axes[r]))
+    fig._deck_title = title
+    fig._deck_scale = 1.1
+    room = _notes(fig, [note, SPREAD_NOTE if spreads else "", CI_NOTE])
+    _save(fig, out, name, bottom=room / len(specs))
+
+
+def t_order_type_market(df: pd.DataFrame) -> pd.DataFrame:
+    """Each market's value split by order type, the shares adding to 100 per
+    market. Markets in order of value traded."""
+    if df is None or df.empty or "order_type" not in df or "market" not in df:
+        return pd.DataFrame()
+    ncol = "notional (" + CURRENCY + "m)"
+    g = df.groupby(["market", "order_type"], observed=True)
+    out = pd.DataFrame({"orders": g.size(), ncol: g["notional"].sum() / 1e6})
+    tot = out.groupby(level=0)[ncol].transform("sum")
+    out["% of market notional"] = 100 * out[ncol] / tot.where(tot > 0)
+    rank = out.groupby(level=0)[ncol].sum().sort_values(ascending=False).index
+    out = out.reindex(pd.MultiIndex.from_tuples(
+        [(m, k) for m in rank for k in out.loc[m].index],
+        names=["market", "order type"]))
+    return out.round(2)
+
+
+def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
+                            note: str = "", limit: int = 12) -> None:
+    """Discretionary against stipulated, by market: one 100% bar per market.
+
+    Colour is the order type, as on 23b; Unknown (no row in the order-types
+    file) is grey and on top. Each segment carries its share of the market.
+    """
+    d = _chartable(t)
+    if d.empty or d.index.nlevels < 2:
+        return
+    ncol = "notional (" + CURRENCY + "m)"
+    pcol = "% of market notional"
+    markets = list(dict.fromkeys(d.index.get_level_values(0)))[:limit]
+    totals = d.groupby(level=1)[ncol].sum().sort_values(ascending=False)
+    types = [k for k in totals.index if k != ORDER_TYPE_UNMATCHED]
+    if ORDER_TYPE_UNMATCHED in totals.index:
+        types.append(ORDER_TYPE_UNMATCHED)
+    colors = {k: (INK_MUTED if k == ORDER_TYPE_UNMATCHED else SERIES[i % len(SERIES)])
+              for i, k in enumerate(types)}
+    fig, (ax,) = _fig((11.0, 5.8))
+    x = np.arange(len(markets))
+    bottom = np.zeros(len(markets))
+    for k in types:
+        vals = np.array([float(d.loc[(m, k), pcol]) if (m, k) in d.index else 0.0
+                         for m in markets])
+        ax.bar(x, vals, bottom=bottom, width=0.62, color=colors[k], zorder=3,
+               label=k, edgecolor=SURFACE, linewidth=1.2)
+        for i, v in enumerate(vals):
+            if v >= 8:
+                ax.text(i, bottom[i] + v / 2, f"{v:.0f}%", ha="center",
+                        va="center", fontsize=8.5, color=_ink_on(colors[k]),
+                        zorder=5)
+        bottom += vals
+    for i, m in enumerate(markets):
+        ax.text(i, 101.5, f"{float(d.loc[m, ncol].sum()):,.0f}m", ha="center",
+                va="bottom", fontsize=8, color=INK_SECOND, zorder=5)
+    ax.set_ylim(0, 108)
+    ax.set_xticks(x)
+    ax.set_xticklabels(markets, rotation=30, ha="right")
+    ax.legend(frameon=False, loc="center left", bbox_to_anchor=(1.01, 0.5),
+              fontsize=9)
+    _style(ax, ylabel="% of executed notional", xlabel="Market",
+           title=title + chr(10))
+    fig._deck_title = title
+    room = _notes(fig, [note, "Each bar is one market's value, split by order "
+                        "type; the figure on top is the market's value traded. "
+                        "Order type from bgi_order_types.csv, matched on the "
+                        "order id; " + ORDER_TYPE_UNMATCHED + " = no row in "
+                        "that file."])
+    _save(fig, out, name, bottom=room)
+
+
 def chart_close_pr(tables: list, out: Path) -> None:
-    """Close participation by market: all, close-only, pre-traded.
+    """Close participation by market: all, auction-only, pre-traded.
 
     One scale across the three, so a market's bar can be compared between
     them by eye. Magnitude, not saving or cost, so one hue.
@@ -4628,7 +4759,7 @@ def chart_pr_pair(t: pd.DataFrame, out: Path, name: str, title: str,
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.legend(frameon=False, loc="upper right", fontsize=8.5)
-    _style(ax, ylabel="Participation, % of volume (mean per order)",
+    _style(ax, ylabel="Participation % (mean per order)",
            xlabel=xlabel, title=title)
     room = _notes(fig, [note,
                         "ClosePR: our share of the closing auction's volume. "
@@ -4699,7 +4830,7 @@ def _rev_pr_notes(fig, india: bool) -> float:
 
 def chart_reversion_with_pr(rev: pd.DataFrame, pr: pd.DataFrame, out: Path,
                             name: str, title: str) -> None:
-    """Close-only reversion by market, with participation as a line above it.
+    """Auction-only reversion by market, with participation as a line above it.
 
     The one family of charts here on two scales, at the desk's request. It
     stays readable because the two never share space: reversion keeps the
@@ -4862,7 +4993,7 @@ def chart_close_pr_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
     india = "India" in set(map(str, markets))
     room = _notes(fig, ["ClosePR: our executed quantity as a share of the closing "
                         "auction's volume, averaged per order, not weighted by "
-                        "value. Close-only orders. Markets in the order of the "
+                        "value. Auction-only orders. Markets in the order of the "
                         "all-sides chart.",
                         "India (PR): where the name had no closing auction, the "
                         "bar uses the participation rate (PR) of the window "
@@ -4872,7 +5003,7 @@ def chart_close_pr_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
 
 def chart_flow_split(t: pd.DataFrame, out: Path,
                      name: str = "23_flow_split.png") -> None:
-    """Close-only against pre-traded: the value in each and how it filled."""
+    """Auction-only against pre-traded: the value in each and how it filled."""
     if t is None or t.empty:
         return
     ncol = "notional (" + CURRENCY + "m)"
@@ -4898,8 +5029,8 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
     ax.set_xticks(x)
     ax.set_xticklabels(ticks)
     _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="Order type",
-           title="Pre-traded vs Close only")
-    room = _notes(fig, ["close-only: 99.5% or more of the order printed in the "
+           title="Pre-traded vs Auction only")
+    room = _notes(fig, ["auction-only: 99.5% or more of the order printed in the "
                         "auction. Pre-traded: part of it traded before. "
                         "Shares are of the two together; %ADV is "
                         "notional-weighted."])
@@ -4908,14 +5039,14 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
 
 def chart_flow_split_type(t: pd.DataFrame, out: Path,
                           name: str = "23b_flow_split_order_type.png",
-                          title: str = "Pre-traded vs Close only, by Order Type",
+                          title: str = "Pre-traded vs Auction only, by Order Type",
                           note: str = "", under: dict = None) -> None:
     """23_flow_split with each bar stacked by order type.
 
     under adds a line below a bar's name, keyed by flow.
 
     Each segment carries its share of that bar's value, so the split inside
-    close-only and inside pre-traded reads directly. Colour here is the order
+    auction-only and inside pre-traded reads directly. Colour here is the order
     type, the same type the same colour in both bars; Unknown (no row in the
     order-types file) is grey and last, so a gap in the file is visible.
     """
@@ -5752,20 +5883,20 @@ def t_vol_dislocation(df: pd.DataFrame) -> pd.DataFrame:
             if m in g:
                 row[lab] = wmean(g[m], g["notional"])
         if "close_only" in g:
-            row["% of value close-only"] = 100.0 * g.loc[_flag(g, "close_only"), "notional"].sum()                 / max(g["notional"].sum(), 1e-9)
+            row["% of value auction-only"] = 100.0 * g.loc[_flag(g, "close_only"), "notional"].sum()                 / max(g["notional"].sum(), 1e-9)
         row["small sample"] = len(g) < MIN_N_FOR_CI
         rows.append(row)
     return pd.DataFrame(rows).set_index("daily vol").round(2)
 
 
 def t_vol_flow(df: pd.DataFrame, value: str) -> pd.DataFrame:
-    """Point 3, the other half: close-only against pre-traded, per vol band.
+    """Point 3, the other half: auction-only against pre-traded, per vol band.
     If pre-trading low-vol names does no worse against arrival, completing
-    risk earlier there costs nothing; if high-vol close-only orders do
+    risk earlier there costs nothing; if high-vol auction-only orders do
     better, those belong in the auction."""
     if "vol_bucket" not in df or value not in df:
         return pd.DataFrame()
-    d = df.assign(flow=np.where(_flag(df, "close_only"), "Close only",
+    d = df.assign(flow=np.where(_flag(df, "close_only"), "Auction only",
                                 np.where(_flag(df, "pretraded"), "Pre-traded", "")))
     d = d[d["flow"] != ""]
     t = t_in_spreads(d, ["vol_bucket", "flow"], value)
@@ -6036,17 +6167,17 @@ FOCUS_MEASURES = [
     ("last_cont_vs_close_bps", "last_cont", "Last continuous price vs close"),
     ("slip_close", "vs_close", "Execution vs close"),
 ]
-# Each flow alone, with the measures that mean something for it. Close-only
+# Each flow alone, with the measures that mean something for it. Auction-only
 # orders start and finish at the close, so first execution is dropped and
 # reversion added. An order with nothing printed in the close is in neither.
 FOCUS_REVERSION = ("reversion_bps", "reversion", "Next open vs close")
 FOCUS_FLOWS = [
-    ("close_only", "co", "b", "Close Only",
+    ("close_only", "co", "b", "Auction Only",
      [FOCUS_MEASURES[1], FOCUS_MEASURES[2], FOCUS_REVERSION]),
     ("pretraded", "pre", "c", "Pre-traded", FOCUS_MEASURES),
 ]
 FOCUS_FLOW_NOTES = {
-    "co": ("close-only: 99.5% or more of the order printed in the close, so its "
+    "co": ("auction-only: 99.5% or more of the order printed in the close, so its "
            "execution sits at the close by design. Next open vs close: "
            "negative means the price came back against us by the next open."),
     "pre": "pre-traded: part of the order traded before the close.",
@@ -6056,7 +6187,7 @@ FOCUS_CUTS = [("spread_q", "spread_q"), ("adv_bucket", "adv")]
 FE_COL = "first_exec_vs_close"
 HK_GROUPS = ["Cash", "Swap", "Other"]
 INDIA_GROUPS = ["CAS", "Non-CAS"]
-CAS_FLOWS = ["Close only", "Pre-traded"]
+CAS_FLOWS = ["Auction only", "Pre-traded"]
 EXEC_IN_CLOSE = "% of executed qty in the close (wtd)"
 
 
@@ -6172,10 +6303,10 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
             pre_in = fe.notna() & (fe.abs() > 0.01)
             _focus_tables(ind, "cas_group", INDIA_GROUPS, "130_in", t,
                           pre_mask=pre_in)
-            # CAS orders, close-only against pre-traded, read from the price.
+            # CAS orders, auction-only against pre-traded, read from the price.
             cas = ind[fe.notna() & ind["cas_group"].eq("CAS")].copy()
             if len(cas):
-                cas["cas_flow"] = np.where(pre_in[cas.index], "Pre-traded", "Close only")
+                cas["cas_flow"] = np.where(pre_in[cas.index], "Pre-traded", "Auction only")
                 prof = cas.groupby("cas_flow")["notional"].agg(["size", "sum"])
                 prof.columns = ["orders", "notional (" + CURRENCY + "m)"]
                 prof["notional (" + CURRENCY + "m)"] /= 1e6
@@ -6332,11 +6463,11 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                 [(label, t.get(f"130_in6_cas_flow_{short}", E))
                  for _, short, label in FOCUS_MEASURES + [FOCUS_REVERSION]],
                 charts, "95d_in_cas_flow_measures.png",
-                "India CAS, Close Only vs Pre-traded",
+                "India CAS, Auction Only vs Pre-traded",
                 note=("India CAS names from " + AUCTION_FROM["India"] + ". India "
                       "reports no close share, so the split is read from the price: "
-                      "close only = the first fill was at the close, pre-traded = "
-                      "anywhere else. A close-only order's first fill is the close, "
+                      "auction only = the first fill was at the close, pre-traded = "
+                      "anywhere else. A auction-only order's first fill is the close, "
                       "so its first execution is zero by definition." + (chr(10) + sizes if sizes else "")
                       + chr(10) + "Next open vs close: negative = the price came "
                       "back against us. " + LAST_CONT_NOTE + "."),
@@ -6353,7 +6484,7 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                     under[k] = chr(10).join(bits)
             _guard(chart_flow_split_type, t.get("130_in6_cas_flow_order_type", E),
                    charts, "95e_in_cas_flow_order_type.png",
-                   "India CAS, Close Only vs Pre-traded, by Order Type",
+                   "India CAS, Auction Only vs Pre-traded, by Order Type",
                    note="India CAS names from " + AUCTION_FROM["India"] + ". Close "
                         "only = the first fill was at the close, pre-traded = "
                         "anywhere else. Close participation (ClosePR): our share "
@@ -6515,10 +6646,10 @@ def build_review_charts(t: dict, charts: Path) -> None:
         wide = vf["wtd mean bps"].unstack("flow")
         # Low vol on the left: the labels sort as text, so by their first number.
         wide = wide.loc[sorted(wide.index, key=lambda x: float(str(x).split("-")[0]))]
-        cols = [c for c in ["Close only", "Pre-traded"] if c in wide]
+        cols = [c for c in ["Auction only", "Pre-traded"] if c in wide]
         if cols:
             _grouped_bars(wide, cols, cols, charts, "57_vol_close_vs_pretraded.png",
-                          "Close Only vs Pre-traded, by Volatility",
+                          "Auction Only vs Pre-traded, by Volatility",
                           "Arrival price slippage, bps (notional-weighted)",
                           note="does completing risk before the auction pay off in "
                                "calmer names? " + SIGN)
@@ -6830,8 +6961,8 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     if not noauc.empty:
         t["31_no_auction_markets"] = t_venue_mix(noauc, "market")
         t["32_close_regimes"] = t_venue_mix(all_df, "close_regime")
-    # --- the H1 narrative: close-only against pre-traded ---------------------
-    # Close-only takes the auction markets plus India's 17:30-17:45 orders,
+    # --- the H1 narrative: auction-only against pre-traded ---------------------
+    # Auction-only takes the auction markets plus India's 17:30-17:45 orders,
     # which the desk counts as close. India cannot be pre-traded - outside
     # that window its close share is zero - and after the CAS date its
     # segment is unknown, so pre-traded is the auction markets alone.
@@ -6842,9 +6973,11 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["50_exec_summary"] = t_exec_summary(df[reach])
     t["51_flow_split"] = t_flow_split(df[reach])
     t["51b_flow_split_type"] = t_flow_split_type(df[reach])
+    t["51c_order_type_mkt"] = t_order_type_market(df[reach])
+    t["51d_order_type_mkt_co"] = t_order_type_market(co)
     t["52_adv_profile"] = t_adv_profile(df)
     t["53_pre_adv_profile"] = t_adv_profile(pre)
-    # Every performance chart reads one of these. "co" is close-only and
+    # Every performance chart reads one of these. "co" is auction-only and
     # "pre" is pre-traded; sprdq is the spread quartile.
     t["61_close_mkt_spreads"] = t_in_spreads(df, "market", "slip_close")
     t["63_close_adv_spreads"] = t_in_spreads(auc, "adv_bucket", "slip_close")
@@ -6870,7 +7003,8 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     for key, value, w in [("73a_pre_firstexec_side_spr", FE, CW),
                           ("73b_pre_close_side_spr", "slip_close", "notional"),
                           ("73c_pre_reversion_side_spr", "reversion_bps",
-                           "notional")]:
+                           "notional"),
+                          ("73d_pre_pvwap_side_spr", "slip_pvwap", "notional")]:
         t[key] = pd.concat([
             t_in_spreads(pre.assign(buy_sell="All"), "buy_sell", value, w),
             t_in_spreads(pre, "buy_sell", value, w, order=BUY_SELL_ORDER)])
@@ -6886,14 +7020,14 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
         t["68b_pre_lastcont_mkt_spreads"] = t_in_spreads(pre, "market", LC)
         t["74b_pre_lastcont_mkt_side_spr"] = t_in_spreads(
             pre, ["market", "buy_sell"], LC)
-    # Arrival slippage, close-only and pre-traded, by market and side/market.
+    # Arrival slippage, auction-only and pre-traded, by market and side/market.
     t["83_co_arrival_mkt_spreads"] = t_in_spreads(co, "market", "slip_arrival")
     t["83b_co_arrival_mkt_side_spr"] = t_in_spreads(
         co, ["market", "buy_sell"], "slip_arrival")
     t["84_pre_arrival_mkt_spreads"] = t_in_spreads(pre, "market", "slip_arrival")
     t["84b_pre_arrival_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], "slip_arrival")
-    # Close-only against the last continuous trade. Auction names only: an
+    # Auction-only against the last continuous trade. Auction names only: an
     # India name on a VWAP close has no auction to set it against.
     co_auc = co[co["has_auction"]] if "has_auction" in co else co
     if LC in co_auc and co_auc[LC].notna().any():
@@ -7268,35 +7402,54 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # Opens the way Q1 did: where the flow went and how big it was.
     chart_flow_split(t.get("51_flow_split", E), charts)
     _guard(chart_flow_split_type, t.get("51b_flow_split_type", E), charts)
+    _guard(chart_order_type_market, t.get("51c_order_type_mkt", E), charts,
+           "23c_order_type_market.png", "Discretionary vs Stipulated, by Market",
+           "all orders that reached the close.")
+    _guard(chart_order_type_market, t.get("51d_order_type_mkt_co", E), charts,
+           "22c_auction_only_order_type_market.png",
+           "Auction Only: Discretionary vs Stipulated, by Market",
+           "auction-only orders.")
     # Green, at the desk's request - it sits beside the blue-and-red value
     # chart on the summary slide and should not read as a saving.
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
                       color=SERIES[2], title=
                       "Executed Notional, by ADV%")
 
-    # Close-only. Its close slippage is zero by construction, so the question
+    # Auction-only. Its close slippage is zero by construction, so the question
     # is whether the price held after the auction: reversion, by market, and
     # by market and side.
     chart_spreads(t.get("71_co_reversion_mkt_spreads", E), charts,
                   "22_reversion_close_only.png",
-                  "Close Only Reversion, by Market",
+                  "Auction Only Reversion, by Market",
                   "next open vs close", by_notional=True, note=CO_NOTE,
                   ylabel=REV_YLABEL)
     chart_spreads_by_side(t.get("72_co_reversion_mkt_side_spr", E), charts,
                           "25_close_only_reversion_market_side.png",
-                          "Close Only Reversion, by Side", "next open vs close",
+                          "Auction Only Reversion, by Side", "next open vs close",
                           note=CO_NOTE, ylabel=REV_YLABEL)
 
     # Pre-traded. Three prices tell its story: where it started (first
     # execution against the close), where it finished (against the close),
     # and whether that held overnight (reversion).
+    # The desk's order: where it started, against the market while it
+    # worked, where it finished, and whether that held overnight.
     chart_measures_by_side(
         [("First execution vs close", t.get("73a_pre_firstexec_side_spr", E)),
+         ("vs PVWAP", t.get("73d_pre_pvwap_side_spr", E)),
          ("Execution vs close", t.get("73b_pre_close_side_spr", E)),
          ("Next open vs close", t.get("73c_pre_reversion_side_spr", E))],
         charts, "26_pretraded_by_side.png",
         "Pre-traded Analysis, by Side",
-        note=PRE_NOTE, all_label="All pre-traded", xlabel="in spreads")
+        note=PRE_NOTE + " " + PVWAP_NOTE.split(". ", 1)[1],
+        all_label="All pre-traded",
+        xlabel="in spreads")
+    _guard(chart_measures_by_market_side,
+           [("First execution vs close", t.get("74_pre_firstexec_mkt_side_spr", E)),
+            ("vs PVWAP", t.get("79_pre_pvwap_mkt_side_spr", E)),
+            ("Execution vs close", t.get("75_pre_close_mkt_side_spr", E)),
+            ("Next open vs close", t.get("76_pre_reversion_mkt_side_spr", E))],
+           charts, "28c_pretraded_measures_market_side.png",
+           "Pre-traded Analysis, by Side/Market", note=PRE_NOTE)
     chart_spreads(t.get("77_pre_close_mkt_spreads", E), charts,
                   "27_pretraded_close_market.png",
                   "Pre-traded Execution vs Close, by Market",
@@ -7326,36 +7479,36 @@ def build_charts(t: dict, out_dir: Path) -> None:
                           note="pre-traded orders. " + LAST_CONT_NOTE,
                           ylabel="Last continuous price vs close, in spreads")
 
-    # Arrival slippage and last continuous vs close, close-only and
+    # Arrival slippage and last continuous vs close, auction-only and
     # pre-traded, by market and by side/market.
     ARR_Y = "Arrival price slippage, in spreads"
     LC_Y = "Last continuous price vs close, in spreads"
     for key, name, title, measure, note, ylab in [
         ("83_co_arrival_mkt_spreads", "37_close_only_arrival_market.png",
-         "Close Only Arrival Slippage, by Market", "vs Arrival",
+         "Auction Only Arrival Slippage, by Market", "vs Arrival",
          CO_ARRIVAL_NOTE, ARR_Y),
         ("84_pre_arrival_mkt_spreads", "38_pretraded_arrival_market.png",
          "Pre-traded Arrival Slippage, by Market", "vs Arrival",
          PRE_ARRIVAL_NOTE, ARR_Y),
         ("85_co_lastcont_mkt_spreads", "39_close_only_last_cont_market.png",
-         "Close Only Last Continuous Price vs Close, by Market",
+         "Auction Only Last Continuous Price vs Close, by Market",
          "last continuous price vs Close",
-         "close-only orders, auction names. " + LAST_CONT_NOTE, LC_Y),
+         "auction-only orders, auction names. " + LAST_CONT_NOTE, LC_Y),
     ]:
         chart_spreads(t.get(key, E), charts, name, title, measure,
                       by_notional=True, note=note, ylabel=ylab)
     for key, name, title, measure, note, ylab in [
         ("83b_co_arrival_mkt_side_spr", "37b_close_only_arrival_market_side.png",
-         "Close Only Arrival Slippage, by Side/Market", "vs Arrival",
+         "Auction Only Arrival Slippage, by Side/Market", "vs Arrival",
          CO_ARRIVAL_NOTE, ARR_Y),
         ("84b_pre_arrival_mkt_side_spr", "38b_pretraded_arrival_market_side.png",
          "Pre-traded Arrival Slippage, by Side/Market", "vs Arrival",
          PRE_ARRIVAL_NOTE, ARR_Y),
         ("85b_co_lastcont_mkt_side_spr",
          "39b_close_only_last_cont_market_side.png",
-         "Close Only Last Continuous Price vs Close, by Side/Market",
+         "Auction Only Last Continuous Price vs Close, by Side/Market",
          "last continuous price vs Close",
-         "close-only orders, auction names. " + LAST_CONT_NOTE, LC_Y),
+         "auction-only orders, auction names. " + LAST_CONT_NOTE, LC_Y),
     ]:
         chart_spreads_by_side(t.get(key, E), charts, name, title, measure,
                               note=note, ylabel=ylab)
@@ -7381,7 +7534,7 @@ def build_charts(t: dict, out_dir: Path) -> None:
         (t.get("80_close_pr_mkt_all"), "34_close_pr_all.png",
          "Close Participation by Market"),
         (t.get("81_close_pr_mkt_close_only"), "35_close_pr_close_only.png",
-         "Close Only Participation, by Market",
+         "Auction Only Participation, by Market",
          "Close participation, mean per order (%)"),
         (t.get("82_close_pr_mkt_pretraded"), "36_close_pr_pretraded.png",
          "Pre-traded Orders | Close participation by market",
@@ -7395,14 +7548,14 @@ def build_charts(t: dict, out_dir: Path) -> None:
     _guard(chart_reversion_with_pr, t.get("71_co_reversion_mkt_spreads", E),
            co_pr if co_pr is not None else E, charts,
            "22b_close_only_reversion_participation.png",
-           "Close Only Reversion and Participation, by Market")
+           "Auction Only Reversion and Participation, by Market")
     _guard(chart_reversion_with_pr_by_side, t.get("72_co_reversion_mkt_side_spr", E),
            t.get("81b_close_pr_mkt_side_co", E), charts,
            "25b_close_only_reversion_participation_side.png",
-           "Close Only Reversion and Participation, by Side")
+           "Auction Only Reversion and Participation, by Side")
     _guard(chart_close_pr_by_side,
         t.get("81b_close_pr_mkt_side_co", E), charts,
-        "35b_close_pr_close_only_side.png", "Close Only Participation, by Side",
+        "35b_close_pr_close_only_side.png", "Auction Only Participation, by Side",
         order=list(_chartable(co_pr).index) if co_pr is not None else None)
     chart_adv_profile(t.get("53_pre_adv_profile", E), charts,
                       "31_pretraded_adv_profile.png",
@@ -7565,7 +7718,7 @@ def narrative(t: dict) -> None:
     50-77 tables, and a result is marked "holds" only when its 95% interval
     stays on one side of zero.
     """
-    section("H1 NARRATIVE - CLOSE-ONLY AND PRE-TRADED")
+    section("H1 NARRATIVE - AUCTION-ONLY AND PRE-TRADED")
     E = pd.DataFrame()
     ncol = "notional (" + CURRENCY + "m)"
     es = t.get("50_exec_summary", E)
@@ -7631,9 +7784,9 @@ def narrative(t: dict) -> None:
                 f"Sell {piv.loc[m, 'Sell']:+.2f}")
 
     log("")
-    log("  CLOSE-ONLY. The close slippage is zero by design, so the measure is")
+    log("  AUCTION-ONLY. The close slippage is zero by design, so the measure is")
     log("  reversion: did the price hold after the auction, or come back?")
-    sides("71b_co_reversion_side_spr", "Reversion, all close-only and by side:")
+    sides("71b_co_reversion_side_spr", "Reversion, all auction-only and by side:")
     weakest("71_co_reversion_mkt_spreads", "Reversion")
     side_gaps("72_co_reversion_mkt_side_spr", "Reversion")
 
@@ -8434,7 +8587,7 @@ def self_test() -> int:
         "notional": rng.uniform(1e5, 1e6, 2 * n),
         "spread_bps": rng.uniform(1, 20, 2 * n),
         "adv_pct": rng.uniform(0.1, 10, 2 * n),
-        # Every fourth order's first fill is the close: close-only by price.
+        # Every fourth order's first fill is the close: auction-only by price.
         "first_exec_vs_close": np.where(np.arange(2 * n) % 4 == 0, 0.0,
                                         rng.normal(0, 10, 2 * n)),
         "last_cont_vs_close_bps": rng.normal(0, 10, 2 * n),
@@ -8460,7 +8613,7 @@ def self_test() -> int:
           not q4.empty and set(q4.index.get_level_values(1)) == {"CAS", "Non-CAS"},
           q4.index.tolist() if not q4.empty else "empty")
     cf = ft.get("130_in6_cas_flow_first_exec", pd.DataFrame())
-    check("India CAS splits into close only and pre-traded",
+    check("India CAS splits into auction only and pre-traded",
           not cf.empty and set(cf.index) == set(CAS_FLOWS), cf.index.tolist() if not cf.empty else "empty")
     aud = pd.DataFrame({"market": ["Australia"] * 40 + ["Japan"] * 40,
                         "has_auction": True, "pretraded": True,

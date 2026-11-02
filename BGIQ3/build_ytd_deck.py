@@ -284,7 +284,7 @@ def talk(say: str, ask: str = "", nxt: str = "") -> str:
 def story(run: Run) -> list[dict]:
     """The slides in the order of the client deck. No appendix.
 
-    The story: what we traded and how (1-2), close-only orders hold at the
+    The story: what we traded and how (1-2), auction-only orders hold at the
     close (3-5), pre-traded orders gain by starting early but the close then
     prints against them, mostly on buys (6-11), the Hong Kong and India
     deep dives (12-17), then what to change (18).
@@ -323,11 +323,11 @@ def story(run: Run) -> list[dict]:
                    "India grows against H1: from 3 Aug its CAS names are in the "
                    "closing auction and those orders are kept.", ds_all))
 
-    # --- 2. pre-traded vs close only -----------------------------------------------
+    # --- 2. pre-traded vs auction only -----------------------------------------------
     flow = run.table("51_flow_split")
     b, src = [], []
-    if flow is not None and {"Close-only", "Pre-traded"} <= set(flow.index):
-        co, pre = flow.loc["Close-only"], flow.loc["Pre-traded"]
+    if flow is not None and {"Auction-only", "Pre-traded"} <= set(flow.index):
+        co, pre = flow.loc["Auction-only"], flow.loc["Pre-traded"]
         b.append(f"{num(co, '% of notional'):.0f}% of the value was close auction "
                  f"only: {int(num(co, 'orders')):,} orders at "
                  f"{num(co, '%ADV (notional-weighted)'):.1f}% ADV.")
@@ -341,18 +341,18 @@ def story(run: Run) -> list[dict]:
             f"{num(r, '%ADV (notional-weighted)'):.2f}% ADV, "
             f"{num(r, '% of notional in the close'):.0f}% in the close"
             for k, r in flow.iterrows()))
-    S.append(slide("Pre-traded vs Close only", b, ["23_flow_split.png"], src,
-                   "Close-only: 99.5% or more of the order printed in the auction. "
+    S.append(slide("Pre-traded vs Auction only", b, ["23_flow_split.png"], src,
+                   "Auction-only: 99.5% or more of the order printed in the auction. "
                    "Pre-traded: part of it traded before. The rest of the deck takes "
                    "the two apart.\n\nFrom here on most charts are in spreads: the "
                    "result divided by the average spread, the [x bps] under each bar. "
                    "Multiply the two to get bps.", ds_all))
 
-    # --- 3. pre-traded vs close only, by order type --------------------------------
+    # --- 3. pre-traded vs auction only, by order type --------------------------------
     ft = run.table("51b_flow_split_type", 2)
     b, src = [], []
     if ft is not None:
-        for flow in ("Close-only", "Pre-traded"):
+        for flow in ("Auction-only", "Pre-traded"):
             if flow not in ft.index.get_level_values(0):
                 continue
             part = ft.loc[flow].sort_values("% of flow notional", ascending=False)
@@ -362,7 +362,7 @@ def story(run: Run) -> list[dict]:
             src += [f"`51b_flow_split_type` [{flow}, {k}]: "
                     f"{num(r, 'notional (USDm)'):,.1f}m, {num(r, '% of flow notional'):.1f}%, "
                     f"{int(num(r, 'orders')):,} orders" for k, r in part.iterrows()]
-    S.append(slide("Pre-traded vs Close only, by Order Type", b,
+    S.append(slide("Pre-traded vs Auction only, by Order Type", b,
                    ["23b_flow_split_order_type.png"], src,
                    talk("The same two bars as the last slide, split by how the order "
                         "reached us: stipulated or discretionary.",
@@ -375,8 +375,8 @@ def story(run: Run) -> list[dict]:
     # read out ("Say:") and the caveat to keep in their pocket ("If asked:").
     story_points = {}
 
-    # --- 3. close only reversion by market -------------------------------------------
-    # A close-only order prints at the close by design, so the only test of
+    # --- 3. auction only reversion by market -------------------------------------------
+    # A auction-only order prints at the close by design, so the only test of
     # the price it got is whether that price held overnight.
     rv = sized(run.rows("71_co_reversion_mkt_spreads"))
     allc = run.row("71b_co_reversion_side_spr", "All")
@@ -389,11 +389,11 @@ def story(run: Run) -> list[dict]:
         if co_held:
             b.append(f"Overall it held: {v:+.2f} spreads by the next open"
                      + ("." if v >= 0 else ", within noise."))
-            story_points["co"] = "Close-only orders: the closing price held the next morning."
+            story_points["co"] = "Auction-only orders: the closing price held the next morning."
         else:
             b.append(f"Overall it gave back {sp(v)} spreads by the next open.")
-            story_points["co"] = "Close-only orders: the close gave back part of its move overnight."
-        say = (f"Our close-only orders trade at the close, so the question is not the "
+            story_points["co"] = "Auction-only orders: the close gave back part of its move overnight."
+        say = (f"Our auction-only orders trade at the close, so the question is not the "
                f"price we got but whether it was a fair price. If our orders had pushed "
                f"the close, it would bounce back by the next open. Across all markets the "
                f"move to the next open was {v:+.2f} spreads, "
@@ -411,8 +411,15 @@ def story(run: Run) -> list[dict]:
                 f"{pl:.1f}% in {lo[0]} to {ph:.1f}% in {hi[0]} on average.")
         src += [f"`81_close_pr_mkt_close_only` [{k}]: mean {num(r, 'close PR % (mean)'):.2f}%, "
                 f"{int(num(r, 'orders')):,} orders" for k, r in pr]
-    S.append(slide("Close Only Reversion and Participation, by Market", b,
-                   ["22b_close_only_reversion_participation.png"], src,
+    otm = run.rows("51d_order_type_mkt_co", 2)
+    if otm:
+        src.append("`51d_order_type_mkt_co`: " + "; ".join(
+            f"{m} {k} {num(r, '% of market notional'):.0f}%" for (m, k), r in otm))
+        say += (" The chart on the right shows, market by market, how much of that "
+                "value was discretionary and how much stipulated.")
+    S.append(slide("Auction Only Reversion and Participation, by Market", b,
+                   ["22b_close_only_reversion_participation.png",
+                    "22c_auction_only_order_type_market.png"], src,
                    talk(say,
                         "Execution vs close is zero by design for these orders, which is "
                         "why we use reversion. Small markets such as the Philippines swing "
@@ -421,7 +428,7 @@ def story(run: Run) -> list[dict]:
                         "order. India (PR): non-CAS names use the order's participation rate.",
                         "Next: does it look the same for buys and sells?"), ds_co))
 
-    # --- 4. close only reversion by side -----------------------------------------------
+    # --- 4. auction only reversion by side -----------------------------------------------
     rb = run.row("71b_co_reversion_side_spr", "Buy")
     rs = run.row("71b_co_reversion_side_spr", "Sell")
     b, src, say = [], [], ""
@@ -443,7 +450,7 @@ def story(run: Run) -> list[dict]:
         (m, s_), r = bad[0]
         b.append(f"The one to watch: {m} {s_.lower()}s, {sp(num(r, 'spreads'))} spreads back.")
         src.append(cite("72_co_reversion_mkt_side_spr", f"{m}, {s_}", r))
-    S.append(slide("Close Only Reversion and Participation, by Side", b,
+    S.append(slide("Auction Only Reversion and Participation, by Side", b,
                    ["25b_close_only_reversion_participation_side.png"], src,
                    talk(say, "A rising market makes buys look good and sells look bad "
                         "whatever the algo does.",
@@ -472,11 +479,18 @@ def story(run: Run) -> list[dict]:
                  f"{'better' if v2 > 0 else 'worse'} than the close.")
         src.append(cite("73b_pre_close_side_spr", "All", finish))
         if first is not None:
-            say = (f"Left bar: where the price was when we started, against the close. "
+            pv = run.row("73d_pre_pvwap_side_spr", "All")
+            pv_say = (f"Second bar: the whole order against the market's average price "
+                      f"while it worked (PVWAP), {num(pv, 'spreads'):+.2f}. "
+                      if pv is not None else "")
+            say = (f"First bar: where the price was when we started, against the close. "
                    f"{num(first, 'spreads'):+.2f} means our first fill was "
                    f"{'better' if num(first, 'spreads') > 0 else 'worse'} than waiting for "
-                   f"the close. Middle bar: the whole order, {v2:+.2f}. Right bar: the next "
-                   f"open, which tells us whether the price came back.")
+                   f"the close. {pv_say}Third bar: the whole order against the close, "
+                   f"{v2:+.2f}. Last bar: the next open, which tells us whether the price "
+                   f"came back.")
+            if pv is not None:
+                src.append(cite("73d_pre_pvwap_side_spr", "All", pv))
     if rev is not None:
         src.append(cite("73c_pre_reversion_side_spr", "All", rev))
     S.append(slide("Pre-traded Analysis, by Side", b, ["26_pretraded_by_side.png"], src,
@@ -494,9 +508,10 @@ def story(run: Run) -> list[dict]:
         (pb, nb), (ps, ns) = count("Buy"), count("Sell")
         b.append("Was the price better when we started than at the close?")
         b.append(f"Yes in {pb} of {nb} markets for buys, {ps} of {ns} for sells.")
-        say = (f"Each bar is one market and side. Above zero, our first fill was better "
-               f"than the close: starting early helped. That was true in {pb} of {nb} "
-               f"markets for buys and {ps} of {ns} for sells.")
+        say = (f"The same four measures as the last slide, one row each, buys on the "
+               f"left and sells on the right. Top row: above zero, our first fill was "
+               f"better than the close, so starting early helped. That was true in {pb} "
+               f"of {nb} markets for buys and {ps} of {ns} for sells.")
         worst = min(fe2, key=lambda kr: num(kr[1], "spreads"))
         best = max(fe2, key=lambda kr: num(kr[1], "spreads"))
         if num(worst[1], "spreads") < 0 and holds(worst[1]):
@@ -508,7 +523,7 @@ def story(run: Run) -> list[dict]:
             b.append(f"{m} {s_.lower()}s gained most, {num(r, 'spreads'):+.2f} spreads.")
             src.append(cite("74_pre_firstexec_mkt_side_spr", f"{m}, {s_}", r))
     S.append(slide("Pre-traded Analysis, by Side/Market", b,
-                   ["28_pretraded_first_exec_market_side.png"], src,
+                   ["28c_pretraded_measures_market_side.png"], src,
                    talk(say, "Counts use markets with at least 30 orders on that side. A "
                         "whisker crossing zero means that market's result is not "
                         "distinguishable from zero.",
@@ -555,16 +570,24 @@ def story(run: Run) -> list[dict]:
         b.append("Highest in " + ", ".join(
             f"{k} ({num(r, 'close PR % (mean)'):.0f}%)" for k, r in hi3) + ".")
         if math.isfinite(top_co):
-            b.append(f"Close-only orders never took more than {top_co:.0f}%.")
+            b.append(f"Auction-only orders never took more than {top_co:.0f}%.")
         say = ("These are the larger orders, which is why they start early: the auction "
                "alone cannot absorb them. The more of the auction we are, the more the "
                "close can move against us, which is the next slide.")
         src += [f"`82_close_pr_mkt_pretraded` [{k}]: mean {num(r, 'close PR % (mean)'):.2f}%, "
                 f"{int(num(r, 'orders')):,} orders" for k, r in pp]
-    S.append(slide("Pre-traded Orders | Close participation by market", b,
-                   ["36_close_pr_pretraded.png"], src,
-                   talk(say, "Participation in the close for the part of the order that "
-                        "reached the auction, averaged per order.",
+    pc = run.rows("82b_pr_pair_mkt_pretraded")
+    if pc:
+        say += (" Next to each close bar is our share of the market while the order "
+                "traded before the auction.")
+        src += [f"`82b_pr_pair_mkt_pretraded` [{k}]: close {num(r, 'close PR % (mean)'):.2f}%, "
+                f"continuous {num(r, 'continuous PR % (mean)'):.2f}%" for k, r in pc]
+    S.append(slide("Pre-traded Orders | Close and Continuous Participation by market", b,
+                   ["36b_pretraded_pr_close_cont.png"], src,
+                   talk(say, "Close: our share of the closing auction's volume. "
+                        "Continuous: our share of the market's volume before the "
+                        "auction. Two different volumes, so the bars are never added. "
+                        "Both averaged per order.",
                         "Next: did the auction move against these orders?"), ds_pre))
 
     # --- 10. pre-traded auction move by market -------------------------------------------
@@ -663,12 +686,12 @@ def story(run: Run) -> list[dict]:
     S.append(slide("Hong Kong Focus: Cash vs Swap", b, ["90_hk_measures.png"], src,
                    talk(say, "Cash or swap is read from the client account. Positive = "
                         "better for the order than the close.",
-                        "Next: the same split for close-only and pre-traded orders."), ds_hk))
+                        "Next: the same split for auction-only and pre-traded orders."), ds_hk))
 
     co_rev = dict(run.rows("120_hk3co_reversion"))
     b, src, say = [], [], ""
     if co_rev:
-        b.append("Close-only orders trade at the close, so the test is the next open.")
+        b.append("Auction-only orders trade at the close, so the test is the next open.")
         parts = []
         for g in ("Cash", "Swap"):
             if g in co_rev:
@@ -685,8 +708,8 @@ def story(run: Run) -> list[dict]:
             b.append("Neither account shows our orders pushing the close.")
         say = ("Same test as slide 5, Hong Kong only. A give-back means the closing price "
                "did not hold the next morning.")
-    S.append(slide("Hong Kong Close Only: Cash vs Swap", b, ["90b_hk_co_measures.png"],
-                   src, talk(say, "Execution vs close is zero by design for close-only "
+    S.append(slide("Hong Kong Auction Only: Cash vs Swap", b, ["90b_hk_co_measures.png"],
+                   src, talk(say, "Execution vs close is zero by design for auction-only "
                              "orders.", "Next: pre-traded Hong Kong orders."), ds_hk_co))
 
     pre_fe = dict(run.rows("120_hk3pre_first_exec"))
@@ -771,7 +794,7 @@ def story(run: Run) -> list[dict]:
                    talk(say, "CAS names have an AUC or ACB code in qatt that day. CAS spreads "
                         "are tight (about 2 bps), so a few bps read as many spreads. Under "
                         "three months of data: a first look. India reports no close share, "
-                        "so CAS orders cannot be split into close-only and pre-traded.",
+                        "so CAS orders cannot be split into auction-only and pre-traded.",
                         "Next: which CAS orders gain from starting early?"), ds_in))
 
     iq = run.rows("130_in2_first_exec_adv", 2)
@@ -811,16 +834,16 @@ def story(run: Run) -> list[dict]:
     if len(b) < 3:
         b += [story_points[k] for k in ("hk", "in") if k in story_points][:3 - len(b)]
     S.insert(3, slide(f"{PERIOD} MOC: What We Found", b, [], [],
-                      talk("This is the story in one slide. Close-only orders are small and "
+                      talk("This is the story in one slide. Auction-only orders are small and "
                            "the close held for them. Larger orders start early, and that "
                            "helped. The catch is the auction itself, which tends to print "
                            "against our pre-traded buys. Hong Kong and India follow at the "
-                           "end.", "", "Next: close-only orders.")))
+                           "end.", "", "Next: auction-only orders.")))
 
     # --- 18. takeaways -----------------------------------------------------------------------
     b = []
     if co_held and size is not None:
-        b.append("Suggest: keep orders under 1% ADV close-only. The close holds for them.")
+        b.append("Suggest: keep orders under 1% ADV auction-only. The close holds for them.")
     if pp and lc:
         hi_pr = [k for k, r in sorted(pp, key=lambda kr: -num(kr[1], "close PR % (mean)"))[:3]]
         clear_lc = {k for k, r in lc if holds(r) and num(r, "spreads") > 0}
@@ -832,7 +855,7 @@ def story(run: Run) -> list[dict]:
         b.append(f"Suggest: in Hong Kong, start early only from {_band_edge(hk_from)}% ADV.")
     S.append(slide(f"{PERIOD} MOC: Takeaways", b[:3], [], [],
                    talk("Three changes, each resting on a slide in this deck. Small orders: "
-                        "close-only works, the close held (slides 5-6). Large orders in the "
+                        "auction-only works, the close held (slides 5-6). Large orders in the "
                         "markets where we are most of the auction: leave less for the "
                         "auction, because that is where the close moves against us (10-12). "
                         "Hong Kong: start early only on the larger orders (16).",

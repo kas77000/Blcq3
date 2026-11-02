@@ -11,7 +11,7 @@ Every run writes the charts to `output/charts/<folder>/` and a copy without titl
 - **Whiskers:** 95% bootstrap confidence intervals. A whisker crossing zero means the result can't be told apart from zero.
 - **Weighting:** averages are weighted by notional unless the chart says otherwise.
 - **Populations:**
-  - close-only = 99.5% or more of the order printed in the auction
+  - auction-only = 99.5% or more of the order printed in the auction
   - pre-traded = part of it traded before the auction
 - **Unknown markets:** markets that can't be attributed are left off the charts. They stay in the tables.
 
@@ -31,9 +31,9 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `15_market_vs_close` | Execution against the official close, by market, all orders | The tracking-accuracy chart. Markets ordered by value traded, not by result. |
-| `27_pretraded_close_market` | The same for pre-traded orders only | Close-only orders sit at zero by construction, so this is where any vs Close difference lives. |
+| `27_pretraded_close_market` | The same for pre-traded orders only | Auction-only orders sit at zero by construction, so this is where any vs Close difference lives. |
 | `32_pretraded_pvwap_market` | Pre-traded orders against PVWAP (the market VWAP while the order was working) | Judges how well the pre-close part traded, apart from when the order started. |
-| `37_close_only_arrival_market` | Close-only orders against the arrival price, by market, in spreads | The full cost from the order's arrival to the close print. |
+| `37_close_only_arrival_market` | Auction-only orders against the arrival price, by market, in spreads | The full cost from the order's arrival to the close print. |
 | `38_pretraded_arrival_market` | Pre-traded orders against the arrival price, by market, in spreads | The same for orders that traded before the auction. |
 | `47_opportunity_cost_market` | Cost of the unfilled part: unfilled share × the move from the close to the next open | Approximate, because the price the residual was later completed at is not in the extract. Small when fill rates are close to 100%. |
 
@@ -41,17 +41,18 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 
 | Chart | What it shows | How to read it |
 |---|---|---|
-| `25_close_only_reversion_market_side` | Close-only reversion by market, Buy panel and Sell panel | Same as the H1 slide. |
+| `25_close_only_reversion_market_side` | Auction-only reversion by market, Buy panel and Sell panel | Same as the H1 slide. |
 | `25b_close_only_reversion_participation_side` | The same with close participation for that side as a green line across the top on the right axis, Buy and Sell side by side | Takes the place of 25 in `deck_charts`. One scale per measure across both panels. No title. |
-| `26_pretraded_by_side` | Pre-traded orders: first execution, execution vs close, next open vs close; All / Buy / Sell | Same as the H1 slide. |
+| `26_pretraded_by_side` | Pre-traded orders: first execution vs close, vs PVWAP, execution vs close, next open vs close; All / Buy / Sell | In the desk's order. |
+| `28c_pretraded_measures_market_side` | Pre-traded orders, the same four measures by market: one row per measure, Buy left, Sell right | Buy and Sell share a scale within a row; rows do not. On slide 8. |
 | `28_pretraded_first_exec_market_side` | Pre-traded first execution vs close, by market, buys and sells | Was starting before the close the right call, per market and side? |
 | `28b_pretraded_last_cont_market_side` | Pre-traded last continuous price vs close, by market, buys and sells (+ = the last continuous trade was better for the order than the close) | How far did the close move from where the session ended, per market and side? |
 | `29_pretraded_close_market_side` | Pre-traded execution vs close, by market, buys and sells | |
 | `30_pretraded_reversion_market_side` | Pre-traded reversion, by market, buys and sells | Same as the H1 slide (Korea sells stood out in H1). |
 | `33_pretraded_pvwap_market_side` | Pre-traded vs PVWAP, by market, buys and sells | |
-| `37b_close_only_arrival_market_side` | Close-only arrival slippage, by market, buys and sells | |
+| `37b_close_only_arrival_market_side` | Auction-only arrival slippage, by market, buys and sells | |
 | `38b_pretraded_arrival_market_side` | Pre-traded arrival slippage, by market, buys and sells | |
-| `39b_close_only_last_cont_market_side` | Close-only last continuous price vs close, by market, buys and sells (auction names only) | Same sign as 28b. |
+| `39b_close_only_last_cont_market_side` | Auction-only last continuous price vs close, by market, buys and sells (auction names only) | Same sign as 28b. |
 | `46_closepr_by_side` | Auction move by ClosePR bucket, Buy panel and Sell panel | Does asymmetry grow with participation? |
 | `48_side_gap_market` | Buy minus sell on the auction move, by market | Positive = buys did better. Whiskers are ±1.96 standard errors clustered by date. In a rising market buys look worse for reasons that are not execution. |
 
@@ -62,7 +63,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `41_auction_move_market` | Auction move by market, side-adjusted | Negative = the close moved against our orders. Answers "which markets have the largest closing dislocations". |
 | `49_dislocation_share_market` | % of orders in names whose close moved more than 1, 2 and 3 spreads from the last trade, either direction | Answers "what % of orders were in names with close moves above x spreads". |
 | `56_vol_dislocation` | Median distance of the close from the last trade and from the last 30 min VWAP, by daily-vol quartile (from `Vol`) | Do high-vol names dislocate more at the close? |
-| `57_vol_close_vs_pretraded` | vs Arrival for close-only against pre-traded, by daily-vol quartile | Does completing risk before the auction pay off in calmer names? This is the email's "low dislocation names allow completing earlier". |
+| `57_vol_close_vs_pretraded` | vs Arrival for auction-only against pre-traded, by daily-vol quartile | Does completing risk before the auction pay off in calmer names? This is the email's "low dislocation names allow completing earlier". |
 
 ## 04_auction_vs_trend (point 4)
 
@@ -91,7 +92,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `34_close_pr_all` | Average ClosePR per order, by market, all orders | Simple mean per order, not weighted by value. India uses its PR on window orders. |
-| `35_close_pr_close_only` | The same, close-only orders | Same as the H1 slide. |
+| `35_close_pr_close_only` | The same, auction-only orders | Same as the H1 slide. |
 | `35b_close_pr_close_only_side` | The same, buys and sells side by side | One scale, markets in the order of 35. |
 | `36_close_pr_pretraded` | The same, pre-traded orders | Same as the H1 slide. |
 | `36b_pretraded_pr_close_cont` | Pre-traded orders: close participation (ClosePR) beside continuous participation (fPR_cont), by market | Two bars, not stacked: they are shares of different volumes (the auction's, and the market's while the order traded before it). |
@@ -151,7 +152,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `10c_last_cont_market` | Last continuous price vs close, by market, pre-traded orders; same sign as 10b, the mirror of the auction move (41). CAS names use qatt's last trade before the auction | Would the last continuous trade have beaten the close? |
 | `19_first_exec_by_adv` | The same, by ADV% band | |
 | `20_first_exec_by_spread` | The same, by spread quartile | |
-| `39_close_only_last_cont_market` | Last continuous price vs close, by market, close-only orders on auction names | The close-only twin of 10c. India on a VWAP close is left out: it has no auction. |
+| `39_close_only_last_cont_market` | Last continuous price vs close, by market, auction-only orders on auction names | The auction-only twin of 10c. India on a VWAP close is left out: it has no auction. |
 
 ## reversion
 
@@ -159,15 +160,17 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 |---|---|---|
 | `11_reversion` | Reversion by strategy | Did the auction print come back by the next open? |
 | `21_reversion_pretraded` | Reversion by market, pre-traded orders | |
-| `22_reversion_close_only` | Reversion by market, close-only orders | Same as the H1 slide. |
-| `22b_close_only_reversion_participation` | Close-only reversion by market on the left axis, with close participation as a green line across the top on the right axis | Takes the place of 22 and 35 in `deck_charts`. The line joins markets to read across; it is not a trend. |
+| `22_reversion_close_only` | Reversion by market, auction-only orders | Same as the H1 slide. |
+| `22b_close_only_reversion_participation` | Auction-only reversion by market on the left axis, with close participation as a green line across the top on the right axis | Takes the place of 22 and 35 in `deck_charts`. The line joins markets to read across; it is not a trend. |
+| `22c_auction_only_order_type_market` | Auction-only orders: discretionary vs stipulated, % of each market's value | One 100% bar per market, value traded on top. Beside 22b on slide 5. |
 
 ## flow_and_algo_choice
 
 | Chart | What it shows | How to read it |
 |---|---|---|
-| `23_flow_split` | Close-only against pre-traded: value, orders, fill, %ADV, % executed in the close | Same as the H1 slide. |
+| `23_flow_split` | Auction-only against pre-traded: value, orders, fill, %ADV, % executed in the close | Same as the H1 slide. |
 | `23b_flow_split_order_type` | The same two bars, each stacked by order type (from `bgi_order_types.csv`) | Each segment's % is its share of that bar's value. Unknown = no row in the order-types file. |
+| `23c_order_type_market` | All orders reaching the close: discretionary vs stipulated, % of each market's value | Same chart as 22c, every order. |
 | `15_algo_choice` | Strategies compared inside the same market and size band | Only produced when the scope has two or more close strategies. |
 
 ## hk focus
@@ -177,7 +180,7 @@ Hong Kong, every order in the review, split Cash / Swap by client account (`CASH
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `90_hk_measures` | First execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | Same sign on all three: + = better for the order than the close. |
-| `90b_hk_co_measures` | Close-only orders: last continuous price vs close, execution vs close, next open vs close (reversion); Cash panel, Swap panel | Execution vs close sits at zero by design; reversion is the measure that moves. |
+| `90b_hk_co_measures` | Auction-only orders: last continuous price vs close, execution vs close, next open vs close (reversion); Cash panel, Swap panel | Execution vs close sits at zero by design; reversion is the measure that moves. |
 | `90c_hk_pre_measures` | Pre-traded orders: first execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | Orders with nothing printed in the close are in neither 90b nor 90c. |
 | `91a`/`91b`/`91c_hk_spread_q_*` | Each of the three by spread quartile, Cash and Swap side by side | Does the gap between Cash and Swap hold in names that trade alike? |
 | `92a`/`92b`/`92c_hk_adv_*` | The same by ADV% band (0-1, 1-3, 3-5, 5-10, 10-25, 25%+) | The same question for order size. Fixed bands, not quartiles: most orders are tiny, so quartiles would put every large order in one band. |
@@ -190,12 +193,12 @@ India orders from 3 August 2026 (CAS go-live), split CAS / Non-CAS. CAS = the na
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `95_in_measures` | The three measures; CAS panel, Non-CAS panel | |
-| `95b_in_co_measures` | Close-only: last continuous price vs close, execution vs close, reversion; CAS panel, Non-CAS panel | Non-CAS window orders count as close-only (their close share is imputed at 100). |
+| `95b_in_co_measures` | Auction-only: last continuous price vs close, execution vs close, reversion; CAS panel, Non-CAS panel | Non-CAS window orders count as auction-only (their close share is imputed at 100). |
 | `95c_in_pre_measures` | Pre-traded: first execution, last continuous price, execution, each vs close | CAS names only in practice: a Non-CAS order cannot be pre-traded. |
 | `96a`/`96b`/`96c_in_spread_q_*` | By spread quartile, CAS and Non-CAS side by side | |
 | `97a`/`97b`/`97c_in_adv_*` | By ADV% band | |
-| `95d_in_cas_flow_measures` | India CAS only: close-only and pre-traded side by side. First execution, last continuous price, execution and next open, each vs close | Split by price: close only = first fill at the close. Order counts and value shares in the footnote. |
-| `95e_in_cas_flow_order_type` | India CAS: close only and pre-traded, each bar stacked by order type, with mean close participation (ClosePR) and the % of executed quantity in the close under the bar | Each segment's % is its share of that bar's value. |
+| `95d_in_cas_flow_measures` | India CAS only: auction-only and pre-traded side by side. First execution, last continuous price, execution and next open, each vs close | Split by price: auction only = first fill at the close. Order counts and value shares in the footnote. |
+| `95e_in_cas_flow_order_type` | India CAS: auction only and pre-traded, each bar stacked by order type, with mean close participation (ClosePR) and the % of executed quantity in the close under the bar | Each segment's % is its share of that bar's value. |
 | `97d_in_pre_adv_q_first_exec` | Pre-traded only: first execution vs close by ADV% quartile, CAS and Non-CAS | India reports no close share, so pre-traded here means the first fill was not at the close. Non-CAS names trade through the closing VWAP, so nearly all of them count. |
 | `97e_in_cas_pre_pr_adv` | India CAS, pre-traded: ClosePR beside fPR_cont, by ADV% band | Same reading as 36b. |
 
