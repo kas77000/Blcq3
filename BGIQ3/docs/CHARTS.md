@@ -186,6 +186,7 @@ Hong Kong, every order in the review, split Cash / Swap by client account (`CASH
 | `90_hk_measures` | First execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | + is always good for the order: better than the close, and for last continuous vs close, the auction moved our way. |
 | `90b_hk_co_measures` | Auction-only orders: last continuous price vs close, vs PVWAP, execution vs close, next open vs close (reversion); Cash panel, Swap panel | Execution vs close sits at zero by design; reversion is the measure that moves. |
 | `90c_hk_pre_measures` | Pre-traded orders: first execution vs close, last continuous price vs close, vs PVWAP, execution vs close; Cash panel, Swap panel | Orders with nothing printed in the close are in neither 90b nor 90c. |
+| `90d_hk_flow_order_type` | Hong Kong, auction-only vs pre-traded, each bar split discretionary / stipulated; cash and swap together | Same chart as 23b, Hong Kong only (table `120_hk7_flow_order_type`). Orders with no order type are left out. |
 | `91a`/`91b`/`91c_hk_spread_q_*` | Each of the three by spread quartile, Cash and Swap side by side | Does the gap between Cash and Swap hold in names that trade alike? |
 | `92a`/`92b`/`92c_hk_adv_*` | The same by ADV% band (0-1, 1-3, 3-5, 5-10, 10-25, 25%+) | The same question for order size. Fixed bands, not quartiles: most orders are tiny, so quartiles would put every large order in one band. |
 | `92d_hk_pre_adv_q_first_exec` | Pre-traded only: first execution vs close by ADV% quartile, Cash and Swap | Quartiles cut on the pre-traded orders, so the four bands cover the sizes that trade before the auction. |
@@ -198,6 +199,7 @@ India orders from 3 August 2026 (CAS go-live), split CAS / Non-CAS. CAS = the na
 |---|---|---|
 | `95_in_measures` | The three measures; CAS panel, Non-CAS panel | |
 | `95b_in_co_measures` | Auction-only: last continuous price vs close, execution vs close, reversion; CAS panel, Non-CAS panel | Non-CAS window orders count as auction-only (their close share is imputed at 100). |
+| `95f_in_flow_measures` | India from the CAS date, 2x2: CAS and Non-CAS by auction only and pre-traded; first execution, last continuous, execution vs close, next open vs close | Flow read from the price (first fill at the close = auction only). Order count in each panel title. Tables `130_in7_flow_*`. In the deck in place of 95d. |
 | `95c_in_pre_measures` | Pre-traded: first execution, last continuous price, execution, each vs close | CAS names only in practice: a Non-CAS order cannot be pre-traded. |
 | `96a`/`96b`/`96c_in_spread_q_*` | By spread quartile, CAS and Non-CAS side by side | |
 | `97a`/`97b`/`97c_in_adv_*` | By ADV% band | |

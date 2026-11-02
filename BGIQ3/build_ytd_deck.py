@@ -349,19 +349,8 @@ def story(run: Run) -> list[dict]:
                    "Multiply the two to get bps.", ds_all))
 
     # --- 3. pre-traded vs auction only, by order type --------------------------------
-    ft = run.table("51b_flow_split_type", 2)
-    b, src = [], []
-    if ft is not None:
-        for flow in ("Auction-only", "Pre-traded"):
-            if flow not in ft.index.get_level_values(0):
-                continue
-            part = ft.loc[flow].sort_values("% of flow notional", ascending=False)
-            top = part.iloc[0]
-            b.append(f"{flow}: {num(top, '% of flow notional'):.0f}% of the value was "
-                     f"{str(part.index[0]).lower()}.")
-            src += [f"`51b_flow_split_type` [{flow}, {k}]: "
-                    f"{num(r, 'notional (USDm)'):,.1f}m, {num(r, '% of flow notional'):.1f}%, "
-                    f"{int(num(r, 'orders')):,} orders" for k, r in part.iterrows()]
+    b, src = order_type_bullets(run.table("51b_flow_split_type", 2),
+                                "51b_flow_split_type")
     S.append(slide("Pre-traded vs Auction only, by Order Type", b,
                    ["23b_flow_split_order_type.png"], src,
                    talk("The same two bars as the last slide, split by how the order "
@@ -752,8 +741,19 @@ def story(run: Run) -> list[dict]:
     S.append(slide("Hong Kong Pre-traded: Cash vs Swap", b, ["90c_hk_pre_measures.png"],
                    src, talk(say, "Positive is always good for the order. Last continuous vs "
                              "close: positive = the auction moved our way.",
-                             "Next: which Hong Kong orders gain from starting early?"),
+                             "Next: stipulated against discretionary in Hong Kong."),
                    ds_hk_pre))
+
+    b, src = order_type_bullets(run.table("120_hk7_flow_order_type", 2),
+                                "120_hk7_flow_order_type")
+    S.append(slide("Hong Kong: Order Type by Flow", b,
+                   ["90d_hk_flow_order_type.png"], src,
+                   talk("The Hong Kong orders split the same way as slide 3: auction "
+                        "only against pre-traded, then by how the order reached us, "
+                        "stipulated or discretionary. Cash and swap together.",
+                        "Order type comes from bgi_order_types.csv, matched on the "
+                        "order id. Orders with no match are left out of the chart.",
+                        "Next: which Hong Kong orders gain from starting early?"), ds_hk))
 
     hq = run.rows("120_hk2_first_exec_adv", 2)
     hk_from = pays_from(hq, ("Cash", "Swap"))
@@ -815,8 +815,54 @@ def story(run: Run) -> list[dict]:
                    talk(say, "CAS names have an AUC or ACB code in qatt that day. CAS spreads "
                         "are tight (about 2 bps), so a few bps read as many spreads. Under "
                         "three months of data: a first look. India reports no close share, "
-                        "so CAS orders cannot be split into auction-only and pre-traded.",
-                        "Next: which CAS orders gain from starting early?"), ds_in))
+                        "so for CAS orders auction only and pre-traded are read from the "
+                        "price: the first fill at the close, or not.",
+                        "Next: auction only and pre-traded, CAS and non-CAS."), ds_in))
+
+    fl = dict(run.rows("130_in7_flow_vs_close"))
+    rv = dict(run.rows("130_in7_flow_reversion"))
+    b, src, say = [], [], ""
+    for g, bench in (("CAS", "the close"), ("Non-CAS", "the closing VWAP")):
+        r = fl.get(f"{g}: Pre-traded")
+        if r is not None:
+            b.append(f"{g}, traded early: {num(r, 'spreads'):+.2f} spreads "
+                     f"against {bench}.")
+            src.append(cite("130_in7_flow_vs_close", f"{g}: Pre-traded", r))
+    nco = fl.get("Non-CAS: Auction only")
+    n_nco = int(num(nco, "orders")) if nco is not None else 0
+    if n_nco < 30:
+        b.append(f"Only {n_nco} non-CAS orders filled at the close.")
+    for k, r in fl.items():
+        if not k.endswith("Pre-traded"):
+            src.append(cite("130_in7_flow_vs_close", k, r))
+    src += [cite("130_in7_flow_reversion", k, r) for k, r in rv.items()]
+    say = ("India split four ways: CAS and non-CAS names, each into orders that went "
+           "straight to the close and orders that traded before it. The four bars in "
+           "each panel are the same prices as the Hong Kong slides. Positive is always "
+           "good for the order. Non-CAS names close on a VWAP, so nearly all of "
+           "them trade before it and few land in the auction-only panel.")
+    S.append(slide("India: Auction Only vs Pre-traded", b,
+                   ["95f_in_flow_measures.png"], src,
+                   talk(say, "India reports no close share, so the split is read from "
+                        "the price: auction only means the first fill was at the close. "
+                        "Its first execution is zero by definition. Non-CAS names close "
+                        "on the VWAP of the last half hour. The order count is in each "
+                        "panel title; a thin panel is a first look, not a result.",
+                        "Next: stipulated against discretionary in the CAS names."), ds_in))
+
+    b, src = order_type_bullets(run.table("130_in6_cas_flow_order_type", 2),
+                                "130_in6_cas_flow_order_type")
+    S.append(slide("India CAS: Order Type by Flow", b,
+                   ["95e_in_cas_flow_order_type.png"], src,
+                   talk("India CAS names only, from 3 August: the names with a closing "
+                        "auction. Non-CAS names close on a VWAP, so the split does not "
+                        "apply to them. India reports no close share, so auction only "
+                        "means the first fill was at the close; pre-traded means it was "
+                        "anywhere else.",
+                        "Order type comes from bgi_order_types.csv, matched on the "
+                        "order id. Orders with no match are left out of the chart.",
+                        "Next: which CAS orders gain from starting early?"),
+                   ds_in + ", CAS names"))
 
     iq = run.rows("130_in2_first_exec_adv", 2)
     in_from = pays_from(iq, ("CAS",))
@@ -884,6 +930,43 @@ def story(run: Run) -> list[dict]:
                         "months old: watch it, do not act on it yet.", "")))
 
     return S
+
+
+def _whole(shares: dict) -> dict:
+    """Whole percentages that add up to 100, the way the order-type charts
+    round them (largest remainder), so a bullet and its bar agree."""
+    tot = sum(v for v in shares.values() if v > 0)
+    if not tot:
+        return {k: 0 for k in shares}
+    exact = {k: 100.0 * max(v, 0.0) / tot for k, v in shares.items()}
+    out = {k: int(math.floor(v)) for k, v in exact.items()}
+    for k in sorted(exact, key=lambda k: out[k] - exact[k])[:100 - sum(out.values())]:
+        out[k] += 1
+    return out
+
+
+def order_type_bullets(tab, table: str):
+    """One bullet per flow: the order type that carried most of its value.
+    Returns (bullets, sources). tab is indexed (flow, order type).
+
+    Shares are of the value with a known order type, as on the chart: orders
+    with no row in the order-types file are left out of both."""
+    b, src = [], []
+    if tab is None or tab.empty:
+        return b, src
+    ncol = "notional (USDm)"
+    for flow in dict.fromkeys(tab.index.get_level_values(0)):
+        part = tab.loc[flow]
+        known = part[[str(k).strip().lower() != "unknown" for k in part.index]]
+        if known.empty:
+            continue
+        pct = _whole({k: num(r, ncol) for k, r in known.iterrows()})
+        top = max(pct, key=pct.get)
+        b.append(f"{pct[top]}% of the {flow.lower()} value was {str(top).lower()}.")
+        src += [f"`{table}` [{flow}, {k}]: {num(r, ncol):,.1f}m, {pct.get(k, 0)}% "
+                f"of the known-type value, {int(num(r, 'orders')):,} orders"
+                for k, r in part.iterrows()]
+    return b, src
 
 
 def _band_edge(label) -> str:

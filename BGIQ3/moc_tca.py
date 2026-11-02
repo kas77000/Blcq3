@@ -619,9 +619,9 @@ CHART_FOLDERS = {
     "flow_and_algo_choice":      ["15_algo", "23_", "23b_", "23c_"],
     "australia focus":           ["98a_", "98b_", "98c_"],
     # Market focus folders, asked for by name.
-    "hk focus":                  ["90_", "90b_", "90c_", "91a_", "91b_",
+    "hk focus":                  ["90_", "90b_", "90c_", "90d_", "91a_", "91b_",
                                   "91c_", "92a_", "92b_", "92c_", "92d_"],
-    "India focus":               ["95_", "95b_", "95c_", "95d_", "95e_", "96a_", "96b_",
+    "India focus":               ["95_", "95b_", "95c_", "95d_", "95e_", "95f_", "96a_", "96b_",
                                   "96c_", "97a_", "97b_", "97c_", "97d_", "97e_"],
 }
 
@@ -648,8 +648,9 @@ DECK_CHART_ORDER = [
     "36b_pretraded_pr_close_cont.png", "10c_last_cont_market.png",
     "28b_pretraded_last_cont_market_side.png",
     "90_hk_measures.png", "90b_hk_co_measures.png", "90c_hk_pre_measures.png",
+    "90d_hk_flow_order_type.png",
     "92a_hk_adv_first_exec.png", "92d_hk_pre_adv_q_first_exec.png",
-    "95_in_measures.png", "95d_in_cas_flow_measures.png",
+    "95_in_measures.png", "95f_in_flow_measures.png",
     "95e_in_cas_flow_order_type.png",
     "97a_in_adv_first_exec.png", "97d_in_pre_adv_q_first_exec.png",
     "97e_in_cas_pre_pr_adv.png",
@@ -4755,9 +4756,12 @@ def chart_spreads_by_side(t: pd.DataFrame, out: Path, name: str, title: str,
 def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
                            note: str = "", all_label: str = "All",
                            unit: str = None, xlabel: str = "",
-                           panels: list = None) -> None:
+                           panels: list = None, grid: int = None,
+                           heads: dict = None) -> None:
     """Several measures on one population: an All panel, then Buy, then Sell.
     panels replaces All / Buy / Sell with other index values of the tables.
+    grid lays the panels out that many to a row, one scale for all of them;
+    heads gives a panel a fuller title than its index value.
 
     specs is [(measure label, table indexed All / Buy / Sell), ...]. Each bar
     carries its own spread because the measures are not weighted alike -
@@ -4772,7 +4776,19 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
                      for _, tb in specs)]
     if not panels:
         return
-    fig, axes = _fig((12.5 if len(specs) <= 3 else 16.0, 5.6), ncols=len(panels))
+    if grid:
+        nrows = math.ceil(len(panels) / grid)
+        fig, axs = plt.subplots(nrows, grid, dpi=DPI, squeeze=False,
+                                figsize=(9.0 * grid, 3.9 * nrows))
+        fig.patch.set_facecolor(SURFACE)
+        axes = list(axs.ravel())
+        for ax in axes:
+            ax.set_facecolor(SURFACE)
+        for ax in axes[len(panels):]:
+            ax.set_visible(False)
+        axes = axes[:len(panels)]
+    else:
+        fig, axes = _fig((12.5 if len(specs) <= 3 else 16.0, 5.6), ncols=len(panels))
     nan = float("nan")
     for i, (ax, p) in enumerate(zip(axes, panels)):
         labels, vals, ci = [], [], []
@@ -4787,12 +4803,21 @@ def chart_measures_by_side(specs: list, out: Path, name: str, title: str,
                                         spreads))
             vals.append(float(r[vcol]))
             ci.append((float(r[lo]), float(r[hi])))
+        if grid:
+            # Flat, wrapped labels: on a grid the panels are short, and slanted
+            # labels would take half the height.
+            import textwrap
+            labels = [chr(10).join(textwrap.wrap(l.split(chr(10))[0], 18)
+                                   + l.split(chr(10))[1:]) for l in labels]
         _diverging_barv(ax, labels, vals, ci=ci,
                         unit="spreads" if spreads else "bps")
-        head = all_label if p == "All" else p
+        if grid:
+            ax.set_xticklabels(labels, rotation=0, ha="center")
+        head = all_label if p == "All" else (heads or {}).get(p, p)
+        first_col = i % grid == 0 if grid else i == 0
         _style(ax, ylabel=("Result vs benchmark, "
                            + ("in spreads" if spreads else "bps")
-                           + " (notional-weighted)") if i == 0 else "",
+                           + " (notional-weighted)") if first_col else "",
                xlabel=xlabel,
                title=(title + chr(10) + head) if i == 0 else chr(10) + head)
         ax._panel = head
@@ -6599,6 +6624,9 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
                  "in neither CASH_CLIENTS nor SWAP_CLIENTS, shown as Other:")
             log("    " + ", ".join(accts[:10]))
         _focus_tables(hk, "notional_type", HK_GROUPS, "120_hk", t)
+        # Auction-only and pre-traded, each split by order type, like 23b.
+        if "has_auction" in hk:
+            t["120_hk7_flow_order_type"] = t_flow_split_type(hk[hk["has_auction"]])
     elif len(hk):
         log("  Hong Kong focus skipped: no client account to split cash from swap.")
     if "cas_name" in df and "date" in df:
@@ -6654,6 +6682,17 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
                     if value in cas and cas[value].notna().any():
                         t[f"130_in6_cas_flow_{short}"] = t_in_spreads(
                             cas, "cas_flow", value, order=CAS_FLOWS)
+            # CAS and Non-CAS, each split auction only / pre-traded the same way.
+            both = ind[fe.notna()].copy()
+            if len(both):
+                both["in_flow"] = (both["cas_group"] + ": "
+                                   + np.where(pre_in[both.index], "Pre-traded",
+                                              "Auction only"))
+                order = [f"{g}: {f}" for g in INDIA_GROUPS for f in CAS_FLOWS]
+                for value, short, _ in FOCUS_MEASURES + [FOCUS_REVERSION]:
+                    if value in both and both[value].notna().any():
+                        t[f"130_in7_flow_{short}"] = t_in_spreads(
+                            both, "in_flow", value, order=order)
             cas_pre = ind[pre_in & ind["cas_group"].eq("CAS")]
             if len(cas_pre) and "adv_pct" in cas_pre:
                 cas_pre = cas_pre.assign(adv_bucket=pd.cut(
@@ -6827,6 +6866,28 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                       + chr(10) + "Next open vs close: negative = the price came "
                       "back against us. " + LAST_CONT_NOTE + "."),
                 xlabel="in spreads", panels=CAS_FLOWS)
+            specs7 = [(label, t.get(f"130_in7_flow_{short}", E))
+                      for _, short, label in FOCUS_MEASURES + [FOCUS_REVERSION]]
+            order7 = [f"{g}: {f}" for g in INDIA_GROUPS for f in CAS_FLOWS]
+            counts = {}
+            for _, tb in specs7:
+                if not tb.empty and "orders" in tb:
+                    for k, n in tb["orders"].items():
+                        counts[k] = max(counts.get(k, 0), int(n))
+            _guard(chart_measures_by_side, specs7, charts,
+                   "95f_in_flow_measures.png",
+                   "India, Auction Only vs Pre-traded: CAS and Non-CAS",
+                   note=("India orders from " + AUCTION_FROM["India"] + ". India "
+                         "reports no close share, so the split is read from the "
+                         "price: auction only = the first fill was at the close, "
+                         "pre-traded = anywhere else. An auction-only order's first "
+                         "fill is the close, so its first execution is zero by "
+                         "definition. Non-CAS names close on the VWAP of the last "
+                         "half hour, so nearly all of them count as pre-traded."
+                         + chr(10) + "Next open vs close: negative = the price came "
+                         "back against us. " + LAST_CONT_NOTE + "."),
+                   xlabel="", panels=order7, grid=2,
+                   heads={k: f"{k}  ({counts[k]:,} orders)" for k in counts})
             pr_col = "close PR % (mean)"
             under = {}
             for k, r in prof.iterrows():
@@ -6865,6 +6926,12 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                 panels=groups, ylabel="First execution vs close, in spreads",
                 xlabel="Order size quartile, pre-traded orders (% of ADV)",
                 side_by_side=True, short_panels=True)
+    _guard(chart_flow_split_type, t.get("120_hk7_flow_order_type", E), charts,
+           "90d_hk_flow_order_type.png",
+           "Hong Kong, Auction Only vs Pre-traded, by Order Type",
+           note="Hong Kong orders, cash and swap together. Auction only: 99.5% or "
+                "more of the order printed in the closing auction; pre-traded: part "
+                "of it traded before.")
 
 
 # --- charts --------------------------------------------------------------------
