@@ -594,7 +594,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "28_", "28b_", "28c_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "26b_", "28_", "28b_", "28c_", "29_", "30_", "33_",
                                   "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
@@ -633,7 +633,8 @@ DECK_CHART_ORDER = [
     "22c_auction_only_order_type_market.png",
     "25b_close_only_reversion_participation_side.png",
     "35b_close_pr_close_only_side.png",
-    "26_pretraded_by_side.png", "28c_pretraded_measures_market_side.png",
+    "26_pretraded_by_side.png", "26b_pretraded_order_type_market.png",
+    "28c_pretraded_measures_market_side.png",
     "28_pretraded_first_exec_market_side.png",
     "30_pretraded_reversion_market_side.png", "36_close_pr_pretraded.png",
     "36b_pretraded_pr_close_cont.png", "10c_last_cont_market.png",
@@ -7076,6 +7077,8 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["51b_flow_split_type"] = t_flow_split_type(df[reach])
     t["51c_order_type_mkt"] = t_order_type_market(df[reach])
     t["51d_order_type_mkt_co"] = t_order_type_market(co)
+    t["51e_order_type_mkt_pre"] = t_order_type_market(
+        df[reach & _flag(df, "pretraded")])
     t["52_adv_profile"] = t_adv_profile(df)
     t["53_pre_adv_profile"] = t_adv_profile(pre)
     # Every performance chart reads one of these. "co" is auction-only and
@@ -7510,6 +7513,10 @@ def build_charts(t: dict, out_dir: Path) -> None:
            "22c_auction_only_order_type_market.png",
            "Auction Only: Discretionary vs Stipulated, by Market",
            "auction-only orders.")
+    _guard(chart_order_type_market, t.get("51e_order_type_mkt_pre", E), charts,
+           "26b_pretraded_order_type_market.png",
+           "Pre-traded: Discretionary vs Stipulated, by Market",
+           "pre-traded orders: part of the order traded before the auction.")
     # Green, at the desk's request - it sits beside the blue-and-red value
     # chart on the summary slide and should not read as a saving.
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",

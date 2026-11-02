@@ -171,6 +171,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | `23_flow_split` | Auction-only against pre-traded: value, orders, fill, %ADV, % executed in the close | Same as the H1 slide. |
 | `23b_flow_split_order_type` | The same two bars, each stacked by order type (from `bgi_order_types.csv`) | Each segment's % is its share of that bar's value. Unknown = no row in the order-types file. |
 | `23c_order_type_market` | All orders reaching the close: discretionary vs stipulated, % of each market's value | Same chart as 22c, every order. |
+| `26b_pretraded_order_type_market` | Pre-traded orders: discretionary vs stipulated, % of each market's value | Same chart as 22c and 23c, pre-traded orders only. |
 | `15_algo_choice` | Strategies compared inside the same market and size band | Only produced when the scope has two or more close strategies. |
 
 ## hk focus
