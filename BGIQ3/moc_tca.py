@@ -4114,14 +4114,19 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     _save(fig, out, name)
 
 
+# On the cash and swap pies a market below this share of the slice's total goes
+# into Others: a thinner slice cannot hold a label without hitting its neighbour.
+PIE_MIN_PCT = 3.0
+
+
 def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
                                name: str) -> None:
-    """Value traded by market for one account type (Cash or Swap) alone.
+    """Value traded by market for one account type (Cash or Swap), as a pie.
 
-    The stacked chart answers where the value went; this one answers where
-    each account type's value went, which the stack hides on the small
-    markets. Markets in this type's own order, each with its share of this
-    type's total.
+    Largest slice first, clockwise from the top. Each slice carries its value
+    and its share of this type's total. No title on the picture, at the
+    desk's request; the deck still gets one. Markets folded into Others are
+    named in the footnote, so nothing disappears.
     """
     if df.empty or "market" not in df or "notional_type" not in df:
         return
@@ -4131,33 +4136,41 @@ def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
         return
     totals = (d.groupby("market", observed=True)["notional"].sum() / 1e6
               ).sort_values(ascending=False)
-    totals = totals[totals > 0].head(12)
-    grand = float(d["notional"].sum()) / 1e6
-    color = SERIES[NOTIONAL_TYPE_ORDER.index(part) % len(SERIES)]
+    totals = totals[totals > 0]
+    if totals.empty:
+        return
+    grand = float(totals.sum())
+    pct = 100.0 * totals / grand
+    small = totals[pct < PIE_MIN_PCT]
+    # One small market keeps its own slice: Others would rename it for nothing.
+    if len(small) < 2:
+        small = totals.iloc[0:0]
+    big = totals.drop(small.index)
+    names = [str(m) for m in big.index]
+    vals = [float(v) for v in big.values]
+    colors = [SERIES[i % len(SERIES)] for i in range(len(big))]
+    if len(small):
+        names.append(f"Others ({len(small)})")
+        vals.append(float(small.sum()))
+        colors.append(INK_MUTED)
 
-    fig, (ax,) = _fig((11.0, 6.0))
-    x = np.arange(len(totals))
-    ax.bar(x, totals.values, width=0.62, color=color, zorder=3,
-           edgecolor=SURFACE, linewidth=1.4)
-    span = max(float(totals.max()), 1.0)
-    ax.set_ylim(0, span * 1.15)
-    for j, v in enumerate(totals.values):
-        ax.text(j, v + span * 0.02,
-                f"{v:,.0f}m  ({100.0 * v / max(grand, 1e-9):.0f}%)"
-                if v >= 1 else f"<1m  ({100.0 * v / max(grand, 1e-9):.0f}%)",
-                va="bottom", ha="center", fontsize=9, color=INK, zorder=5)
-    ax.set_xticks(x)
-    ax.set_xticklabels(list(totals.index), rotation=30, ha="right")
-    ax.grid(axis="y", zorder=0)
-    ax.set_axisbelow(True)
-    # No title on the picture, at the desk's request. The deck still gets one.
-    _style(ax, ylabel=f"Executed notional ({CURRENCY}m)", xlabel="Market")
+    def tag(v: float) -> str:
+        return f"{v:,.0f}m" if v >= 1 else "<1m"
+
+    labels = [f"{m}{chr(10)}{tag(v)}  ({100.0 * v / grand:.0f}%)"
+              for m, v in zip(names, vals)]
+    fig, (ax,) = _fig((8.6, 6.6))
+    ax.pie(vals, labels=labels, colors=colors, startangle=90, counterclock=False,
+           wedgeprops={"edgecolor": SURFACE, "linewidth": 1.4}, labeldistance=1.09,
+           textprops={"fontsize": 9, "color": INK})
+    note = (f"{part} only, by client account: {grand:,.0f}m in all. The percentage "
+            f"is the market's share of the {part.lower()} value.")
+    if len(small):
+        note += chr(10) + "Others: " + ", ".join(
+            f"{m} {tag(float(v))}" for m, v in small.items()) + "."
     fig._deck_title = f"{PERIOD_LABEL} MOC TCA Overview, {part}"
-    ax.text(0.0, -0.30, f"{part} only, by client account: {grand:,.0f}m in all. "
-            f"The percentage is the market's share of the {part.lower()} value.",
-            transform=ax.transAxes, fontsize=7.5, color=INK_MUTED)
-    fig._deck_scale = 1.0
-    _save(fig, out, name)
+    fig._deck_scale = 1.15
+    _save(fig, out, name, bottom=_notes(fig, [note]))
 
 
 def chart_spread_relative(t: pd.DataFrame, out: Path,
