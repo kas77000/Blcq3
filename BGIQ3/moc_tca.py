@@ -6220,6 +6220,23 @@ FOCUS_FLOWS = [
      [FOCUS_MEASURES[1], FOCUS_MEASURES[2], FOCUS_REVERSION]),
     ("pretraded", "pre", "c", "Pre-traded", FOCUS_MEASURES),
 ]
+# Focus folders whose flow charts also carry slippage vs PVWAP (the market's
+# VWAP while the order worked), just before execution vs close.
+FOCUS_PVWAP = ("slip_pvwap", "pvwap", "vs PVWAP")
+FOCUS_PVWAP_KEYS = {"120_hk"}
+
+
+def _flow_measures(key: str, measures: list) -> list:
+    if key not in FOCUS_PVWAP_KEYS:
+        return measures
+    out = []
+    for m in measures:
+        if m[1] == "vs_close":
+            out.append(FOCUS_PVWAP)
+        out.append(m)
+    return out
+
+
 FOCUS_FLOW_NOTES = {
     "co": ("auction-only: 99.5% or more of the order printed in the close, so its "
            "execution sits at the close by design. Next open vs close: "
@@ -6297,7 +6314,7 @@ def _focus_tables(d: pd.DataFrame, group: str, groups: list, key: str,
             if q in d and d[q].notna().any():
                 t[f"{key}2_{short}_{qk}"] = t_in_spreads(d, [q, group], value)
     for flag, fs, _, _, measures in FOCUS_FLOWS:
-        for value, short, _ in measures:
+        for value, short, _ in _flow_measures(key, measures):
             if value in d and d[value].notna().any():
                 t[f"{key}3{fs}_{short}"] = t_in_spreads(
                     d[_flag(d, flag)], group, value, order=groups)
@@ -6520,9 +6537,11 @@ def build_focus_charts(t: dict, charts: Path) -> None:
         for _, fs, letter, flow, measures in FOCUS_FLOWS:
             chart_measures_by_side(
                 [(label, t.get(f"{key}3{fs}_{short}", E))
-                 for _, short, label in measures],
+                 for _, short, label in _flow_measures(key, measures)],
                 charts, f"{n0}{letter}_{tag}_{fs}_measures.png",
-                f"{who}, {flow}", note=FOCUS_FLOW_NOTES[fs] + chr(10) + note,
+                f"{who}, {flow}", note=FOCUS_FLOW_NOTES[fs] + chr(10) + note
+                + (chr(10) + "vs PVWAP: against the market's VWAP while each order "
+                   "was working; + = better than it." if key in FOCUS_PVWAP_KEYS else ""),
                 xlabel="in spreads", panels=groups)
         for (_, qk), nn in zip(FOCUS_CUTS, nq):
             by = "Spread Quartile" if qk == "spread_q" else "ADV%"

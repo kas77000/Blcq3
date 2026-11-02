@@ -180,8 +180,8 @@ Hong Kong, every order in the review, split Cash / Swap by client account (`CASH
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `90_hk_measures` | First execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | + is always good for the order: better than the close, and for last continuous vs close, the auction moved our way. |
-| `90b_hk_co_measures` | Auction-only orders: last continuous price vs close, execution vs close, next open vs close (reversion); Cash panel, Swap panel | Execution vs close sits at zero by design; reversion is the measure that moves. |
-| `90c_hk_pre_measures` | Pre-traded orders: first execution vs close, last continuous price vs close, execution vs close; Cash panel, Swap panel | Orders with nothing printed in the close are in neither 90b nor 90c. |
+| `90b_hk_co_measures` | Auction-only orders: last continuous price vs close, vs PVWAP, execution vs close, next open vs close (reversion); Cash panel, Swap panel | Execution vs close sits at zero by design; reversion is the measure that moves. |
+| `90c_hk_pre_measures` | Pre-traded orders: first execution vs close, last continuous price vs close, vs PVWAP, execution vs close; Cash panel, Swap panel | Orders with nothing printed in the close are in neither 90b nor 90c. |
 | `91a`/`91b`/`91c_hk_spread_q_*` | Each of the three by spread quartile, Cash and Swap side by side | Does the gap between Cash and Swap hold in names that trade alike? |
 | `92a`/`92b`/`92c_hk_adv_*` | The same by ADV% band (0-1, 1-3, 3-5, 5-10, 10-25, 25%+) | The same question for order size. Fixed bands, not quartiles: most orders are tiny, so quartiles would put every large order in one band. |
 | `92d_hk_pre_adv_q_first_exec` | Pre-traded only: first execution vs close by ADV% quartile, Cash and Swap | Quartiles cut on the pre-traded orders, so the four bands cover the sizes that trade before the auction. |
