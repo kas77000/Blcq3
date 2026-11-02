@@ -6417,17 +6417,21 @@ def log_late_starts(df: pd.DataFrame, t: dict) -> None:
         val = float(part["notional"].sum())
         rows.append({"flow": name, "orders": len(part), "late orders": int(late.sum()),
                      "% of orders": 100.0 * late.mean(),
-                     "% of value": (100.0 * float(part.loc[late, "notional"].sum()) / val
-                                    if val > 0 else np.nan)})
+                     "% of notional executed": (
+                         100.0 * float(part.loc[late, "notional"].sum()) / val
+                         if val > 0 else np.nan)})
     tab = pd.DataFrame(rows).set_index("flow").round(2)
     t["140_au3_late_starts"] = tab
     log("")
     log(f"  Australia: orders that started {LATE_START_MIN} min or less before "
         "the close")
-    log(f"    {'':<14}{'orders':>9}{'late':>8}{'% orders':>10}{'% value':>10}")
+    log(f"    {'':<14}{'orders':>9}{'late':>8}{'% of orders':>14}"
+        f"{'% of notional executed':>25}")
     for name, r in tab.iterrows():
         log(f"    {name:<14}{int(r['orders']):>9,}{int(r['late orders']):>8,}"
-            f"{r['% of orders']:>9.1f}%{r['% of value']:>9.1f}%")
+            f"{r['% of orders']:>13.1f}%{r['% of notional executed']:>24.1f}%")
+    log("    % of notional executed: the late orders' executed notional as a "
+        "share of that row's total executed notional.")
 
 
 def build_australia_tables(df: pd.DataFrame, t: dict) -> None:
