@@ -4114,8 +4114,9 @@ def chart_market_notional(df: pd.DataFrame, out: Path,
     _save(fig, out, name)
 
 
-# On the cash and swap pies a market below this share of the slice's total goes
-# into Others: a thinner slice cannot hold a label without hitting its neighbour.
+# On the cash and swap pies a market below this share of the total goes into
+# Others: a slice that thin cannot be picked out against the legend. So does
+# anything past the palette, so no two markets ever share a colour.
 PIE_MIN_PCT = 3.0
 
 
@@ -4123,10 +4124,10 @@ def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
                                name: str) -> None:
     """Value traded by market for one account type (Cash or Swap), as a pie.
 
-    Largest slice first, clockwise from the top. Each slice carries its value
-    and its share of this type's total. No title on the picture, at the
-    desk's request; the deck still gets one. Markets folded into Others are
-    named in the footnote, so nothing disappears.
+    Largest slice first, clockwise from the top, with a legend on the right
+    giving each market's share of this type's total and its value. No title
+    on the picture, at the desk's request; the deck still gets one. Markets
+    folded into Others are named in the footnote, so nothing disappears.
     """
     if df.empty or "market" not in df or "notional_type" not in df:
         return
@@ -4146,6 +4147,10 @@ def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
     if len(small) < 2:
         small = totals.iloc[0:0]
     big = totals.drop(small.index)
+    if len(big) > len(SERIES):
+        keep = len(SERIES) - 1
+        small = pd.concat([big.iloc[keep:], small])
+        big = big.iloc[:keep]
     names = [str(m) for m in big.index]
     vals = [float(v) for v in big.values]
     colors = [SERIES[i % len(SERIES)] for i in range(len(big))]
@@ -4157,12 +4162,13 @@ def chart_market_notional_type(df: pd.DataFrame, out: Path, part: str,
     def tag(v: float) -> str:
         return f"{v:,.0f}m" if v >= 1 else "<1m"
 
-    labels = [f"{m}{chr(10)}{tag(v)}  ({100.0 * v / grand:.0f}%)"
+    labels = [f"{m}  {100.0 * v / grand:.0f}%  ({tag(v)})"
               for m, v in zip(names, vals)]
-    fig, (ax,) = _fig((8.6, 6.6))
-    ax.pie(vals, labels=labels, colors=colors, startangle=90, counterclock=False,
-           wedgeprops={"edgecolor": SURFACE, "linewidth": 1.4}, labeldistance=1.09,
-           textprops={"fontsize": 9, "color": INK})
+    fig, (ax,) = _fig((10.0, 6.2))
+    wedges, _ = ax.pie(vals, colors=colors, startangle=90, counterclock=False,
+                       wedgeprops={"edgecolor": SURFACE, "linewidth": 1.4})
+    ax.legend(wedges, labels, loc="center left", bbox_to_anchor=(1.02, 0.5),
+              frameon=False, fontsize=10.5, labelcolor=INK, labelspacing=0.9)
     note = (f"{part} only, by client account: {grand:,.0f}m in all. The percentage "
             f"is the market's share of the {part.lower()} value.")
     if len(small):

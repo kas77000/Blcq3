@@ -138,7 +138,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `13_market_notional` | Value traded by market, Cash and Swap | Same as the H1 overview. |
-| `13b_market_notional_cash` / `13c_market_notional_swap` | Pie charts: value traded by market, cash alone and swap alone | Largest slice first, each percentage a share of that account type's total. Markets under 3% go into Others, named in the footnote. |
+| `13b_market_notional_cash` / `13c_market_notional_swap` | Pie charts: value traded by market, cash alone and swap alone, legend on the right | Largest slice first, each percentage a share of that account type's total. Markets under 3% go into Others, named in the footnote. |
 | `12_monthly` | vs Close by month, excluding India | |
 | `12b_monthly_india` | The same, India only | India changes regime on 3 August. |
 | `55_india_cas` | India before the CAS, then CAS names and non-CAS names after it | CAS names are those with an AUC or ACB code in qatt that day. Needs qatt. Small sample. |
