@@ -600,7 +600,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "26b_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "26b_", "26c_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
                                   "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
@@ -639,7 +639,8 @@ DECK_CHART_ORDER = [
     "22c_auction_only_order_type_market.png",
     "25b_close_only_reversion_participation_side.png",
     "35b_close_pr_close_only_side.png",
-    "26_pretraded_by_side.png", "26b_pretraded_order_type_market.png",
+    "26_pretraded_by_side.png", "26c_pretraded_by_order_type.png",
+    "26b_pretraded_order_type_market.png",
     "28f_pretraded_close_reversion_market.png",
     "28e_pretraded_measures_market.png",
     "28d_pretraded_close_best_worst.png",
@@ -7426,6 +7427,18 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
         t[key] = pd.concat([
             t_in_spreads(pre.assign(buy_sell="All"), "buy_sell", value, w),
             t_in_spreads(pre, "buy_sell", value, w, order=BUY_SELL_ORDER)])
+    # The same four measures by order type. Orders with no order type are
+    # left out, as on every order-type chart.
+    if "order_type" in pre:
+        typed = pre[pre["order_type"].ne(ORDER_TYPE_UNMATCHED)]
+        for key, value, w in [("73e_pre_firstexec_type_spr", FE, CW),
+                              ("73f_pre_pvwap_type_spr", "slip_pvwap", "notional"),
+                              ("73g_pre_close_type_spr", "slip_close", "notional"),
+                              ("73h_pre_reversion_type_spr", "reversion_bps",
+                               "notional")]:
+            if value in typed:
+                t[key] = t_in_spreads(typed, "order_type", value, w,
+                                      order=sorted(typed["order_type"].unique()))
     t["74_pre_firstexec_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], FE, CW)
     t["75_pre_close_mkt_side_spr"] = t_in_spreads(
@@ -7874,6 +7887,20 @@ def build_charts(t: dict, out_dir: Path) -> None:
            charts, "28c_pretraded_measures_market_side.png",
            "Pre-traded Analysis, by Side/Market", note=PRE_NOTE,
            bold=("Execution vs close",))
+    types7 = t.get("73g_pre_close_type_spr", E)
+    if not types7.empty:
+        _guard(chart_measures_by_side,
+               [("First execution vs close", t.get("73e_pre_firstexec_type_spr", E)),
+                ("vs PVWAP", t.get("73f_pre_pvwap_type_spr", E)),
+                ("Execution vs close", t.get("73g_pre_close_type_spr", E)),
+                ("Next open vs close", t.get("73h_pre_reversion_type_spr", E))],
+               charts, "26c_pretraded_by_order_type.png",
+               "Pre-traded Analysis, by Order Type",
+               note=PRE_NOTE + " " + PVWAP_NOTE.split(". ", 1)[1]
+                    + " Orders with no order type are left out.",
+               xlabel="in spreads", panels=list(types7.index),
+               heads={k: f"{k}  ({int(n):,} orders)"
+                      for k, n in types7["orders"].items()})
     _guard(chart_measures_by_market,
            [("First execution vs close", t.get("68_pre_firstexec_mkt_spreads", E)),
             ("vs PVWAP", t.get("78_pre_pvwap_mkt_spreads", E)),
