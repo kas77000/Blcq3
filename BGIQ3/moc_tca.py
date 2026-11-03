@@ -609,7 +609,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "26b_", "26c_", "26d_", "26e_", "26f_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "26b_", "26c_", "26d_", "26e_", "26f_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "28g_", "28h_", "29_", "30_", "33_",
                                   "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
@@ -655,7 +655,8 @@ DECK_CHART_ORDER = [
     "26d_pretraded_close_order_type_market.png",
     "26f_pretraded_close_subtype_market.png",
     "26b_pretraded_order_type_market.png",
-    "28f_pretraded_close_reversion_market.png",
+    "28g_pretraded_close_market_pr.png",
+    "28h_pretraded_reversion_market_pr.png",
     "28e_pretraded_measures_market.png",
     "28d_pretraded_close_best_worst.png",
     "28_pretraded_first_exec_market_side.png",
@@ -4586,7 +4587,11 @@ def chart_measures_by_market(specs: list, out: Path, name: str, title: str,
     ncols = 2 if len(specs) > 1 else 1
     nrows = math.ceil(len(specs) / ncols)
     strip = 1.0 if pr_lines else 0.0
-    fig = plt.figure(dpi=DPI, figsize=(8.5 * ncols, (4.6 + 1.9 * strip) * nrows))
+    # A single measure gets a chart of its own: wider, with bigger labels.
+    big = len(specs) == 1
+    fig = plt.figure(dpi=DPI, figsize=(13.0, 7.6) if big and pr_lines else
+                     (12.0, 5.6) if big else
+                     (8.5 * ncols, (4.6 + 1.9 * strip) * nrows))
     fig.patch.set_facecolor(SURFACE)
     per = 2 if pr_lines else 1
     grid = GridSpec(nrows * per, ncols, figure=fig,
@@ -4612,7 +4617,7 @@ def chart_measures_by_market(specs: list, out: Path, name: str, title: str,
                 ci.append((nan, nan))
         _diverging_barv(ax, labels, vals, ci=ci,
                         unit="spreads" if spreads else "bps", tight=True)
-        head = ((title + chr(10)) if i == 0 else "") + label
+        head = title if big else ((title + chr(10)) if i == 0 else "") + label
         _style(ax, ylabel=label + ", " + ("in spreads" if spreads else "bps"),
                xlabel="", title="" if pr_lines else head)
         top_ax = ax
@@ -4637,7 +4642,7 @@ def chart_measures_by_market(specs: list, out: Path, name: str, title: str,
                                     xytext=(0, 7 if up else -8),
                                     textcoords="offset points", ha="center",
                                     va="bottom" if up else "top",
-                                    fontsize=8, color=colr)
+                                    fontsize=9.5 if big else 8, color=colr)
                 peak = max([peak] + [y for y in ys if np.isfinite(y)])
             top_ax.set_ylim(0, (peak or 1.0) * 1.3)
             _style(top_ax, ylabel="participation, %", xlabel="", title=head)
@@ -4646,7 +4651,7 @@ def chart_measures_by_market(specs: list, out: Path, name: str, title: str,
             # On the last panel's strip: the first carries the long title.
             if i == len(specs) - 1:
                 top_ax.legend(loc="lower right", ncol=len(pr_lines), frameon=False,
-                              fontsize=8.5, labelcolor=INK,
+                              fontsize=10 if big else 8.5, labelcolor=INK,
                               bbox_to_anchor=(1.0, 1.0), borderaxespad=0.2)
             ax._panel = ""
         top_ax._panel = label
@@ -8094,6 +8099,17 @@ def build_charts(t: dict, out_dir: Path) -> None:
            "Pre-traded Analysis, by Market", note=PRE_NOTE,
            bold=("Execution vs close",),
            lines=t.get("82b_pr_pair_mkt_pretraded"))
+    # 28f split in two, one measure per chart, each with its own legend.
+    for key, label, fname, ttl in [
+            ("77_pre_close_mkt_spreads", "Execution vs close",
+             "28g_pretraded_close_market_pr.png",
+             "Pre-traded Execution vs Close, by Market"),
+            ("70_pre_reversion_mkt_spreads", "Next open vs close",
+             "28h_pretraded_reversion_market_pr.png",
+             "Pre-traded Next Open vs Close, by Market")]:
+        _guard(chart_measures_by_market, [(label, t.get(key, E))], charts, fname,
+               ttl, note=PRE_NOTE, lines=t.get("82b_pr_pair_mkt_pretraded"),
+               bold=("Execution vs close",))
     _guard(chart_best_worst_orders, t.get("75c_pre_close_best_worst", E), charts,
            "28d_pretraded_close_best_worst.png",
            f"Pre-traded: {BEST_WORST_N} Best and {BEST_WORST_N} Worst Orders, "
