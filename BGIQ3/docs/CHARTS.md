@@ -139,6 +139,7 @@ The auction move, the trend, the drift and the 30-minute VWAP come from the extr
 | Chart | What it shows | How to read it |
 |---|---|---|
 | `24_adv_profile` | Value traded and orders by ADV% band | Same as the H1 overview inset. |
+| `24b_adv_market` | Order size as % of ADV by market, notional-weighted, order count under each market | Table 52b (also has the median). All orders with a %ADV. |
 | `31_pretraded_adv_profile` | The same, pre-traded orders | |
 | `54_cap_dislocation` | Median auction move (either direction) by market cap | Do small caps dislocate more at the close? |
 

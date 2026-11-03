@@ -617,7 +617,7 @@ CHART_FOLDERS = {
     "09_normalisation":          ["16_", "17_", "18_", "52_"],
     "10_signal_vs_noise":        ["50_"],
     "11_statistical_robustness": ["53_"],
-    "12_liquidity_buckets":      ["24_", "31_", "54_"],
+    "12_liquidity_buckets":      ["24_", "24b_", "31_", "54_"],
     "13_market_deep_dives":      ["12_", "12b_", "13_", "13b_", "13c_", "55_"],
     "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
     "reversion":                 ["11_", "21_", "22_", "22b_", "22c_", "22d_", "25b_"],
@@ -638,6 +638,7 @@ DECK_CHARTS_FOLDER = "deck_charts"
 DECK_CHART_ORDER = [
     "13_market_notional.png", "13b_market_notional_cash.png",
     "13c_market_notional_swap.png", "24_adv_profile.png",
+    "24b_adv_market.png",
     "23_flow_split.png", "23b_flow_split_order_type.png",
     "23c_order_type_market.png",
     "22b_close_only_reversion_participation.png",
@@ -5468,6 +5469,60 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
     _save(fig, out, name, bottom=room)
 
 
+def t_adv_market(df: pd.DataFrame) -> pd.DataFrame:
+    """Order size against daily volume, by market: %ADV weighted by each
+    order's value, with the median beside it. Markets in order of value."""
+    if df is None or df.empty or "adv_pct" not in df or "market" not in df:
+        return pd.DataFrame()
+    ncol = "notional (" + CURRENCY + "m)"
+    rows = {}
+    for m, g in df[df["adv_pct"].notna()].groupby("market", observed=True):
+        if g.empty:
+            continue
+        rows[m] = {"orders": len(g), ncol: float(g["notional"].sum()) / 1e6,
+                   "%ADV (notional-weighted)": wmean(g["adv_pct"], g["notional"],
+                                                     winsor=False),
+                   "%ADV (median)": float(g["adv_pct"].median())}
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame.from_dict(rows, orient="index")
+    out.index.name = "market"
+    return out.sort_values(ncol, ascending=False).round(2)
+
+
+def chart_adv_market(t: pd.DataFrame, out: Path, name: str, title: str,
+                     note: str = "", limit: int = 12) -> None:
+    """Notional-weighted %ADV, one bar per market, order count under each.
+
+    A size, not a saving or a cost, so one hue.
+    """
+    col = "%ADV (notional-weighted)"
+    d = _chartable(t)
+    if d is None or d.empty or col not in d:
+        return
+    d = d.head(limit)
+    vals = d[col].to_numpy(float)
+    top = float(np.nanmax(vals)) if len(vals) else 1.0
+    x = np.arange(len(d))
+    fig, (ax,) = _fig((11.0, 5.6))
+    ax.bar(x, np.nan_to_num(vals), width=0.62, color=SERIES[2], zorder=3)
+    for i, v in enumerate(vals):
+        if np.isfinite(v):
+            ax.text(i, v + top * 0.015, f"{v:.1f}%", ha="center", va="bottom",
+                    fontsize=8.5, color=INK, zorder=5)
+    ax.set_ylim(0, top * 1.18 if top > 0 else 1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{m}" + chr(10) + f"({int(n):,} orders)"
+                        for m, n in zip(d.index, d["orders"])],
+                       rotation=30, ha="right")
+    _style(ax, ylabel="Order size, % of ADV (notional-weighted)",
+           xlabel="Market", title=title)
+    room = _notes(fig, [note, "Each order's size as a % of the stock's average "
+                        "daily volume, averaged per market with each order "
+                        "weighted by its value. Markets ordered by value traded."])
+    _save(fig, out, name, bottom=room)
+
+
 def chart_adv_profile(t: pd.DataFrame, out: Path, name: str, title: str,
                       with_orders: bool = False, color: str = None) -> None:
     """How big the orders were against daily volume: value, and count."""
@@ -7427,6 +7482,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["51e_order_type_mkt_pre"] = t_order_type_market(
         df[reach & _flag(df, "pretraded")])
     t["52_adv_profile"] = t_adv_profile(df)
+    t["52b_adv_mkt"] = t_adv_market(df)
     t["53_pre_adv_profile"] = t_adv_profile(pre)
     # Every performance chart reads one of these. "co" is auction-only and
     # "pre" is pre-traded; sprdq is the spread quartile.
@@ -7913,6 +7969,8 @@ def build_charts(t: dict, out_dir: Path) -> None:
     chart_adv_profile(t.get("52_adv_profile", E), charts, "24_adv_profile.png",
                       color=SERIES[2], title=
                       "Executed Notional, by ADV%")
+    _guard(chart_adv_market, t.get("52b_adv_mkt", E), charts,
+           "24b_adv_market.png", "Order Size vs ADV, by Market")
 
     # Auction-only. Its close slippage is zero by construction, so the question
     # is whether the price held after the auction: reversion, by market, and
