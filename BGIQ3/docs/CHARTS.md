@@ -208,6 +208,7 @@ India orders from 3 August 2026 (CAS go-live), split CAS / Non-CAS. CAS = the na
 | `95_in_measures` | The three measures; CAS panel, Non-CAS panel | |
 | `95b_in_co_measures` | Auction-only: last continuous price vs close, execution vs close, reversion; CAS panel, Non-CAS panel | Non-CAS window orders count as auction-only (their close share is imputed at 100). |
 | `95f_in_flow_measures` | India from the CAS date, 2x2: CAS and Non-CAS by auction only and pre-traded; first execution, last continuous, execution vs close, next open vs close | Flow read from the price (first fill at the close = auction only). Order count in each panel title. Tables `130_in7_flow_*`. In the deck in place of 95d. |
+| `95h_in_subtype_flow_measures` | Same four panels as 95f (CAS / Non-CAS x auction only / pre-traded), flow from the order sub-type: Close Auction Only = auction only, % of Order = pre-traded; Model orders left out | Tables 130_in9_subflow_*. |
 | `95g_in_pre_cas_measures` | India pre-traded orders, CAS vs Non-CAS: first execution vs close, vs PVWAP, execution vs close, next open vs close, order counts in the panel titles | Tables 130_in8_pre_*. Same layout as 26c. Every order behind 95d/95f/95g is in india_orders.xlsx (one sheet per group and flow). |
 | `95c_in_pre_measures` | Pre-traded: first execution, last continuous price, execution, each vs close | CAS names only in practice: a Non-CAS order cannot be pre-traded. |
 | `96a`/`96b`/`96c_in_spread_q_*` | By spread quartile, CAS and Non-CAS side by side | |
