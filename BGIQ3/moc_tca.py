@@ -630,7 +630,7 @@ CHART_FOLDERS = {
     # Market focus folders, asked for by name.
     "hk focus":                  ["90_", "90b_", "90c_", "90d_", "91a_", "91b_",
                                   "91c_", "92a_", "92b_", "92c_", "92d_"],
-    "India focus":               ["95_", "95b_", "95c_", "95d_", "95e_", "95f_", "95g_", "95h_", "96a_", "96b_",
+    "India focus":               ["95_", "95b_", "95c_", "95d_", "95e_", "95f_", "95g_", "95h_", "95i_", "96a_", "96b_",
                                   "96c_", "97a_", "97b_", "97c_", "97d_", "97e_"],
 }
 
@@ -669,6 +669,7 @@ DECK_CHART_ORDER = [
     "95_in_measures.png", "95f_in_flow_measures.png",
     "95h_in_subtype_flow_measures.png",
     "95g_in_pre_cas_measures.png",
+    "95i_in_pre_subtype_measures.png",
     "95e_in_cas_flow_order_type.png",
     "97a_in_adv_first_exec.png", "97d_in_pre_adv_q_first_exec.png",
     "97e_in_cas_pre_pr_adv.png",
@@ -6834,6 +6835,21 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
                             in_pre, "cas_group", value,
                             order=[g for g in INDIA_GROUPS
                                    if g in set(in_pre["cas_group"])])
+                # The same pre-traded orders, Model against % of Order (95i,
+                # India's 26e). Close Auction Only and unknown left out.
+                if "order_subtype" in in_pre:
+                    subs = [ORDER_SUBTYPE_LABELS["Model"],
+                            ORDER_SUBTYPE_LABELS["PctOfOrder"]]
+                    sp = in_pre[in_pre["order_subtype"].isin(subs)]
+                    for value, short in [(FE_COL, "first_exec"),
+                                         ("slip_pvwap", "pvwap"),
+                                         ("slip_close", "vs_close"),
+                                         ("reversion_bps", "reversion")]:
+                        if len(sp) and value in sp and sp[value].notna().any():
+                            t[f"130_in10_pre_sub_{short}"] = t_in_spreads(
+                                sp, "order_subtype", value,
+                                order=[k for k in subs
+                                       if k in set(sp["order_subtype"])])
             cas_pre = ind[pre_in & ind["cas_group"].eq("CAS")]
             if len(cas_pre) and "adv_pct" in cas_pre:
                 cas_pre = cas_pre.assign(adv_bucket=pd.cut(
@@ -7049,6 +7065,24 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                              "price came back against us. " + LAST_CONT_NOTE + "."),
                        xlabel="", panels=[k for k in order7 if k in counts9], grid=2,
                        heads={k: f"{k}  ({counts9[k]:,} orders)" for k in counts9})
+            pre10 = t.get("130_in10_pre_sub_vs_close", E)
+            if not pre10.empty:
+                _guard(chart_measures_by_side,
+                       [("First execution vs close", t.get("130_in10_pre_sub_first_exec", E)),
+                        ("vs PVWAP", t.get("130_in10_pre_sub_pvwap", E)),
+                        ("Execution vs close", pre10),
+                        ("Next open vs close", t.get("130_in10_pre_sub_reversion", E))],
+                       charts, "95i_in_pre_subtype_measures.png",
+                       "India Pre-traded Analysis, Model vs % of Order",
+                       note=("India pre-traded orders from " + AUCTION_FROM["India"]
+                             + ", CAS and Non-CAS together: the first fill was not "
+                             "at the close. Split by order sub-type; Close Auction "
+                             "Only orders and orders with no sub-type are left out. "
+                             "Notional-weighted." + chr(10) + "Next open vs close: "
+                             "negative = the price came back against us."),
+                       xlabel="in spreads", panels=list(pre10.index),
+                       heads={k: f"{k} ({int(n):,} orders)"
+                              for k, n in pre10["orders"].items()})
             pre8 = t.get("130_in8_pre_vs_close", E)
             if not pre8.empty:
                 _guard(chart_measures_by_side,
