@@ -6835,12 +6835,13 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
                             in_pre, "cas_group", value,
                             order=[g for g in INDIA_GROUPS
                                    if g in set(in_pre["cas_group"])])
-                # The same pre-traded orders, Model against % of Order (95i,
-                # India's 26e). Close Auction Only and unknown left out.
+                # CAS pre-traded orders, Model against % of Order (95i, India's
+                # 26e). Non-CAS, Close Auction Only and unknown left out.
                 if "order_subtype" in in_pre:
                     subs = [ORDER_SUBTYPE_LABELS["Model"],
                             ORDER_SUBTYPE_LABELS["PctOfOrder"]]
-                    sp = in_pre[in_pre["order_subtype"].isin(subs)]
+                    sp = in_pre[in_pre["order_subtype"].isin(subs)
+                                & in_pre["cas_group"].eq("CAS")]
                     for value, short in [(FE_COL, "first_exec"),
                                          ("slip_pvwap", "pvwap"),
                                          ("slip_close", "vs_close"),
@@ -7073,10 +7074,10 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                         ("Execution vs close", pre10),
                         ("Next open vs close", t.get("130_in10_pre_sub_reversion", E))],
                        charts, "95i_in_pre_subtype_measures.png",
-                       "India Pre-traded Analysis, Model vs % of Order",
-                       note=("India pre-traded orders from " + AUCTION_FROM["India"]
-                             + ", CAS and Non-CAS together: the first fill was not "
-                             "at the close. Split by order sub-type; Close Auction "
+                       "India CAS Pre-traded Analysis, Model vs % of Order",
+                       note=("India CAS pre-traded orders from " + AUCTION_FROM["India"]
+                             + ": the first fill was not at the close. Non-CAS "
+                             "names are left out. Split by order sub-type; Close Auction "
                              "Only orders and orders with no sub-type are left out. "
                              "Notional-weighted." + chr(10) + "Next open vs close: "
                              "negative = the price came back against us."),
