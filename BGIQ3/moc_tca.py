@@ -630,7 +630,7 @@ CHART_FOLDERS = {
     # Market focus folders, asked for by name.
     "hk focus":                  ["90_", "90b_", "90c_", "90d_", "91a_", "91b_",
                                   "91c_", "92a_", "92b_", "92c_", "92d_"],
-    "India focus":               ["95_", "95b_", "95c_", "95d_", "95e_", "95f_", "96a_", "96b_",
+    "India focus":               ["95_", "95b_", "95c_", "95d_", "95e_", "95f_", "95g_", "96a_", "96b_",
                                   "96c_", "97a_", "97b_", "97c_", "97d_", "97e_"],
 }
 
@@ -667,6 +667,7 @@ DECK_CHART_ORDER = [
     "90d_hk_flow_order_type.png",
     "92a_hk_adv_first_exec.png", "92d_hk_pre_adv_q_first_exec.png",
     "95_in_measures.png", "95f_in_flow_measures.png",
+    "95g_in_pre_cas_measures.png",
     "95e_in_cas_flow_order_type.png",
     "97a_in_adv_first_exec.png", "97d_in_pre_adv_q_first_exec.png",
     "97e_in_cas_pre_pr_adv.png",
@@ -6799,6 +6800,24 @@ def build_focus_tables(df: pd.DataFrame, t: dict) -> None:
                     if value in both and both[value].notna().any():
                         t[f"130_in7_flow_{short}"] = t_in_spreads(
                             both, "in_flow", value, order=order)
+                # Every order behind those tables, for checking one by one
+                # (written to india_orders.xlsx, one sheet per group and flow).
+                both["flow"] = np.where(pre_in[both.index], "Pre-traded",
+                                        "Auction only")
+                t["_india_orders"] = both
+            # Pre-traded orders, CAS against Non-CAS: the four measures of
+            # 26c. Notional-weighted throughout, as in the rest of India.
+            in_pre = ind[pre_in]
+            if len(in_pre):
+                for value, short in [(FE_COL, "first_exec"),
+                                     ("slip_pvwap", "pvwap"),
+                                     ("slip_close", "vs_close"),
+                                     ("reversion_bps", "reversion")]:
+                    if value in in_pre and in_pre[value].notna().any():
+                        t[f"130_in8_pre_{short}"] = t_in_spreads(
+                            in_pre, "cas_group", value,
+                            order=[g for g in INDIA_GROUPS
+                                   if g in set(in_pre["cas_group"])])
             cas_pre = ind[pre_in & ind["cas_group"].eq("CAS")]
             if len(cas_pre) and "adv_pct" in cas_pre:
                 cas_pre = cas_pre.assign(adv_bucket=pd.cut(
@@ -6994,6 +7013,24 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                          "back against us. " + LAST_CONT_NOTE + "."),
                    xlabel="", panels=order7, grid=2,
                    heads={k: f"{k}  ({counts[k]:,} orders)" for k in counts})
+            pre8 = t.get("130_in8_pre_vs_close", E)
+            if not pre8.empty:
+                _guard(chart_measures_by_side,
+                       [("First execution vs close", t.get("130_in8_pre_first_exec", E)),
+                        ("vs PVWAP", t.get("130_in8_pre_pvwap", E)),
+                        ("Execution vs close", pre8),
+                        ("Next open vs close", t.get("130_in8_pre_reversion", E))],
+                       charts, "95g_in_pre_cas_measures.png",
+                       "India Pre-traded Analysis, CAS vs Non-CAS",
+                       note=("India pre-traded orders from " + AUCTION_FROM["India"]
+                             + ": the first fill was not at the close. Non-CAS names "
+                             "close on the VWAP of the last half hour, so for them "
+                             "'close' is that VWAP. Notional-weighted."
+                             + chr(10) + "Next open vs close: negative = the price "
+                             "came back against us."),
+                       xlabel="in spreads", panels=list(pre8.index),
+                       heads={k: f"{k}  ({int(n):,} orders)"
+                              for k, n in pre8["orders"].items()})
             _guard(chart_flow_split_type, t.get("130_in6_cas_flow_order_type", E),
                    charts, "95e_in_cas_flow_order_type.png",
                    "India CAS, Auction Only vs Pre-traded, by Order Type",
@@ -8296,6 +8333,47 @@ def copy_deck_charts(charts: Path, dest: Path) -> None:
         log("    not drawn this run: " + ", ".join(missing))
 
 
+INDIA_ORDERS_FILE = "india_orders.xlsx"
+INDIA_ORDER_COLS = [
+    "order_id", "date", "symbol", "side", "strategy", "client", "cas_group",
+    "flow", "order_type", "order_subtype", "notional", "order_shares",
+    "exec_shares", "fill_rate", "pct_close", "fill_close_size",
+    "market_close_size", "close_pr", "first_start_time", "first_exec_price",
+    "avg_price", "close_price", "next_open_price", "spread_bps", "adv_pct",
+    FE_COL, "last_cont_vs_close_bps", "slip_pvwap", "slip_close",
+    "reversion_bps"]
+
+
+def write_india_orders(t: dict, out_dir: Path) -> None:
+    """India orders since the CAS went live, one row each, one sheet per
+    group and flow (CAS / Non-CAS, auction only / pre-traded). Measures in
+    bps, with execution vs close also in spreads, worst first."""
+    d = t.get("_india_orders")
+    if d is None or d.empty:
+        return
+    cols = [c for c in INDIA_ORDER_COLS if c in d.columns]
+    d = d[cols].copy()
+    if {"slip_close", "spread_bps"} <= set(d.columns):
+        sp = pd.to_numeric(d["spread_bps"], errors="coerce")
+        d["vs close, spreads"] = (pd.to_numeric(d["slip_close"], errors="coerce")
+                                  / sp.where(sp > 0)).round(3)
+    sort = "slip_close" if "slip_close" in d else cols[0]
+    path = out_dir / INDIA_ORDERS_FILE
+    try:
+        with pd.ExcelWriter(path, engine="openpyxl") as xl:
+            for g in INDIA_GROUPS:
+                for f in CAS_FLOWS:
+                    part = d[(d["cas_group"] == g) & (d["flow"] == f)]
+                    if len(part):
+                        part.sort_values(sort).to_excel(
+                            xl, sheet_name=f"{g} {f}"[:31], index=False)
+        log(f"  India orders ({len(d):,}) -> {path}")
+    except Exception as exc:                          # pragma: no cover
+        csv = out_dir / "india_orders.csv"
+        d.sort_values(["cas_group", "flow", sort]).to_csv(csv, index=False)
+        warn(f"could not write {path}: {exc} - wrote {csv} instead")
+
+
 def write_excel(t: dict, out_dir: Path) -> None:
     path = out_dir / "tables.xlsx"
     try:
@@ -9454,6 +9532,7 @@ def run(path: Path, out_dir: Path, sample: bool = False,
     tables = build_tables(df, close_strats)
     write_excel(tables, out_dir)
     write_excel_unified(tables, out_dir)
+    write_india_orders(tables, out_dir)
     try:
         build_charts(tables, out_dir)
     finally:
