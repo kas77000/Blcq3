@@ -600,7 +600,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "26b_", "26c_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "26b_", "26c_", "26d_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
                                   "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
@@ -615,7 +615,7 @@ CHART_FOLDERS = {
     "12_liquidity_buckets":      ["24_", "31_", "54_"],
     "13_market_deep_dives":      ["12_", "12b_", "13_", "13b_", "13c_", "55_"],
     "first_execution":           ["10b_", "10c_", "19_", "20_", "39_"],
-    "reversion":                 ["11_", "21_", "22_", "22b_", "22c_", "25b_"],
+    "reversion":                 ["11_", "21_", "22_", "22b_", "22c_", "22d_", "25b_"],
     "flow_and_algo_choice":      ["15_algo", "23_", "23b_", "23c_"],
     "australia focus":           ["98a_", "98b_", "98c_"],
     # Market focus folders, asked for by name.
@@ -637,9 +637,11 @@ DECK_CHART_ORDER = [
     "23c_order_type_market.png",
     "22b_close_only_reversion_participation.png",
     "22c_auction_only_order_type_market.png",
+    "22d_auction_only_by_order_type.png",
     "25b_close_only_reversion_participation_side.png",
     "35b_close_pr_close_only_side.png",
     "26_pretraded_by_side.png", "26c_pretraded_by_order_type.png",
+    "26d_pretraded_close_order_type_market.png",
     "26b_pretraded_order_type_market.png",
     "28f_pretraded_close_reversion_market.png",
     "28e_pretraded_measures_market.png",
@@ -4085,7 +4087,8 @@ def _diverging_barv(ax, labels, values, ci=None, small=None, unit="bps",
         cut = edge > cap_hi if v >= 0 else edge < cap_lo
         edge = min(edge, cap_hi) if v >= 0 else max(edge, cap_lo)
         off = span * 0.03
-        label = f"{v:+.2f}" if unit == "spreads" else _fmt_bps(v)
+        shown = 0.0 if abs(v) < 0.005 else v      # no "-0.00"
+        label = f"{shown:+.2f}" if unit == "spreads" else _fmt_bps(v)
         ax.text(i, edge + (off if v >= 0 else -off), label, ha="center",
                 va="bottom" if v >= 0 else "top", color=INK, fontsize=8.5,
                 zorder=6,
@@ -7439,6 +7442,18 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
             if value in typed:
                 t[key] = t_in_spreads(typed, "order_type", value, w,
                                       order=sorted(typed["order_type"].unique()))
+        # Execution vs close by market and order type - no side split.
+        t["75d_pre_close_mkt_type_spr"] = t_in_spreads(
+            typed, ["market", "order_type"], "slip_close")
+    if "order_type" in co:
+        co_typed = co[co["order_type"].ne(ORDER_TYPE_UNMATCHED)]
+        for key, value in [("72e_co_lastcont_type_spr", "last_cont_vs_close_bps"),
+                           ("72f_co_pvwap_type_spr", "slip_pvwap"),
+                           ("72g_co_close_type_spr", "slip_close"),
+                           ("72h_co_reversion_type_spr", "reversion_bps")]:
+            if value in co_typed and co_typed[value].notna().any():
+                t[key] = t_in_spreads(co_typed, "order_type", value,
+                                      order=sorted(co_typed["order_type"].unique()))
     t["74_pre_firstexec_mkt_side_spr"] = t_in_spreads(
         pre, ["market", "buy_sell"], FE, CW)
     t["75_pre_close_mkt_side_spr"] = t_in_spreads(
@@ -7901,6 +7916,30 @@ def build_charts(t: dict, out_dir: Path) -> None:
                xlabel="in spreads", panels=list(types7.index),
                heads={k: f"{k}  ({int(n):,} orders)"
                       for k, n in types7["orders"].items()})
+    tab = t.get("75d_pre_close_mkt_type_spr", E)
+    if not tab.empty:
+        _guard(chart_spreads_by_side, tab, charts,
+               "26d_pretraded_close_order_type_market.png",
+               "Pre-traded Execution vs Close, by Market and Order Type",
+               "vs Close", note=PRE_NOTE + " Buys and sells together. Orders with "
+                               "no order type are left out.",
+               ylabel="Execution vs close, in spreads", side_by_side=True,
+               panels=sorted(set(tab.index.get_level_values(1))),
+               short_panels=True)
+    co7 = t.get("72g_co_close_type_spr", E)
+    if not co7.empty:
+        _guard(chart_measures_by_side,
+               [("Last continuous price vs close", t.get("72e_co_lastcont_type_spr", E)),
+                ("vs PVWAP", t.get("72f_co_pvwap_type_spr", E)),
+                ("Execution vs close", co7),
+                ("Next open vs close", t.get("72h_co_reversion_type_spr", E))],
+               charts, "22d_auction_only_by_order_type.png",
+               "Auction Only Analysis, by Order Type",
+               note=CO_NOTE + " " + LAST_CONT_NOTE + ". Orders with no order type "
+                    "are left out.",
+               xlabel="in spreads", panels=list(co7.index),
+               heads={k: f"{k}  ({int(n):,} orders)"
+                      for k, n in co7["orders"].items()})
     _guard(chart_measures_by_market,
            [("First execution vs close", t.get("68_pre_firstexec_mkt_spreads", E)),
             ("vs PVWAP", t.get("78_pre_pvwap_mkt_spreads", E)),
