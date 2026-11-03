@@ -5359,10 +5359,13 @@ def chart_flow_split(t: pd.DataFrame, out: Path,
 def chart_flow_split_type(t: pd.DataFrame, out: Path,
                           name: str = "23b_flow_split_order_type.png",
                           title: str = "Pre-traded vs Auction only, by Order Type",
-                          note: str = "", under: dict = None) -> None:
+                          note: str = "", under: dict = None,
+                          plain_ticks: bool = False) -> None:
     """23_flow_split with each bar stacked by order type.
 
-    under adds a line below a bar's name, keyed by flow.
+    under adds a line below a bar's name, keyed by flow. plain_ticks keeps the
+    name and the order count alone under each bar: a segment too thin for its
+    label then carries it beside the bar instead.
 
     Each segment carries its share of that bar's value, so the split inside
     auction-only and inside pre-traded reads directly. Colour here is the order
@@ -5402,15 +5405,19 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
                 ax.text(i, bottom[i] + vals[i] / 2,
                         f"{pct}%  ({vals[i]:,.0f}m)", ha="center",
                         va="center", fontsize=9, color="white", zorder=5)
+            elif plain_ticks:
+                ax.text(i + 0.3, bottom[i] + vals[i] / 2,
+                        f"{k} {pct}%  ({vals[i]:,.0f}m)", ha="left",
+                        va="center", fontsize=8.5, color=INK, zorder=5)
         bottom += vals
     ticks = []
     shares = _whole_pcts({f: float(bottom[i]) for i, f in enumerate(flows)})
     for i, f in enumerate(flows):
         ax.text(i, bottom[i] + top * 0.02, f"{bottom[i]:,.0f}m  ({shares[f]}%)",
                 ha="center", va="bottom", fontsize=10, color=INK, zorder=5)
-        small = [f"{k} {whole[f][k]}%"
-                 for k in types if (f, k) in t.index
-                 and float(t.loc[(f, k), ncol]) < top * 0.07]
+        small = [] if plain_ticks else [
+            f"{k} {whole[f][k]}%" for k in types if (f, k) in t.index
+            and float(t.loc[(f, k), ncol]) < top * 0.07]
         n = int(t.loc[f, "orders"].sum())
         ticks.append(f + chr(10) + f"{n:,} orders"
                      + (chr(10) + under[f] if under and f in under else "")
@@ -6888,26 +6895,13 @@ def build_focus_charts(t: dict, charts: Path) -> None:
                          "back against us. " + LAST_CONT_NOTE + "."),
                    xlabel="", panels=order7, grid=2,
                    heads={k: f"{k}  ({counts[k]:,} orders)" for k in counts})
-            pr_col = "close PR % (mean)"
-            under = {}
-            for k, r in prof.iterrows():
-                bits = []
-                if pr_col in prof and pd.notna(r[pr_col]):
-                    bits.append(f"close participation {r[pr_col]:.1f}%")
-                if EXEC_IN_CLOSE in prof and pd.notna(r[EXEC_IN_CLOSE]):
-                    bits.append(f"{r[EXEC_IN_CLOSE]:.0f}% of executed qty in the close")
-                if bits:
-                    under[k] = chr(10).join(bits)
             _guard(chart_flow_split_type, t.get("130_in6_cas_flow_order_type", E),
                    charts, "95e_in_cas_flow_order_type.png",
                    "India CAS, Auction Only vs Pre-traded, by Order Type",
-                   note="India CAS names from " + AUCTION_FROM["India"] + ". Close "
+                   note="India CAS names from " + AUCTION_FROM["India"] + ". Auction "
                         "only = the first fill was at the close, pre-traded = "
-                        "anywhere else. Close participation (ClosePR): our share "
-                        "of the closing auction's volume, mean per order. % of "
-                        "executed qty in the close: fillCloseSize over executed "
-                        "shares, weighted by value.",
-                   under=under)
+                        "anywhere else.",
+                   plain_ticks=True)
             chart_pr_pair(t.get("130_in5_cas_pre_pr_pair_adv", E), charts,
                           "97e_in_cas_pre_pr_adv.png",
                           "India CAS, Pre-traded: Close and Continuous Participation",
