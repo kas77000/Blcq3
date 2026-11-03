@@ -155,6 +155,10 @@ ORDER_TYPES_FILE = "bgi_order_types.csv"
 ORDER_TYPE_UNMATCHED = "Unknown"
 # OrderSubType in the same file: the codes it carries and how charts name them,
 # in legend order.
+# How the flow-split charts (23b, 95e) name the two order types, in legend
+# order: Discretionary shows as Model (blue), Stipulated as Trader-Defined
+# (orange). The tables keep the file's names.
+ORDER_TYPE_DISPLAY = {"Discretionary": "Model", "Stipulated": "Trader-Defined"}
 ORDER_SUBTYPE_LABELS = {"Model": "Model", "PctOfOrder": "% of Order",
                         "CloseAuctionOnly": "Close Auction Only"}
 
@@ -5408,12 +5412,15 @@ def chart_flow_split_type(t: pd.DataFrame, out: Path,
     t, gone = _drop_unknown_type(t, "% of flow notional")
     if t is None or t.empty:
         return
+    t = t.rename(index=ORDER_TYPE_DISPLAY, level=1)
     ncol = "notional (" + CURRENCY + "m)"
     flows = list(dict.fromkeys(t.index.get_level_values(0)))
     totals = t.groupby(level=1)[ncol].sum().sort_values(ascending=False)
     # A fixed order, so a type keeps its colour on every chart:
-    # Discretionary blue, Stipulated orange.
-    types = sorted(k for k in totals.index if k != ORDER_TYPE_UNMATCHED)
+    # Model (Discretionary) blue first, Trader-Defined (Stipulated) orange.
+    shown = list(ORDER_TYPE_DISPLAY.values())
+    types = sorted((k for k in totals.index if k != ORDER_TYPE_UNMATCHED),
+                   key=lambda k: (shown.index(k) if k in shown else len(shown), k))
     if ORDER_TYPE_UNMATCHED in totals.index:
         types.append(ORDER_TYPE_UNMATCHED)
     colors = {k: (INK_MUTED if k == ORDER_TYPE_UNMATCHED else SERIES[i % len(SERIES)])
