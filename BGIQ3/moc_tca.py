@@ -153,6 +153,10 @@ AWS_SUFFIX = "_aws"
 # Looked for in the working folder, then beside this script.
 ORDER_TYPES_FILE = "bgi_order_types.csv"
 ORDER_TYPE_UNMATCHED = "Unknown"
+# OrderSubType in the same file: the codes it carries and how charts name them,
+# in legend order.
+ORDER_SUBTYPE_LABELS = {"Model": "Model", "PctOfOrder": "% of Order",
+                        "CloseAuctionOnly": "Close Auction Only"}
 
 # Short sells leave the study. The order file carries the side in "Side" and
 # the AWS extract in "side"; after the join the AWS one is "side_aws" (the
@@ -320,6 +324,7 @@ COLUMNS = {
     "arrival_time":  ["arrivalTime", "Arrival Time"],
     "sector":        ["sector", "Sector", "Industry"],
     "order_type":    ["OrderType"],
+    "order_subtype": ["OrderSubType"],
 }
 
 REQUIRED = ["strategy", "date", "symbol", "side", "notional", "order_shares",
@@ -600,7 +605,7 @@ CONCENTRATION_FLAG_PCT = 50.0
 # in other/.
 CHART_FOLDERS = {
     "01_core_cost_metrics":      ["15_market", "27_", "32_", "37_", "38_", "47_"],
-    "02_buy_vs_sell":            ["25_", "26_", "26b_", "26c_", "26d_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
+    "02_buy_vs_sell":            ["25_", "26_", "26b_", "26c_", "26d_", "26e_", "26f_", "28_", "28b_", "28c_", "28d_", "28e_", "28f_", "29_", "30_", "33_",
                                   "37b_", "38b_", "39b_",
                                   "46_", "48_"],
     "03_auction_move":           ["41_", "49_", "56_", "57_"],
@@ -641,7 +646,9 @@ DECK_CHART_ORDER = [
     "25b_close_only_reversion_participation_side.png",
     "35b_close_pr_close_only_side.png",
     "26_pretraded_by_side.png", "26c_pretraded_by_order_type.png",
+    "26e_pretraded_by_order_subtype.png",
     "26d_pretraded_close_order_type_market.png",
+    "26f_pretraded_close_subtype_market.png",
     "26b_pretraded_order_type_market.png",
     "28f_pretraded_close_reversion_market.png",
     "28e_pretraded_measures_market.png",
@@ -865,8 +872,14 @@ def merge_order_types(raw: pd.DataFrame, path: Path,
     if AWS_JOIN_KEY not in raw.columns:
         warn(f"{AWS_JOIN_KEY} is not in the order file; cannot attach order types.")
         return raw
-    types = types[[want["orderid"], want["ordertype"]]].copy()
-    types.columns = ["_oid", "OrderType"]
+    has_sub = "ordersubtype" in want
+    types = types[[want["orderid"], want["ordertype"]]
+                  + ([want["ordersubtype"]] if has_sub else [])].copy()
+    types.columns = ["_oid", "OrderType"] + (["OrderSubType"] if has_sub else [])
+    if has_sub:
+        types["OrderSubType"] = types["OrderSubType"].astype(str).str.strip()
+    else:
+        warn(f"{path} has no OrderSubType column - the sub-type chart is skipped.")
     types["_oid"] = _id_text(types["_oid"])
     types["OrderType"] = types["OrderType"].astype(str).str.strip()
     dupes = types["_oid"].duplicated()
@@ -882,6 +895,9 @@ def merge_order_types(raw: pd.DataFrame, path: Path,
              "version replaces it.")
     out["OrderType"] = _id_text(out[AWS_JOIN_KEY]).map(
         types.set_index("_oid")["OrderType"])
+    if has_sub:
+        out["OrderSubType"] = _id_text(out[AWS_JOIN_KEY]).map(
+            types.set_index("_oid")["OrderSubType"])
     hit = out["OrderType"].notna()
     log(f"  {len(types):,} order ids in the file; {int(hit.sum()):,} of "
         f"{len(out):,} orders matched ({100 * hit.mean():.1f}%)")
@@ -893,6 +909,12 @@ def merge_order_types(raw: pd.DataFrame, path: Path,
     out["OrderType"] = out["OrderType"].fillna(ORDER_TYPE_UNMATCHED)
     for k, n in out["OrderType"].value_counts().items():
         log(f"    {k:<20} {n:>8,} orders")
+    if has_sub:
+        out["OrderSubType"] = (out["OrderSubType"].map(ORDER_SUBTYPE_LABELS)
+                               .fillna(out["OrderSubType"])
+                               .fillna(ORDER_TYPE_UNMATCHED))
+        for k, n in out["OrderSubType"].value_counts().items():
+            log(f"    sub-type {k:<20} {n:>8,} orders")
     return out
 
 
@@ -1511,7 +1533,7 @@ def normalise(raw: pd.DataFrame, cols: dict[str, str]) -> pd.DataFrame:
 
     for logical in ["order_id", "client", "trader", "side", "strategy",
                     "symbol", "cap", "market_limit", "arrival_time", "sector",
-                    "order_type"]:
+                    "order_type", "order_subtype"]:
         if logical in cols:
             df[logical] = raw[cols[logical]].astype(str).str.strip()
 
@@ -4898,13 +4920,14 @@ def chart_measures_by_market_side(specs: list, out: Path, name: str, title: str,
     _save(fig, out, name, bottom=room / len(specs))
 
 
-def t_order_type_market(df: pd.DataFrame) -> pd.DataFrame:
-    """Each market's value split by order type, the shares adding to 100 per
-    market. Markets in order of value traded."""
-    if df is None or df.empty or "order_type" not in df or "market" not in df:
+def t_order_type_market(df: pd.DataFrame, col: str = "order_type") -> pd.DataFrame:
+    """Each market's value split by order type (or by sub-type, with
+    col="order_subtype"), the shares adding to 100 per market. Markets in
+    order of value traded."""
+    if df is None or df.empty or col not in df or "market" not in df:
         return pd.DataFrame()
     ncol = "notional (" + CURRENCY + "m)"
-    g = df.groupby(["market", "order_type"], observed=True)
+    g = df.groupby(["market", col], observed=True)
     out = pd.DataFrame({"orders": g.size(), ncol: g["notional"].sum() / 1e6})
     tot = out.groupby(level=0)[ncol].transform("sum")
     out["% of market notional"] = 100 * out[ncol] / tot.where(tot > 0)
@@ -4952,7 +4975,8 @@ def _unknown_note(gone: float) -> str:
 
 
 def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
-                            note: str = "", limit: int = 12) -> None:
+                            note: str = "", limit: int = 12,
+                            what: str = "order type") -> None:
     """Discretionary against stipulated, by market: one 100% bar per market.
 
     Colour is the order type, as on 23b. Orders with no row in the
@@ -4967,8 +4991,12 @@ def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
     markets = list(dict.fromkeys(d.index.get_level_values(0)))[:limit]
     totals = d.groupby(level=1)[ncol].sum().sort_values(ascending=False)
     # A fixed order, so a type keeps its colour on every chart:
-    # Discretionary blue, Stipulated orange.
-    types = sorted(k for k in totals.index if k != ORDER_TYPE_UNMATCHED)
+    # Discretionary blue, Stipulated orange; sub-types in ORDER_SUBTYPE_LABELS
+    # order (Model, % of Order, Close Auction Only).
+    sub_order = list(ORDER_SUBTYPE_LABELS.values())
+    types = sorted((k for k in totals.index if k != ORDER_TYPE_UNMATCHED),
+                   key=lambda k: (sub_order.index(k) if k in sub_order
+                                  else len(sub_order), k))
     if ORDER_TYPE_UNMATCHED in totals.index:
         types.append(ORDER_TYPE_UNMATCHED)
     colors = {k: (INK_MUTED if k == ORDER_TYPE_UNMATCHED else SERIES[i % len(SERIES)])
@@ -5000,10 +5028,10 @@ def chart_order_type_market(t: pd.DataFrame, out: Path, name: str, title: str,
     _style(ax, ylabel="% of executed notional", xlabel="Market",
            title=title + chr(10))
     fig._deck_title = title
-    room = _notes(fig, [note, "Each bar is one market's value, split by order "
-                        "type; the figure on top is the market's value traded. "
-                        "Order type from bgi_order_types.csv, matched on the "
-                        "order id." + _unknown_note(gone)])
+    room = _notes(fig, [note, f"Each bar is one market's value, split by {what}; "
+                        "the figure on top is the market's value traded. "
+                        f"{what.capitalize()} from bgi_order_types.csv, matched "
+                        "on the order id." + _unknown_note(gone)])
     _save(fig, out, name, bottom=room)
 
 
@@ -7394,6 +7422,7 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
     t["51_flow_split"] = t_flow_split(df[reach])
     t["51b_flow_split_type"] = t_flow_split_type(df[reach])
     t["51c_order_type_mkt"] = t_order_type_market(df[reach])
+    t["51f_order_subtype_mkt"] = t_order_type_market(df[reach], "order_subtype")
     t["51d_order_type_mkt_co"] = t_order_type_market(co)
     t["51e_order_type_mkt_pre"] = t_order_type_market(
         df[reach & _flag(df, "pretraded")])
@@ -7442,6 +7471,24 @@ def build_tables(all_df: pd.DataFrame, close_strats: list) -> dict:
             if value in typed:
                 t[key] = t_in_spreads(typed, "order_type", value, w,
                                       order=sorted(typed["order_type"].unique()))
+    # And by order sub-type, Model against % of Order (chart 26e). Close
+    # Auction Only and unknown sub-types are left out.
+    if "order_subtype" in pre:
+        subs = [ORDER_SUBTYPE_LABELS["Model"], ORDER_SUBTYPE_LABELS["PctOfOrder"]]
+        sub_pre = pre[pre["order_subtype"].isin(subs)]
+        for key, value, w in [("73i_pre_firstexec_subtype_spr", FE, CW),
+                              ("73j_pre_pvwap_subtype_spr", "slip_pvwap", "notional"),
+                              ("73k_pre_close_subtype_spr", "slip_close", "notional"),
+                              ("73l_pre_reversion_subtype_spr", "reversion_bps",
+                               "notional")]:
+            if value in sub_pre and not sub_pre.empty:
+                t[key] = t_in_spreads(sub_pre, "order_subtype", value, w,
+                                      order=[k for k in subs
+                                             if k in set(sub_pre["order_subtype"])])
+        # Execution vs close by market and sub-type - no side split (26f).
+        t["75e_pre_close_mkt_subtype_spr"] = t_in_spreads(
+            sub_pre, ["market", "order_subtype"], "slip_close")
+    if "order_type" in pre:
         # Execution vs close by market and order type - no side split.
         t["75d_pre_close_mkt_type_spr"] = t_in_spreads(
             typed, ["market", "order_type"], "slip_close")
@@ -7849,9 +7896,10 @@ def build_charts(t: dict, out_dir: Path) -> None:
     # Opens the way Q1 did: where the flow went and how big it was.
     chart_flow_split(t.get("51_flow_split", E), charts)
     _guard(chart_flow_split_type, t.get("51b_flow_split_type", E), charts)
-    _guard(chart_order_type_market, t.get("51c_order_type_mkt", E), charts,
-           "23c_order_type_market.png", "Discretionary vs Stipulated, by Market",
-           "all orders that reached the close.")
+    # 23c: by sub-type (Model / % of Order / Close Auction Only).
+    _guard(chart_order_type_market, t.get("51f_order_subtype_mkt", E), charts,
+           "23c_order_type_market.png", "Order Type by Market",
+           "all orders that reached the close.", what="order sub-type")
     _guard(chart_order_type_market, t.get("51d_order_type_mkt_co", E), charts,
            "22c_auction_only_order_type_market.png",
            "Auction Only: Discretionary vs Stipulated, by Market",
@@ -7916,6 +7964,21 @@ def build_charts(t: dict, out_dir: Path) -> None:
                xlabel="in spreads", panels=list(types7.index),
                heads={k: f"{k}  ({int(n):,} orders)"
                       for k, n in types7["orders"].items()})
+    subs7 = t.get("73k_pre_close_subtype_spr", E)
+    if not subs7.empty:
+        _guard(chart_measures_by_side,
+               [("First execution vs close", t.get("73i_pre_firstexec_subtype_spr", E)),
+                ("vs PVWAP", t.get("73j_pre_pvwap_subtype_spr", E)),
+                ("Execution vs close", t.get("73k_pre_close_subtype_spr", E)),
+                ("Next open vs close", t.get("73l_pre_reversion_subtype_spr", E))],
+               charts, "26e_pretraded_by_order_subtype.png",
+               "Pre-traded Analysis, Model vs % of Order",
+               note=PRE_NOTE + " " + PVWAP_NOTE.split(". ", 1)[1]
+                    + " Split by order sub-type; Close Auction Only orders and "
+                      "orders with no sub-type are left out.",
+               xlabel="in spreads", panels=list(subs7.index),
+               heads={k: f"{k} ({int(n):,} orders)"
+                      for k, n in subs7["orders"].items()})
     tab = t.get("75d_pre_close_mkt_type_spr", E)
     if not tab.empty:
         _guard(chart_spreads_by_side, tab, charts,
@@ -7925,6 +7988,17 @@ def build_charts(t: dict, out_dir: Path) -> None:
                                "no order type are left out.",
                ylabel="Execution vs close, in spreads", side_by_side=True,
                panels=sorted(set(tab.index.get_level_values(1))),
+               short_panels=True)
+    tab = t.get("75e_pre_close_mkt_subtype_spr", E)
+    if not tab.empty:
+        have = set(tab.index.get_level_values(1))
+        _guard(chart_spreads_by_side, tab, charts,
+               "26f_pretraded_close_subtype_market.png",
+               "Pre-traded Execution vs Close, by Market: Model vs % of Order",
+               "vs Close", note=PRE_NOTE + " Buys and sells together. Close Auction "
+                               "Only orders and orders with no sub-type are left out.",
+               ylabel="Execution vs close, in spreads", side_by_side=True,
+               panels=[k for k in ORDER_SUBTYPE_LABELS.values() if k in have],
                short_panels=True)
     co7 = t.get("72g_co_close_type_spr", E)
     if not co7.empty:
@@ -9189,9 +9263,15 @@ def run(path: Path, out_dir: Path, sample: bool = False,
         # A synthetic order-types file too, so the join and its charts run.
         rng = np.random.default_rng(SEED + 1)
         order_types = out_dir / "sample_order_types.csv"
-        pd.DataFrame({"OrderId": raw[AWS_JOIN_KEY],
-                      "OrderType": rng.choice(["Discretionary", "Stipulated"],
-                                              len(raw), p=[0.4, 0.6])}
+        sample_ot = rng.choice(["Discretionary", "Stipulated"], len(raw),
+                               p=[0.4, 0.6])
+        # Sub-type as build_order_types.py writes it: discretionary orders
+        # are Model; stipulated ones any of the three.
+        sample_sub = np.where(sample_ot == "Discretionary", "Model",
+                              rng.choice(["Model", "PctOfOrder", "CloseAuctionOnly"],
+                                         len(raw), p=[0.2, 0.45, 0.35]))
+        pd.DataFrame({"OrderId": raw[AWS_JOIN_KEY], "OrderType": sample_ot,
+                      "OrderSubType": sample_sub}
                      ).iloc[: int(len(raw) * 0.97)].to_csv(order_types, index=False)
         log("  EVERY NUMBER BELOW IS SYNTHETIC. Nothing here is client data.")
     else:
